@@ -71,6 +71,16 @@ pub trait Store {
 
     /// Ensures a relation exists in the store.
     fn create_relation(&mut self, relation: &str);
+
+    /// Removes a specific tuple from the relation's stable set.
+    /// Returns true if the tuple was found and removed.
+    fn retract(&mut self, relation: &str, tuple: &[Value]) -> Result<bool>;
+
+    /// Removes all tuples from a relation (stable, delta, and next_delta).
+    fn clear(&mut self, relation: &str);
+
+    /// Returns the names of all relations in the store.
+    fn relation_names(&self) -> Vec<String>;
 }
 
 /// Trait for the host environment that provides storage and data access (Server Mode).

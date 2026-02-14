@@ -79,6 +79,41 @@ impl MemStore {
         }
     }
 
+    /// Rebuilds stable and delta indexes for a single relation after mutation.
+    fn rebuild_indexes_for(&mut self, relation: &str) {
+        // Clear existing indexes for this relation
+        self.stable_indexes.retain(|(rel, _), _| rel != relation);
+        self.delta_indexes.retain(|(rel, _), _| rel != relation);
+
+        // Rebuild stable indexes
+        if let Some(table) = self.stable.get(relation) {
+            for (row_idx, tuple) in table.iter().enumerate() {
+                for (col_idx, val) in tuple.iter().enumerate() {
+                    self.stable_indexes
+                        .entry((relation.to_string(), col_idx))
+                        .or_default()
+                        .entry(val.clone())
+                        .or_default()
+                        .push(row_idx);
+                }
+            }
+        }
+
+        // Rebuild delta indexes
+        if let Some(table) = self.delta.get(relation) {
+            for (row_idx, tuple) in table.iter().enumerate() {
+                for (col_idx, val) in tuple.iter().enumerate() {
+                    self.delta_indexes
+                        .entry((relation.to_string(), col_idx))
+                        .or_default()
+                        .entry(val.clone())
+                        .or_default()
+                        .push(row_idx);
+                }
+            }
+        }
+    }
+
     pub fn get_facts(&self, relation: &str) -> Vec<Vec<Value>> {
         let mut all = self.stable.get(relation).cloned().unwrap_or_default();
         if let Some(d) = self.delta.get(relation) {
@@ -219,6 +254,55 @@ impl Store for MemStore {
     fn create_relation(&mut self, relation: &str) {
         self.stable.entry(relation.to_string()).or_default();
     }
+
+    fn retract(&mut self, relation: &str, tuple: &[Value]) -> Result<bool> {
+        let removed = if let Some(table) = self.stable.get_mut(relation) {
+            if let Some(pos) = table.iter().position(|t| t.as_slice() == tuple) {
+                table.swap_remove(pos);
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        // Also remove from delta and next_delta
+        if let Some(table) = self.delta.get_mut(relation) {
+            if let Some(pos) = table.iter().position(|t| t.as_slice() == tuple) {
+                table.swap_remove(pos);
+            }
+        }
+        if let Some(table) = self.next_delta.get_mut(relation) {
+            if let Some(pos) = table.iter().position(|t| t.as_slice() == tuple) {
+                table.swap_remove(pos);
+            }
+        }
+
+        if removed {
+            self.rebuild_indexes_for(relation);
+        }
+        Ok(removed)
+    }
+
+    fn clear(&mut self, relation: &str) {
+        if let Some(table) = self.stable.get_mut(relation) {
+            table.clear();
+        }
+        if let Some(table) = self.delta.get_mut(relation) {
+            table.clear();
+        }
+        if let Some(table) = self.next_delta.get_mut(relation) {
+            table.clear();
+        }
+        // Remove index entries for this relation
+        self.stable_indexes.retain(|(rel, _), _| rel != relation);
+        self.delta_indexes.retain(|(rel, _), _| rel != relation);
+    }
+
+    fn relation_names(&self) -> Vec<String> {
+        self.stable.keys().cloned().collect()
+    }
 }
 
 /// A pure Rust interpreter for Mangle IR.
@@ -252,6 +336,11 @@ impl<'a> Interpreter<'a> {
     /// Helper to get the underlying store mutably.
     pub fn store_mut(&mut self) -> &mut dyn Store {
         &mut *self.store
+    }
+
+    /// Consumes the interpreter and returns the underlying store.
+    pub fn into_store(self) -> Box<dyn Store + 'a> {
+        self.store
     }
 
     /// Executes the operation and returns the number of facts inserted.
@@ -578,7 +667,71 @@ impl<'a> Interpreter<'a> {
                 Constant::String(sid) => {
                     Ok(Value::String(self.ir.resolve_string(*sid).to_string()))
                 }
+                Constant::Name(nid) => {
+                    Ok(Value::String(self.ir.resolve_name(*nid).to_string()))
+                }
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_retract_existing() {
+        let mut store = MemStore::new();
+        store.add_fact("r", vec![Value::Number(1), Value::Number(2)]);
+        store.add_fact("r", vec![Value::Number(3), Value::Number(4)]);
+
+        let removed = store.retract("r", &[Value::Number(1), Value::Number(2)]).unwrap();
+        assert!(removed);
+
+        let facts = store.get_facts("r");
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0], vec![Value::Number(3), Value::Number(4)]);
+    }
+
+    #[test]
+    fn test_retract_nonexistent() {
+        let mut store = MemStore::new();
+        store.add_fact("r", vec![Value::Number(1)]);
+
+        let removed = store.retract("r", &[Value::Number(99)]).unwrap();
+        assert!(!removed);
+
+        let facts = store.get_facts("r");
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0], vec![Value::Number(1)]);
+    }
+
+    #[test]
+    fn test_clear() {
+        let mut store = MemStore::new();
+        store.add_fact("r", vec![Value::Number(1)]);
+        store.add_fact("r", vec![Value::Number(2)]);
+        store.add_fact("s", vec![Value::Number(10)]);
+
+        store.clear("r");
+
+        let r_facts = store.get_facts("r");
+        assert!(r_facts.is_empty());
+
+        // "s" should be untouched
+        let s_facts = store.get_facts("s");
+        assert_eq!(s_facts.len(), 1);
+    }
+
+    #[test]
+    fn test_relation_names() {
+        let mut store = MemStore::new();
+        store.create_relation("alpha");
+        store.create_relation("beta");
+        store.add_fact("gamma", vec![Value::Number(1)]);
+
+        let mut names = store.relation_names();
+        names.sort();
+        assert_eq!(names, vec!["alpha", "beta", "gamma"]);
     }
 }

@@ -498,6 +498,165 @@ mod tests {
     }
 
     #[test]
+    fn test_name_constants() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            role(/role/admin).
+            role(/role/user).
+            role(/role/application).
+        "#;
+
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("role")
+            .expect("relation role not found")
+            .collect();
+        assert_eq!(facts.len(), 3);
+
+        let mut names: Vec<String> = facts
+            .iter()
+            .map(|t| match &t[0] {
+                Value::String(s) => s.clone(),
+                _ => panic!("expected string"),
+            })
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["/role/admin", "/role/application", "/role/user"]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_inequality() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        // Note: name constants like /role/application cannot appear immediately
+        // before `.` because the scanner treats `.` as a name_char. Use string
+        // constants or ensure a `)` separates the name from the clause terminator.
+        let source = r#"
+            role("admin").
+            role("user").
+            role("application").
+            non_app_role(R) :- role(R), R != "application".
+        "#;
+
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("non_app_role")
+            .expect("relation non_app_role not found")
+            .collect();
+        assert_eq!(facts.len(), 2);
+
+        let mut names: Vec<String> = facts
+            .iter()
+            .map(|t| match &t[0] {
+                Value::String(s) => s.clone(),
+                _ => panic!("expected string"),
+            })
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["admin", "user"]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_negation() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            service("web").
+            service("api").
+            service("db").
+            has_dep("web").
+            has_dep("api").
+            no_dep(S) :- service(S), !has_dep(S).
+        "#;
+
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("no_dep")
+            .expect("relation no_dep not found")
+            .collect();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0][0], Value::String("db".to_string()));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_combined_name_ineq_negation() -> Result<()> {
+        // Mini devops-like program exercising all features together
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            container("noteworx", /status/running).
+            container("mangle-server", /status/running).
+            container("postgres", /status/stopped).
+            depends_on("noteworx", "postgres").
+            depends_on("mangle-server", "postgres").
+
+            running(Name) :- container(Name, /status/running).
+            stopped(Name) :- container(Name, /status/stopped).
+            has_running_dep(Name) :- depends_on(Name, Dep), running(Dep).
+            needs_attention(Name) :- depends_on(Name, Dep), stopped(Dep).
+            independent(Name) :- running(Name), !has_running_dep(Name).
+        "#;
+
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        // Check running containers
+        let running: Vec<_> = interpreter
+            .store()
+            .scan("running")
+            .expect("relation running not found")
+            .collect();
+        assert_eq!(running.len(), 2);
+
+        // Check stopped
+        let stopped: Vec<_> = interpreter
+            .store()
+            .scan("stopped")
+            .expect("relation stopped not found")
+            .collect();
+        assert_eq!(stopped.len(), 1);
+        assert_eq!(stopped[0][0], Value::String("postgres".to_string()));
+
+        // Both noteworx and mangle-server depend on postgres which is stopped
+        let needs_attention: Vec<_> = interpreter
+            .store()
+            .scan("needs_attention")
+            .expect("relation needs_attention not found")
+            .collect();
+        assert_eq!(needs_attention.len(), 2);
+
+        // postgres is not running so nobody has a running dep
+        // Both noteworx and mangle-server are running and have no running deps
+        let independent: Vec<_> = interpreter
+            .store()
+            .scan("independent")
+            .expect("relation independent not found")
+            .collect();
+        assert_eq!(independent.len(), 2);
+
+        Ok(())
+    }
+
+    #[test]
     fn test_compile_to_wasm() -> Result<()> {
         let arena = Arena::new_with_global_interner();
         let source = r#"

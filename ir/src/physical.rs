@@ -145,5 +145,5 @@ pub enum Operand {
 pub enum Constant {
     Number(i64),
     String(StringId),
-    // ...
+    Name(NameId),
 }

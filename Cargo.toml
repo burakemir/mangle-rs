@@ -13,7 +13,8 @@ members = [
     "vm",
     "driver",
     "interpreter",
-    "simplecolumn"
+    "simplecolumn",
+    "server"
 ]
 
 [workspace.package]

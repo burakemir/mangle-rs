@@ -718,7 +718,7 @@ impl<'a, B: Backend> Codegen<'a, B> {
                 Constant::Number(n) => {
                     func.instruction(&Instruction::I64Const(*n));
                 }
-                Constant::String(_) => {
+                Constant::String(_) | Constant::Name(_) => {
                     func.instruction(&Instruction::I64Const(0));
                 }
             },

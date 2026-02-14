@@ -32,6 +32,7 @@ where
     sc: scan::Scanner<R>,
     token: crate::token::Token,
     arena: &'arena Arena,
+    anon_counter: usize,
 }
 
 fn package_sym(arena: &Arena) -> ast::PredicateIndex {
@@ -120,6 +121,7 @@ where
             sc: scan::Scanner::new(reader, path),
             token: token::Token::Illegal,
             arena,
+            anon_counter: 0,
         }
     }
 
@@ -502,6 +504,11 @@ where
 
         let mut is_type = false;
         let mut base_term = match &self.token {
+            Token::Ident { name } if name == "_" => {
+                let unique = format!("_Anon{}", self.anon_counter);
+                self.anon_counter += 1;
+                ast::BaseTerm::Variable(self.arena.variable_sym(&unique))
+            }
             Token::Ident { name } if is_variable(name) => {
                 ast::BaseTerm::Variable(self.arena.variable_sym(name))
             }
@@ -1001,6 +1008,96 @@ mod test {
             _ => panic!("unexpected: {:?}", clause),
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_anonymous_variable_single() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let mut p = make_parser(&arena, "foo(_, X).");
+        let clause = p.parse_clause()?;
+        // The `_` should parse as a variable with a generated name `_Anon0`
+        match clause.head.args {
+            &[&ast::BaseTerm::Variable(anon), &ast::BaseTerm::Variable(x)] => {
+                assert_eq!(anon, arena.variable_sym("_Anon0"));
+                assert_eq!(x, arena.variable_sym("X"));
+            }
+            _ => panic!("unexpected args: {:?}", clause.head.args),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_anonymous_variable_multiple_distinct() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let mut p = make_parser(&arena, "foo(_, _, _).");
+        let clause = p.parse_clause()?;
+        // Each `_` should produce a distinct variable name
+        match clause.head.args {
+            &[
+                &ast::BaseTerm::Variable(a0),
+                &ast::BaseTerm::Variable(a1),
+                &ast::BaseTerm::Variable(a2),
+            ] => {
+                assert_eq!(a0, arena.variable_sym("_Anon0"));
+                assert_eq!(a1, arena.variable_sym("_Anon1"));
+                assert_eq!(a2, arena.variable_sym("_Anon2"));
+                // All three must be distinct
+                assert_ne!(a0, a1);
+                assert_ne!(a1, a2);
+            }
+            _ => panic!("unexpected args: {:?}", clause.head.args),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_anonymous_variable_in_rule_body() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let mut p = make_parser(&arena, "result(X) :- foo(X, _).");
+        let clause = p.parse_clause()?;
+        assert_eq!(clause.head.sym, arena.predicate_sym("result", None));
+        match clause.premises {
+            &[&ast::Term::Atom(&ast::Atom { args, .. })] => {
+                match args {
+                    &[&ast::BaseTerm::Variable(x), &ast::BaseTerm::Variable(anon)] => {
+                        assert_eq!(x, arena.variable_sym("X"));
+                        assert_eq!(anon, arena.variable_sym("_Anon0"));
+                    }
+                    _ => panic!("unexpected args: {:?}", args),
+                }
+            }
+            _ => panic!("unexpected premises: {:?}", clause.premises),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_anonymous_variable_with_negation() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let mut p = make_parser(&arena, "orphan(X) :- node(X, _), !has_parent(X).");
+        let clause = p.parse_clause()?;
+        assert_eq!(clause.head.sym, arena.predicate_sym("orphan", None));
+        assert_eq!(clause.premises.len(), 2);
+        // First premise: node(X, _)
+        match clause.premises[0] {
+            &ast::Term::Atom(&ast::Atom { args, .. }) => {
+                match args {
+                    &[&ast::BaseTerm::Variable(_), &ast::BaseTerm::Variable(anon)] => {
+                        assert_eq!(anon, arena.variable_sym("_Anon0"));
+                    }
+                    _ => panic!("unexpected args: {:?}", args),
+                }
+            }
+            _ => panic!("expected Atom, got {:?}", clause.premises[0]),
+        }
+        // Second premise: !has_parent(X)
+        match clause.premises[1] {
+            &ast::Term::NegAtom(&ast::Atom { sym, .. }) => {
+                assert_eq!(sym, arena.predicate_sym("has_parent", None));
+            }
+            _ => panic!("expected NegAtom, got {:?}", clause.premises[1]),
+        }
         Ok(())
     }
 }

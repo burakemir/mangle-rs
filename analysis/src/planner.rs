@@ -284,6 +284,12 @@ impl<'a> Planner<'a> {
                                     Some((i, Operand::Const(physical::Constant::String(s))));
                             }
                         }
+                        Inst::Name(n) => {
+                            if index_lookup.is_none() {
+                                index_lookup =
+                                    Some((i, Operand::Const(physical::Constant::Name(n))));
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -335,7 +341,54 @@ impl<'a> Planner<'a> {
                 let body = self.plan_join_sequence(premises, bound_vars, continuation)?;
                 self.wrap_eq_check(l, r, body)
             }
-            _ => Err(anyhow!("Unsupported premise type")),
+            Inst::Ineq(l, r) => {
+                let body = self.plan_join_sequence(premises, bound_vars, continuation)?;
+                self.with_eval(l, |this, left_op| {
+                    this.with_eval(r, |_this, right_op| {
+                        Ok(Op::Filter {
+                            cond: Condition::Cmp {
+                                op: CmpOp::Neq,
+                                left: left_op.clone(),
+                                right: right_op,
+                            },
+                            body: Box::new(body),
+                        })
+                    })
+                })
+            }
+            Inst::NegAtom(inner) => {
+                let inner_inst = self.ir.get(inner).clone();
+                if let Inst::Atom { predicate, args } = inner_inst {
+                    let body = self.plan_join_sequence(premises, bound_vars, continuation)?;
+                    let mut neg_args = Vec::new();
+                    for arg in &args {
+                        let arg_inst = self.ir.get(*arg).clone();
+                        match arg_inst {
+                            Inst::Var(v) => neg_args.push(Operand::Var(v)),
+                            Inst::Number(n) => {
+                                neg_args.push(Operand::Const(physical::Constant::Number(n)))
+                            }
+                            Inst::String(s) => {
+                                neg_args.push(Operand::Const(physical::Constant::String(s)))
+                            }
+                            Inst::Name(n) => {
+                                neg_args.push(Operand::Const(physical::Constant::Name(n)))
+                            }
+                            _ => return Err(anyhow!("Complex expression in negated atom")),
+                        }
+                    }
+                    Ok(Op::Filter {
+                        cond: Condition::Negation {
+                            relation: predicate,
+                            args: neg_args,
+                        },
+                        body: Box::new(body),
+                    })
+                } else {
+                    Err(anyhow!("NegAtom wraps non-atom"))
+                }
+            }
+            _ => Err(anyhow!("Unsupported premise type: {:?}", inst)),
         }
     }
 
@@ -407,6 +460,7 @@ impl<'a> Planner<'a> {
             Inst::Var(v) => f(self, Operand::Var(v)),
             Inst::String(s) => f(self, Operand::Const(physical::Constant::String(s))),
             Inst::Number(n) => f(self, Operand::Const(physical::Constant::Number(n))),
+            Inst::Name(n) => f(self, Operand::Const(physical::Constant::Name(n))),
             Inst::ApplyFn { function, args } => self.with_eval_args(
                 &args,
                 0,
