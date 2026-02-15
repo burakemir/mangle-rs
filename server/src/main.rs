@@ -166,5 +166,20 @@ async fn main() {
         eprintln!("  idb-cache-dir: {}", dir.display());
     }
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .unwrap();
+}
+
+async fn shutdown_signal() {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    let mut sigterm = signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+    let mut sigint = signal(SignalKind::interrupt()).expect("failed to install SIGINT handler");
+
+    tokio::select! {
+        _ = sigterm.recv() => eprintln!("received SIGTERM, shutting down"),
+        _ = sigint.recv() => eprintln!("received SIGINT, shutting down"),
+    }
 }
