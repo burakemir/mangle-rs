@@ -20,6 +20,7 @@ use mangle_ir::{Inst, InstId, Ir, NameId};
 pub struct Planner<'a> {
     ir: &'a mut Ir,
     delta_pred: Option<NameId>,
+    fresh_counter: usize,
 }
 
 impl<'a> Planner<'a> {
@@ -27,6 +28,7 @@ impl<'a> Planner<'a> {
         Self {
             ir,
             delta_pred: None,
+            fresh_counter: 0,
         }
     }
 
@@ -236,7 +238,9 @@ impl<'a> Planner<'a> {
     }
 
     fn fresh_var(&mut self, prefix: &str) -> NameId {
-        let name = format!("${}_{}", prefix, self.ir.insts.len());
+        let id = self.fresh_counter;
+        self.fresh_counter += 1;
+        let name = format!("${}_{}", prefix, id);
         self.ir.intern_name(name)
     }
 

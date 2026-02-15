@@ -1,5 +1,5 @@
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use mangle_factstore::Value;
@@ -42,6 +42,13 @@ pub struct ProgramResponse {
 }
 
 #[derive(Serialize)]
+pub struct ProgramDetailResponse {
+    pub name: String,
+    pub source: String,
+    pub predicates: Vec<String>,
+}
+
+#[derive(Serialize)]
 pub struct ProgramsListResponse {
     pub programs: Vec<ProgramResponse>,
 }
@@ -49,6 +56,11 @@ pub struct ProgramsListResponse {
 #[derive(Serialize)]
 pub struct ErrorResponse {
     pub error: String,
+}
+
+#[derive(Serialize)]
+pub struct MessageResponse {
+    pub message: String,
 }
 
 // --- Value → JSON conversion ---
@@ -142,6 +154,113 @@ pub async fn eval_handler(Json(req): Json<EvalRequest>) -> impl IntoResponse {
                 results: tuples_to_json(tuples),
             })),
         ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!(ErrorResponse {
+                error: e.to_string(),
+            })),
+        ),
+    }
+}
+
+// --- Admin handlers ---
+
+/// GET /programs/{name} — get program details (source + predicates).
+pub async fn get_program_handler(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let store = state.read().unwrap();
+    match store.get(&name) {
+        Some(prog) => (
+            StatusCode::OK,
+            Json(serde_json::json!(ProgramDetailResponse {
+                name: name.clone(),
+                source: prog.source.clone(),
+                predicates: prog.predicates.clone(),
+            })),
+        ),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!(ErrorResponse {
+                error: format!("program '{}' not found", name),
+            })),
+        ),
+    }
+}
+
+/// DELETE /programs/{name} — remove a program from memory.
+pub async fn delete_program_handler(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let mut store = state.write().unwrap();
+    if store.remove(&name) {
+        (
+            StatusCode::OK,
+            Json(serde_json::json!(MessageResponse {
+                message: format!("program '{}' removed", name),
+            })),
+        )
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!(ErrorResponse {
+                error: format!("program '{}' not found", name),
+            })),
+        )
+    }
+}
+
+/// POST /programs/{name}/reload — reload a program from disk.
+pub async fn reload_program_handler(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let mut store = state.write().unwrap();
+    match store.reload(&name) {
+        Ok(info) => (
+            StatusCode::OK,
+            Json(serde_json::json!(ProgramResponse {
+                name: info.name,
+                predicates: info.predicates,
+            })),
+        ),
+        Err(e) => {
+            let status = if e.to_string().contains("not found")
+                || e.to_string().contains("cannot read")
+            {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            (
+                status,
+                Json(serde_json::json!(ErrorResponse {
+                    error: e.to_string(),
+                })),
+            )
+        }
+    }
+}
+
+/// POST /admin/reload-all — reload all programs from programs_dir.
+pub async fn reload_all_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let mut store = state.write().unwrap();
+    match store.reload_all() {
+        Ok(loaded) => {
+            let programs: Vec<ProgramResponse> = loaded
+                .into_iter()
+                .map(|p| ProgramResponse {
+                    name: p.name,
+                    predicates: p.predicates,
+                })
+                .collect();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!(ProgramsListResponse { programs })),
+            )
+        }
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!(ErrorResponse {

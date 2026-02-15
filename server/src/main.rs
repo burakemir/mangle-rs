@@ -4,7 +4,10 @@ mod store;
 
 use axum::Router;
 use axum::routing::{get, post};
-use handlers::{AppState, eval_handler, list_programs_handler, load_program_handler, query_handler};
+use handlers::{
+    AppState, delete_program_handler, eval_handler, get_program_handler, list_programs_handler,
+    load_program_handler, query_handler, reload_all_handler, reload_program_handler,
+};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -44,7 +47,10 @@ fn parse_args() -> (u16, Option<PathBuf>) {
 async fn main() {
     let (port, programs_dir) = parse_args();
 
-    let program_store = ProgramStore::new();
+    let mut program_store = ProgramStore::new();
+    if let Some(ref dir) = programs_dir {
+        program_store = program_store.with_programs_dir(dir.clone());
+    }
     let state: AppState = Arc::new(RwLock::new(program_store));
 
     // Load .mg files from programs directory if specified
@@ -85,7 +91,16 @@ async fn main() {
 
     let app = Router::new()
         .route("/query", post(query_handler))
-        .route("/programs", get(list_programs_handler).post(load_program_handler))
+        .route(
+            "/programs",
+            get(list_programs_handler).post(load_program_handler),
+        )
+        .route(
+            "/programs/{name}",
+            get(get_program_handler).delete(delete_program_handler),
+        )
+        .route("/programs/{name}/reload", post(reload_program_handler))
+        .route("/admin/reload-all", post(reload_all_handler))
         .route("/eval", post(eval_handler))
         .with_state(state);
 

@@ -657,6 +657,61 @@ mod tests {
     }
 
     #[test]
+    fn test_join_with_constants_in_second_atom() -> Result<()> {
+        // Regression: fresh_var used ir.insts.len() as counter, producing
+        // duplicate NameIds for scan variables. This caused the second body
+        // atom's columns to overwrite each other during IndexLookup execution.
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            p("a", "x").
+            q("a", "y").
+            test(E) :- p(E, "x"), q(E, "y").
+        "#;
+
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("test")
+            .expect("relation test not found")
+            .collect();
+
+        assert_eq!(facts.len(), 1, "expected 1 result, got {:?}", facts);
+        assert_eq!(facts[0][0], Value::String("a".to_string()));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_join_constant_only_in_second_atom() -> Result<()> {
+        // Simpler variant: constant only in second atom
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            p("a", "x").
+            q("a", "y").
+            test(E, V) :- p(E, V), q(E, "y").
+        "#;
+
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("test")
+            .expect("relation test not found")
+            .collect();
+
+        assert_eq!(facts.len(), 1, "expected 1 result, got {:?}", facts);
+        assert_eq!(facts[0][0], Value::String("a".to_string()));
+        assert_eq!(facts[0][1], Value::String("x".to_string()));
+
+        Ok(())
+    }
+
+    #[test]
     fn test_compile_to_wasm() -> Result<()> {
         let arena = Arena::new_with_global_interner();
         let source = r#"
