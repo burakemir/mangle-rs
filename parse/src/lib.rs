@@ -422,7 +422,7 @@ where
     }
 
     // atom ::= name `(` args `)`
-    fn parse_atom(&mut self) -> Result<&'arena ast::Atom<'arena>> {
+    pub fn parse_atom(&mut self) -> Result<&'arena ast::Atom<'arena>> {
         let name = match &self.token {
             Token::Ident { name } => name.as_str(),
             _ => bail!("parse_atom: expected identifer got {}", self.token),

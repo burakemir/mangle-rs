@@ -13,6 +13,7 @@ mangle-driver.workspace = true
 mangle-interpreter.workspace = true
 mangle-factstore = { workspace = true, features = ["edge"] }
 mangle-ast.workspace = true
+mangle-parse.workspace = true
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }

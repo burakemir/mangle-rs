@@ -1006,6 +1006,7 @@ dependencies = [
  "mangle-driver",
  "mangle-factstore",
  "mangle-interpreter",
+ "mangle-parse",
  "serde",
  "serde_json",
  "tokio",

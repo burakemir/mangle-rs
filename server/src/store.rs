@@ -4,7 +4,7 @@ use mangle_factstore::Value;
 use mangle_interpreter::MemStore;
 use std::collections::HashMap;
 
-use crate::query::extract_predicate;
+use crate::query::{ParsedQuery, filter_tuples, parse_query};
 
 /// Metadata about a loaded program (stored without compiled form).
 pub struct StoredProgram {
@@ -22,6 +22,23 @@ pub struct ProgramStore {
 pub struct ProgramInfo {
     pub name: String,
     pub predicates: Vec<String>,
+}
+
+/// Parse a query string, falling back to simple predicate extraction.
+fn parse_query_lenient(query: &str) -> Result<ParsedQuery> {
+    parse_query(query).or_else(|_| {
+        let trimmed = query.trim();
+        let paren = trimmed.find('(')
+            .ok_or_else(|| anyhow!("invalid query: cannot extract predicate from '{}'", query))?;
+        let name = trimmed[..paren].trim();
+        if name.is_empty() {
+            return Err(anyhow!("invalid query: empty predicate name"));
+        }
+        Ok(ParsedQuery {
+            predicate: name.to_string(),
+            args: vec![],
+        })
+    })
 }
 
 impl ProgramStore {
@@ -78,6 +95,7 @@ impl ProgramStore {
     }
 
     /// Recompile from stored source, execute, and scan the queried relation.
+    /// Parses query arguments and filters results to match constant positions.
     pub fn execute_query(
         &self,
         name: &str,
@@ -88,16 +106,15 @@ impl ProgramStore {
             .get(name)
             .ok_or_else(|| anyhow!("program '{}' not found", name))?;
 
-        let predicate = extract_predicate(query)
-            .ok_or_else(|| anyhow!("invalid query: cannot extract predicate from '{}'", query))?;
+        let parsed = parse_query_lenient(query)?;
 
         let arena = Arena::new_with_global_interner();
         let (mut ir, stratified) = mangle_driver::compile(&prog.source, &arena)?;
         let store = Box::new(MemStore::new());
         let interpreter = mangle_driver::execute(&mut ir, &stratified, store)?;
 
-        let tuples: Vec<Vec<Value>> = interpreter.store().scan(predicate)?.collect();
-        Ok(tuples)
+        let tuples: Vec<Vec<Value>> = interpreter.store().scan(&parsed.predicate)?.collect();
+        Ok(filter_tuples(tuples, &parsed))
     }
 }
 
@@ -108,14 +125,11 @@ pub fn eval_source(source: &str, query: Option<&str>) -> Result<Vec<Vec<Value>>>
     let store = Box::new(MemStore::new());
     let interpreter = mangle_driver::execute(&mut ir, &stratified, store)?;
 
-    // If a query is provided, extract predicate and scan that relation
     if let Some(q) = query {
-        let predicate = extract_predicate(q)
-            .ok_or_else(|| anyhow!("invalid query: cannot extract predicate from '{}'", q))?;
-        let tuples: Vec<Vec<Value>> = interpreter.store().scan(predicate)?.collect();
-        Ok(tuples)
+        let parsed = parse_query_lenient(q)?;
+        let tuples: Vec<Vec<Value>> = interpreter.store().scan(&parsed.predicate)?.collect();
+        Ok(filter_tuples(tuples, &parsed))
     } else {
-        // Return all facts from all relations
         let mut all = Vec::new();
         for name in interpreter.store().relation_names() {
             let tuples: Vec<Vec<Value>> = interpreter.store().scan(&name)?.collect();
