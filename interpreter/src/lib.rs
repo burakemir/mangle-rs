@@ -305,10 +305,33 @@ impl Store for MemStore {
     }
 }
 
+/// A record of one derivation: which fact was derived and which premises were used.
+#[derive(Debug, Clone)]
+pub struct ProvenanceEntry {
+    /// The derived fact: (relation_name, tuple).
+    pub derived: (String, Vec<Value>),
+    /// The premise facts that contributed: (relation_name, tuple) for each.
+    pub premises: Vec<(String, Vec<Value>)>,
+}
+
+/// Lightweight recorder that captures derivation provenance during execution.
+///
+/// When enabled on the interpreter, every successful `Op::Insert` records
+/// which premise facts (from enclosing `Op::Iterate` scans) contributed to
+/// the derivation. When disabled (the default), there is zero overhead.
+#[derive(Default)]
+pub struct ProvenanceRecorder {
+    /// All recorded derivations.
+    pub entries: Vec<ProvenanceEntry>,
+    /// Stack of currently-active scan sources (pushed on Iterate, popped after).
+    active_premises: Vec<(String, Vec<Value>)>,
+}
+
 /// A pure Rust interpreter for Mangle IR.
 pub struct Interpreter<'a> {
     ir: &'a Ir,
     store: Box<dyn Store + 'a>,
+    provenance: Option<ProvenanceRecorder>,
 }
 
 struct Env {
@@ -325,7 +348,18 @@ impl Env {
 
 impl<'a> Interpreter<'a> {
     pub fn new(ir: &'a Ir, store: Box<dyn Store + 'a>) -> Self {
-        Self { ir, store }
+        Self {
+            ir,
+            store,
+            provenance: None,
+        }
+    }
+
+    /// Enable provenance recording. When set, every successful insert
+    /// records which premise facts were in the current environment.
+    pub fn with_provenance(mut self) -> Self {
+        self.provenance = Some(ProvenanceRecorder::default());
+        self
     }
 
     /// Helper to get the underlying store (e.g. to inspect results).
@@ -341,6 +375,16 @@ impl<'a> Interpreter<'a> {
     /// Consumes the interpreter and returns the underlying store.
     pub fn into_store(self) -> Box<dyn Store + 'a> {
         self.store
+    }
+
+    /// Consume the interpreter, returning the provenance recorder if enabled.
+    pub fn into_provenance(self) -> Option<ProvenanceRecorder> {
+        self.provenance
+    }
+
+    /// Consume the interpreter, returning the store and optional provenance.
+    pub fn into_parts(self) -> (Box<dyn Store + 'a>, Option<ProvenanceRecorder>) {
+        (self.store, self.provenance)
     }
 
     /// Executes the operation and returns the number of facts inserted.
@@ -374,7 +418,14 @@ impl<'a> Interpreter<'a> {
                             for (i, var) in vars.iter().enumerate() {
                                 env.vars.insert(*var, tuple[i].clone());
                             }
+                            if let Some(ref mut prov) = self.provenance {
+                                prov.active_premises
+                                    .push((rel_name.to_string(), tuple.clone()));
+                            }
                             count += self.exec_op(body, env)?;
+                            if self.provenance.is_some() {
+                                self.provenance.as_mut().unwrap().active_premises.pop();
+                            }
                         }
                     }
                     DataSource::ScanDelta { relation, vars } => {
@@ -389,7 +440,14 @@ impl<'a> Interpreter<'a> {
                             for (i, var) in vars.iter().enumerate() {
                                 env.vars.insert(*var, tuple[i].clone());
                             }
+                            if let Some(ref mut prov) = self.provenance {
+                                prov.active_premises
+                                    .push((rel_name.to_string(), tuple.clone()));
+                            }
                             count += self.exec_op(body, env)?;
+                            if self.provenance.is_some() {
+                                self.provenance.as_mut().unwrap().active_premises.pop();
+                            }
                         }
                     }
                     DataSource::IndexLookup {
@@ -411,7 +469,14 @@ impl<'a> Interpreter<'a> {
                             for (i, var) in vars.iter().enumerate() {
                                 env.vars.insert(*var, tuple[i].clone());
                             }
+                            if let Some(ref mut prov) = self.provenance {
+                                prov.active_premises
+                                    .push((rel_name.to_string(), tuple.clone()));
+                            }
                             count += self.exec_op(body, env)?;
+                            if self.provenance.is_some() {
+                                self.provenance.as_mut().unwrap().active_premises.pop();
+                            }
                         }
                     }
                 }
@@ -430,7 +495,14 @@ impl<'a> Interpreter<'a> {
                 for arg in args {
                     tuple.push(self.eval_operand(arg, env)?);
                 }
-                if self.store.insert(rel_name, tuple)? {
+                let is_new = self.store.insert(rel_name, tuple.clone())?;
+                if is_new {
+                    if let Some(ref mut prov) = self.provenance {
+                        prov.entries.push(ProvenanceEntry {
+                            derived: (rel_name.to_string(), tuple),
+                            premises: prov.active_premises.clone(),
+                        });
+                    }
                     Ok(1)
                 } else {
                     Ok(0)
@@ -733,5 +805,62 @@ mod tests {
         let mut names = store.relation_names();
         names.sort();
         assert_eq!(names, vec!["alpha", "beta", "gamma"]);
+    }
+
+    #[test]
+    fn test_provenance_recording() {
+        use mangle_ir::physical::{DataSource, Operand};
+
+        // Build a minimal IR manually to test provenance
+        let mut ir = mangle_ir::Ir::new();
+        let base_name = ir.intern_name("base");
+        let derived_name = ir.intern_name("derived");
+        let var_x = ir.intern_name("X");
+
+        // Create an Op: Iterate(Scan("base", [X]), Insert("derived", [X]))
+        let op = Op::Iterate {
+            source: DataSource::Scan {
+                relation: base_name,
+                vars: vec![var_x],
+            },
+            body: Box::new(Op::Insert {
+                relation: derived_name,
+                args: vec![Operand::Var(var_x)],
+            }),
+        };
+
+        let mut store = Box::new(MemStore::new());
+        store.add_fact("base", vec![Value::Number(10)]);
+        store.add_fact("base", vec![Value::Number(20)]);
+        store.create_relation("derived");
+
+        let mut interpreter =
+            Interpreter::new(&ir, store as Box<dyn Store>).with_provenance();
+
+        let count = interpreter.execute(&op).unwrap();
+        assert_eq!(count, 2);
+
+        // Check provenance was recorded
+        let prov = interpreter.provenance.as_ref().unwrap();
+        assert_eq!(prov.entries.len(), 2);
+
+        // Each derived fact should have one premise (from "base")
+        for entry in &prov.entries {
+            assert_eq!(entry.derived.0, "derived");
+            assert_eq!(entry.premises.len(), 1);
+            assert_eq!(entry.premises[0].0, "base");
+        }
+
+        // Check the actual derived facts
+        let mut derived_vals: Vec<i64> = prov
+            .entries
+            .iter()
+            .map(|e| match &e.derived.1[0] {
+                Value::Number(n) => *n,
+                _ => panic!("expected number"),
+            })
+            .collect();
+        derived_vals.sort();
+        assert_eq!(derived_vals, vec![10, 20]);
     }
 }

@@ -33,6 +33,17 @@ pub enum Value {
     Null, // Used for iteration end or missing
 }
 
+#[cfg(feature = "edge")]
+impl std::fmt::Display for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Value::Number(n) => write!(f, "{n}"),
+            Value::String(s) => write!(f, "{s:?}"),
+            Value::Null => write!(f, "null"),
+        }
+    }
+}
+
 /// Abstract interface for relation storage (Edge Mode).
 #[cfg(feature = "edge")]
 pub trait Store {

@@ -8,6 +8,33 @@ use std::sync::{Arc, RwLock};
 
 use crate::store::{ProgramStore, eval_source};
 
+// --- Insert / Retract request types ---
+
+#[derive(Deserialize)]
+pub struct InsertRequest {
+    pub relation: String,
+    pub tuple: Vec<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+pub struct RetractRequest {
+    pub relation: String,
+    pub tuple: Vec<serde_json::Value>,
+}
+
+fn json_to_values(arr: &[serde_json::Value]) -> Vec<Value> {
+    arr.iter()
+        .map(|v| match v {
+            serde_json::Value::Number(n) => {
+                Value::Number(n.as_i64().unwrap_or(0))
+            }
+            serde_json::Value::String(s) => Value::String(s.clone()),
+            serde_json::Value::Null => Value::Null,
+            _ => Value::String(v.to_string()),
+        })
+        .collect()
+}
+
 pub type AppState = Arc<RwLock<ProgramStore>>;
 
 // --- Request / Response types ---
@@ -267,5 +294,65 @@ pub async fn reload_all_handler(State(state): State<AppState>) -> impl IntoRespo
                 error: e.to_string(),
             })),
         ),
+    }
+}
+
+/// POST /programs/{name}/insert — insert a fact into a program's database.
+pub async fn insert_handler(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(req): Json<InsertRequest>,
+) -> impl IntoResponse {
+    let store = state.read().unwrap();
+    let tuple = json_to_values(&req.tuple);
+    match store.insert_fact(&name, &req.relation, tuple) {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!(MessageResponse {
+                message: format!("inserted into {}.{}", name, req.relation),
+            })),
+        ),
+        Err(e) => {
+            let msg = e.to_string();
+            let status = if msg.contains("not found") {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            (
+                status,
+                Json(serde_json::json!(ErrorResponse { error: msg })),
+            )
+        }
+    }
+}
+
+/// POST /programs/{name}/retract — retract a fact from a program's database.
+pub async fn retract_handler(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(req): Json<RetractRequest>,
+) -> impl IntoResponse {
+    let store = state.read().unwrap();
+    let tuple = json_to_values(&req.tuple);
+    match store.retract_fact(&name, &req.relation, &tuple) {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!(MessageResponse {
+                message: format!("retracted from {}.{}", name, req.relation),
+            })),
+        ),
+        Err(e) => {
+            let msg = e.to_string();
+            let status = if msg.contains("not found") {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            (
+                status,
+                Json(serde_json::json!(ErrorResponse { error: msg })),
+            )
+        }
     }
 }

@@ -1,22 +1,30 @@
 use anyhow::{Result, anyhow};
 use mangle_ast::Arena;
+use mangle_db::{
+    Database, DatabaseConfig, FileEdbSource, FileIdbBackend, IdbMode, RecomputeStrategy,
+    StoreBackend,
+};
 use mangle_factstore::Value;
 use mangle_interpreter::MemStore;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::query::{ParsedQuery, filter_tuples, parse_query};
 
-/// Metadata about a loaded program (stored without compiled form).
+/// Metadata about a loaded program.
 pub struct StoredProgram {
     pub source: String,
     pub predicates: Vec<String>,
+    pub db: Database,
 }
 
 /// In-memory registry of named Mangle programs.
 pub struct ProgramStore {
     programs: HashMap<String, StoredProgram>,
     programs_dir: Option<PathBuf>,
+    edb_dir: Option<PathBuf>,
+    idb_cache_dir: Option<PathBuf>,
 }
 
 /// Info returned when listing programs.
@@ -48,6 +56,8 @@ impl ProgramStore {
         Self {
             programs: HashMap::new(),
             programs_dir: None,
+            edb_dir: None,
+            idb_cache_dir: None,
         }
     }
 
@@ -56,25 +66,54 @@ impl ProgramStore {
         self
     }
 
+    pub fn with_edb_dir(mut self, dir: PathBuf) -> Self {
+        self.edb_dir = Some(dir);
+        self
+    }
+
+    pub fn with_idb_cache_dir(mut self, dir: PathBuf) -> Self {
+        self.idb_cache_dir = Some(dir);
+        self
+    }
+
     pub fn programs_dir(&self) -> Option<&PathBuf> {
         self.programs_dir.as_ref()
     }
 
-    /// Compile source to extract predicate names, then store source + names.
-    /// The compiled form is discarded (avoids lifetime issues with Arena-borrowing types).
-    pub fn load(&mut self, name: &str, source: &str) -> Result<ProgramInfo> {
-        let arena = Arena::new_with_global_interner();
-        let (_ir, stratified) = mangle_driver::compile(source, &arena)?;
+    /// Build a DatabaseConfig for the given program name and source.
+    fn make_db_config(&self, name: &str, source: &str) -> DatabaseConfig {
+        let mut edb_sources: Vec<Arc<dyn mangle_db::EdbSource>> = vec![];
 
-        // Collect IDB predicate names from strata
-        let mut predicates = Vec::new();
-        for stratum in stratified.strata() {
-            for pred in &stratum {
-                if let Some(pred_name) = arena.predicate_name(*pred) {
-                    predicates.push(pred_name.to_string());
-                }
+        // If edb_dir is configured and a per-program subdirectory exists, attach it
+        if let Some(ref edb_dir) = self.edb_dir {
+            let program_edb_dir = edb_dir.join(name);
+            if program_edb_dir.is_dir() {
+                edb_sources.push(Arc::new(FileEdbSource::new(name, program_edb_dir)));
             }
         }
+
+        let idb_mode = if let Some(ref cache_dir) = self.idb_cache_dir {
+            IdbMode::Cached(Arc::new(FileIdbBackend::new(cache_dir)))
+        } else {
+            IdbMode::InMemory
+        };
+
+        DatabaseConfig {
+            name: name.to_string(),
+            source: source.to_string(),
+            edb_sources,
+            idb_mode,
+            recompute: RecomputeStrategy::Full,
+            store_backend: StoreBackend::InMemory,
+        }
+    }
+
+    /// Compile source, execute, and store the resulting Database.
+    pub fn load(&mut self, name: &str, source: &str) -> Result<ProgramInfo> {
+        let config = self.make_db_config(name, source);
+        let db = Database::open(config)?;
+
+        let predicates = db.relation_names()?;
 
         let info = ProgramInfo {
             name: name.to_string(),
@@ -86,6 +125,7 @@ impl ProgramStore {
             StoredProgram {
                 source: source.to_string(),
                 predicates,
+                db,
             },
         );
 
@@ -147,11 +187,7 @@ impl ProgramStore {
         Ok(loaded)
     }
 
-    // TODO: Persistence: add Postgres-backed storage (mangle-server already
-    // shares the Postgres instance via the backend network)
-
-    /// Recompile from stored source, execute, and scan the queried relation.
-    /// Parses query arguments and filters results to match constant positions.
+    /// Query a loaded program's database — fast scan + filter.
     pub fn execute_query(
         &self,
         name: &str,
@@ -163,14 +199,26 @@ impl ProgramStore {
             .ok_or_else(|| anyhow!("program '{}' not found", name))?;
 
         let parsed = parse_query_lenient(query)?;
-
-        let arena = Arena::new_with_global_interner();
-        let (mut ir, stratified) = mangle_driver::compile(&prog.source, &arena)?;
-        let store = Box::new(MemStore::new());
-        let interpreter = mangle_driver::execute(&mut ir, &stratified, store)?;
-
-        let tuples: Vec<Vec<Value>> = interpreter.store().scan(&parsed.predicate)?.collect();
+        let tuples = prog.db.query(&parsed.predicate)?;
         Ok(filter_tuples(tuples, &parsed))
+    }
+
+    /// Insert a fact into a program's database.
+    pub fn insert_fact(&self, name: &str, relation: &str, tuple: Vec<Value>) -> Result<()> {
+        let prog = self
+            .programs
+            .get(name)
+            .ok_or_else(|| anyhow!("program '{}' not found", name))?;
+        prog.db.insert(relation, tuple)
+    }
+
+    /// Retract a fact from a program's database.
+    pub fn retract_fact(&self, name: &str, relation: &str, tuple: &[Value]) -> Result<()> {
+        let prog = self
+            .programs
+            .get(name)
+            .ok_or_else(|| anyhow!("program '{}' not found", name))?;
+        prog.db.retract(relation, tuple)
     }
 }
 
@@ -272,5 +320,76 @@ mod tests {
         // Specific route
         let specific = store.execute_query("routes", r#"route("POST", "/api", H)"#).unwrap();
         assert_eq!(specific.len(), 1);
+    }
+
+    #[test]
+    fn test_insert_and_query() {
+        let mut store = ProgramStore::new();
+        let source = r#"q(X) :- p(X)."#;
+        store.load("test", source).unwrap();
+
+        // Initially empty
+        let results = store.execute_query("test", "q(X)").unwrap();
+        assert!(results.is_empty());
+
+        // Insert into EDB relation p
+        store.insert_fact("test", "p", vec![Value::Number(42)]).unwrap();
+
+        // q should now contain 42
+        let results = store.execute_query("test", "q(X)").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0], vec![Value::Number(42)]);
+    }
+
+    #[test]
+    fn test_retract_and_query() {
+        let mut store = ProgramStore::new();
+        let source = r#"
+            q(X) :- p(X).
+        "#;
+        store.load("test", source).unwrap();
+
+        store.insert_fact("test", "p", vec![Value::Number(1)]).unwrap();
+        store.insert_fact("test", "p", vec![Value::Number(2)]).unwrap();
+
+        let results = store.execute_query("test", "q(X)").unwrap();
+        assert_eq!(results.len(), 2);
+
+        store.retract_fact("test", "p", &[Value::Number(1)]).unwrap();
+
+        let results = store.execute_query("test", "q(X)").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0], vec![Value::Number(2)]);
+    }
+
+    #[test]
+    fn test_with_edb_dir() {
+        let programs_dir = tempfile::tempdir().unwrap();
+        let edb_dir = tempfile::tempdir().unwrap();
+
+        // Create program source
+        std::fs::write(
+            programs_dir.path().join("routes.mg"),
+            r#"reachable(X, Y) :- edge(X, Y).
+               reachable(X, Z) :- reachable(X, Y), edge(Y, Z)."#,
+        ).unwrap();
+
+        // Create EDB subdirectory with a .mg file
+        let routes_edb = edb_dir.path().join("routes");
+        std::fs::create_dir(&routes_edb).unwrap();
+        std::fs::write(
+            routes_edb.join("data.mg"),
+            "edge(1, 2).\nedge(2, 3).\n",
+        ).unwrap();
+
+        let mut store = ProgramStore::new()
+            .with_programs_dir(programs_dir.path().to_path_buf())
+            .with_edb_dir(edb_dir.path().to_path_buf());
+
+        let info = store.reload("routes").unwrap();
+        assert_eq!(info.name, "routes");
+
+        let results = store.execute_query("routes", "reachable(X, Y)").unwrap();
+        assert_eq!(results.len(), 3); // (1,2), (2,3), (1,3)
     }
 }
