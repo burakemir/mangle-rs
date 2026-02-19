@@ -54,7 +54,7 @@ The Mangle compiler pipeline transforms declarative Datalog rules into efficient
 *   `mangle_codegen`: WASM compilation backend.
 *   `mangle_vm`: Runtime environment for executing compiled WASM.
 *   `mangle_interpreter`: Pure Rust interpreter for Mangle IR.
-*   `mangle_factstore`: (Legacy/Alternative) In-memory fact storage.
+*   `mangle_common`: Common types and traits (Value, Store, Host, FactStore).
 *   `mangle_engine`: (Legacy) Interpreter-based engine.
 
 ## Usage

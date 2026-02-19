@@ -908,7 +908,7 @@ dependencies = [
  "fxhash",
  "googletest",
  "mangle-ast",
- "mangle-factstore",
+ "mangle-common",
  "mangle-ir",
  "mangle-parse",
 ]
@@ -937,6 +937,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mangle-common"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "fxhash",
+ "mangle-ast",
+]
+
+[[package]]
 name = "mangle-db"
 version = "0.3.0"
 dependencies = [
@@ -944,8 +953,8 @@ dependencies = [
  "fxhash",
  "mangle-analysis",
  "mangle-ast",
+ "mangle-common",
  "mangle-driver",
- "mangle-factstore",
  "mangle-interpreter",
  "mangle-ir",
  "mangle-parse",
@@ -979,17 +988,8 @@ dependencies = [
  "fxhash",
  "mangle-analysis",
  "mangle-ast",
+ "mangle-common",
  "mangle-driver",
- "mangle-factstore",
-]
-
-[[package]]
-name = "mangle-factstore"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "fxhash",
- "mangle-ast",
 ]
 
 [[package]]
@@ -998,7 +998,7 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "mangle-ast",
- "mangle-factstore",
+ "mangle-common",
  "mangle-ir",
 ]
 
@@ -1023,9 +1023,9 @@ dependencies = [
  "anyhow",
  "axum",
  "mangle-ast",
+ "mangle-common",
  "mangle-db",
  "mangle-driver",
- "mangle-factstore",
  "mangle-interpreter",
  "mangle-parse",
  "serde",
@@ -1040,7 +1040,7 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "mangle-ast",
- "mangle-factstore",
+ "mangle-common",
  "mangle-interpreter",
  "mangle-ir",
  "mangle-parse",
@@ -1055,7 +1055,7 @@ dependencies = [
  "mangle-analysis",
  "mangle-ast",
  "mangle-codegen",
- "mangle-factstore",
+ "mangle-common",
  "mangle-ir",
  "mangle-simplecolumn",
  "tempfile",
