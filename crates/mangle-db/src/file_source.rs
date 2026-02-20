@@ -76,6 +76,22 @@ impl FileEdbSource {
             }
         }
 
+        // Post-process __retract__ relations: remove matching facts from base relations
+        let retract_prefix = "__retract__";
+        let retract_keys: Vec<String> = tables
+            .keys()
+            .filter(|k| k.starts_with(retract_prefix))
+            .cloned()
+            .collect();
+        for retract_key in retract_keys {
+            let base_name = &retract_key[retract_prefix.len()..];
+            if let Some(retractions) = tables.remove(&retract_key) {
+                if let Some(base_facts) = tables.get_mut(base_name) {
+                    base_facts.retain(|fact| !retractions.contains(fact));
+                }
+            }
+        }
+
         Ok(tables)
     }
 
@@ -240,6 +256,49 @@ mod tests {
 
         let facts = source.scan("p")?;
         assert_eq!(facts.len(), 3);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_file_edb_retract_processing() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+
+        // Write initial facts
+        std::fs::write(
+            dir.path().join("data.mg"),
+            "container(\"web\", \"running\").\ncontainer(\"db\", \"running\").\n",
+        )?;
+
+        // Write mutations with a retraction
+        std::fs::write(
+            dir.path().join("mutations.mg"),
+            concat!(
+                "container(\"api\", \"running\").\n",
+                "__retract__container(\"web\", \"running\").\n",
+            ),
+        )?;
+
+        let source = FileEdbSource::new("test", dir.path());
+
+        let facts = source.scan("container")?;
+        // "web" was retracted, "db" and "api" remain
+        assert_eq!(facts.len(), 2);
+
+        let names: Vec<&str> = facts
+            .iter()
+            .map(|f| match &f[0] {
+                Value::String(s) => s.as_str(),
+                _ => panic!("expected string"),
+            })
+            .collect();
+        assert!(names.contains(&"db"));
+        assert!(names.contains(&"api"));
+        assert!(!names.contains(&"web"));
+
+        // __retract__ relation should not appear in the output
+        let relations = source.relations()?;
+        assert!(!relations.iter().any(|r| r.name.starts_with("__retract__")));
 
         Ok(())
     }

@@ -78,13 +78,39 @@ use mangle_parse::Parser;
 /// Returns a tuple containing the IR and the stratification info (which dictates
 /// the order of execution).
 pub fn compile<'a>(source: &str, arena: &'a Arena) -> Result<(Ir, StratifiedProgram<'a>)> {
-    let mut parser = Parser::new(arena, source.as_bytes(), "source");
-    parser.next_token().map_err(|e| anyhow!(e))?;
-    let unit = parser.parse_unit()?;
+    compile_units(&[source], arena)
+}
 
-    // Apply package renaming
-    let rewritten_unit = rewrite_unit(arena, unit);
-    let unit = &rewritten_unit;
+/// Compiles multiple source units into the Mangle Intermediate Representation (IR).
+///
+/// Each source string is parsed into a separate AST unit, renamed independently
+/// (handling Package/Use directives), and then merged into a single unit for
+/// stratification and lowering.
+///
+/// This enables multi-unit compilation where one unit can declare a `Package`
+/// and another can `Use` it with qualified predicate references.
+pub fn compile_units<'a>(sources: &[&str], arena: &'a Arena) -> Result<(Ir, StratifiedProgram<'a>)> {
+    // Parse and rename each source unit independently
+    let mut all_decls: Vec<&'a ast::Decl<'a>> = Vec::new();
+    let mut all_clauses: Vec<&'a ast::Clause<'a>> = Vec::new();
+
+    for (i, source) in sources.iter().enumerate() {
+        let label = format!("source_{}", i);
+        let mut parser = Parser::new(arena, source.as_bytes(), arena.alloc_str(&label));
+        parser.next_token().map_err(|e| anyhow!(e))?;
+        let unit = parser.parse_unit()?;
+
+        let rewritten = rewrite_unit(arena, unit);
+        all_decls.extend_from_slice(rewritten.decls);
+        all_clauses.extend_from_slice(rewritten.clauses);
+    }
+
+    // Build the merged unit
+    let merged_unit = ast::Unit {
+        decls: arena.alloc_slice_copy(&all_decls),
+        clauses: arena.alloc_slice_copy(&all_clauses),
+    };
+    let unit = &merged_unit;
 
     let mut program = Program::new(arena);
     let mut all_preds = FxHashSet::default();
@@ -602,11 +628,11 @@ mod tests {
         // Mini devops-like program exercising all features together
         let arena = Arena::new_with_global_interner();
         let source = r#"
-            container("noteworx", /status/running).
-            container("mangle-server", /status/running).
-            container("postgres", /status/stopped).
-            depends_on("noteworx", "postgres").
-            depends_on("mangle-server", "postgres").
+            container("web", /status/running).
+            container("api", /status/running).
+            container("db", /status/stopped).
+            depends_on("web", "db").
+            depends_on("api", "db").
 
             running(Name) :- container(Name, /status/running).
             stopped(Name) :- container(Name, /status/stopped).
@@ -634,9 +660,9 @@ mod tests {
             .expect("relation stopped not found")
             .collect();
         assert_eq!(stopped.len(), 1);
-        assert_eq!(stopped[0][0], Value::String("postgres".to_string()));
+        assert_eq!(stopped[0][0], Value::String("db".to_string()));
 
-        // Both noteworx and mangle-server depend on postgres which is stopped
+        // Both web and api depend on db which is stopped
         let needs_attention: Vec<_> = interpreter
             .store()
             .scan("needs_attention")
@@ -644,8 +670,8 @@ mod tests {
             .collect();
         assert_eq!(needs_attention.len(), 2);
 
-        // postgres is not running so nobody has a running dep
-        // Both noteworx and mangle-server are running and have no running deps
+        // db is not running so nobody has a running dep
+        // Both web and api are running and have no running deps
         let independent: Vec<_> = interpreter
             .store()
             .scan("independent")
@@ -707,6 +733,46 @@ mod tests {
         assert_eq!(facts.len(), 1, "expected 1 result, got {:?}", facts);
         assert_eq!(facts[0][0], Value::String("a".to_string()));
         assert_eq!(facts[0][1], Value::String("x".to_string()));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_compile_units_package_use() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+
+        let schema = r#"
+            Package config_schema !
+            Decl server_port(Port).
+            Decl programs_dir(Path).
+        "#;
+
+        let config = r#"
+            Use config_schema !
+            config_schema.server_port(8090).
+            config_schema.programs_dir("/programs").
+        "#;
+
+        let (mut ir, stratified) = compile_units(&[schema, config], &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        // Query the qualified predicate
+        let port_facts: Vec<_> = interpreter
+            .store()
+            .scan("config_schema.server_port")
+            .expect("relation config_schema.server_port not found")
+            .collect();
+        assert_eq!(port_facts.len(), 1);
+        assert_eq!(port_facts[0][0], Value::Number(8090));
+
+        let dir_facts: Vec<_> = interpreter
+            .store()
+            .scan("config_schema.programs_dir")
+            .expect("relation config_schema.programs_dir not found")
+            .collect();
+        assert_eq!(dir_facts.len(), 1);
+        assert_eq!(dir_facts[0][0], Value::String("/programs".to_string()));
 
         Ok(())
     }

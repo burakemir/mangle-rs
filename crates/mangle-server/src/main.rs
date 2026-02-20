@@ -1,4 +1,6 @@
+mod config;
 mod handlers;
+mod mutations;
 mod query;
 mod store;
 
@@ -9,85 +11,20 @@ use handlers::{
     list_programs_handler, load_program_handler, query_handler, reload_all_handler,
     reload_program_handler, retract_handler,
 };
+use mutations::MutationLog;
 use std::fs;
-use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use store::ProgramStore;
 
-struct ServerConfig {
-    port: u16,
-    programs_dir: Option<PathBuf>,
-    data_dir: Option<PathBuf>,
-    edb_dir: Option<PathBuf>,
-    idb_cache_dir: Option<PathBuf>,
-}
-
-fn parse_args() -> ServerConfig {
-    let args: Vec<String> = std::env::args().collect();
-    let mut config = ServerConfig {
-        port: 8090,
-        programs_dir: None,
-        data_dir: None,
-        edb_dir: None,
-        idb_cache_dir: None,
-    };
-
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--port" => {
-                i += 1;
-                if i < args.len() {
-                    config.port = args[i].parse().expect("invalid port number");
-                }
-            }
-            "--programs-dir" => {
-                i += 1;
-                if i < args.len() {
-                    config.programs_dir = Some(PathBuf::from(&args[i]));
-                }
-            }
-            "--data-dir" => {
-                i += 1;
-                if i < args.len() {
-                    config.data_dir = Some(PathBuf::from(&args[i]));
-                }
-            }
-            "--edb-dir" => {
-                i += 1;
-                if i < args.len() {
-                    config.edb_dir = Some(PathBuf::from(&args[i]));
-                }
-            }
-            "--idb-cache-dir" => {
-                i += 1;
-                if i < args.len() {
-                    config.idb_cache_dir = Some(PathBuf::from(&args[i]));
-                }
-            }
-            _ => {
-                eprintln!("Unknown argument: {}", args[i]);
-            }
-        }
-        i += 1;
-    }
-
-    // Derive defaults from data_dir
-    if let Some(ref data_dir) = config.data_dir {
-        if config.edb_dir.is_none() {
-            config.edb_dir = Some(data_dir.join("edb"));
-        }
-        if config.idb_cache_dir.is_none() {
-            config.idb_cache_dir = Some(data_dir.join("idb-cache"));
-        }
-    }
-
-    config
-}
-
 #[tokio::main]
 async fn main() {
-    let config = parse_args();
+    let config = match config::ServerConfig::from_args() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Error loading config: {}", e);
+            std::process::exit(1);
+        }
+    };
 
     let mut program_store = ProgramStore::new();
     if let Some(ref dir) = config.programs_dir {
@@ -98,6 +35,12 @@ async fn main() {
     }
     if let Some(ref dir) = config.idb_cache_dir {
         program_store = program_store.with_idb_cache_dir(dir.clone());
+    }
+    if let Some(ref edb_dir) = config.edb_dir {
+        if !config.persist_edb.is_empty() {
+            let log = MutationLog::new(edb_dir.clone(), config.persist_edb.clone());
+            program_store = program_store.with_mutation_log(log);
+        }
     }
     let state: AppState = Arc::new(RwLock::new(program_store));
 
@@ -129,7 +72,7 @@ async fn main() {
                 }
             }
         } else {
-            eprintln!("Warning: --programs-dir {:?} is not a directory", dir);
+            eprintln!("Warning: programs-dir {:?} is not a directory", dir);
         }
     }
 
@@ -152,6 +95,7 @@ async fn main() {
 
     let addr = format!("0.0.0.0:{}", config.port);
     eprintln!("mangle-server listening on {addr}");
+    eprintln!("  config: {}", config.config_path.display());
     if let Some(ref dir) = config.programs_dir {
         eprintln!("  programs-dir: {}", dir.display());
     }
@@ -160,6 +104,9 @@ async fn main() {
     }
     if let Some(ref dir) = config.idb_cache_dir {
         eprintln!("  idb-cache-dir: {}", dir.display());
+    }
+    if !config.persist_edb.is_empty() {
+        eprintln!("  persist-edb: {:?}", config.persist_edb);
     }
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     axum::serve(listener, app)

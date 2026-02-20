@@ -421,15 +421,44 @@ where
         Ok(())
     }
 
-    // atom ::= name `(` args `)`
+    // atom ::= qualified_name `(` args `)`
+    // qualified_name ::= ident { `.` ident }
     pub fn parse_atom(&mut self) -> Result<&'arena ast::Atom<'arena>> {
-        let name = match &self.token {
-            Token::Ident { name } => name.as_str(),
+        let mut name_buf = match &self.token {
+            Token::Ident { name } => name.clone(),
             _ => bail!("parse_atom: expected identifer got {}", self.token),
         };
-        let name = self.arena.alloc_str(name);
 
         self.next_token()?;
+
+        // Handle qualified names: ident.ident.ident(...)
+        while self.token == Token::Dot {
+            // Peek ahead: if the next token is an Ident followed by something
+            // that continues the atom (Dot or LParen), consume the dot+ident.
+            // We need to speculatively consume the Dot.
+            self.next_token()?;
+            match &self.token {
+                Token::Ident { name: next_name } => {
+                    name_buf.push('.');
+                    name_buf.push_str(next_name);
+                    self.next_token()?;
+                }
+                _ => {
+                    // The dot was actually a clause terminator or something else.
+                    // We can't put the dot back, so this is an error in the
+                    // qualified-name context. However, this path shouldn't be
+                    // reached in practice because the parser calls parse_atom
+                    // only when it knows an atom follows.
+                    bail!(
+                        "parse_atom: expected identifier after `.` in qualified name, got {}",
+                        self.token
+                    );
+                }
+            }
+        }
+
+        let name = self.arena.alloc_str(&name_buf);
+
         self.expect(Token::LParen)?;
         let mut args = vec![];
         if Token::RParen != self.token {

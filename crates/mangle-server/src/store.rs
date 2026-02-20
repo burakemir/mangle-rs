@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::mutations::MutationLog;
 use crate::query::{ParsedQuery, filter_tuples, parse_query};
 
 /// Metadata about a loaded program.
@@ -25,6 +26,7 @@ pub struct ProgramStore {
     programs_dir: Option<PathBuf>,
     edb_dir: Option<PathBuf>,
     idb_cache_dir: Option<PathBuf>,
+    mutation_log: Option<MutationLog>,
 }
 
 /// Info returned when listing programs.
@@ -59,6 +61,7 @@ impl ProgramStore {
             programs_dir: None,
             edb_dir: None,
             idb_cache_dir: None,
+            mutation_log: None,
         }
     }
 
@@ -74,6 +77,11 @@ impl ProgramStore {
 
     pub fn with_idb_cache_dir(mut self, dir: PathBuf) -> Self {
         self.idb_cache_dir = Some(dir);
+        self
+    }
+
+    pub fn with_mutation_log(mut self, log: MutationLog) -> Self {
+        self.mutation_log = Some(log);
         self
     }
 
@@ -210,7 +218,11 @@ impl ProgramStore {
             .programs
             .get(name)
             .ok_or_else(|| anyhow!("program '{}' not found", name))?;
-        prog.db.insert(relation, tuple)
+        prog.db.insert(relation, tuple.clone())?;
+        if let Some(ref log) = self.mutation_log {
+            log.append_insert(name, relation, &tuple)?;
+        }
+        Ok(())
     }
 
     /// Retract a fact from a program's database.
@@ -219,14 +231,23 @@ impl ProgramStore {
             .programs
             .get(name)
             .ok_or_else(|| anyhow!("program '{}' not found", name))?;
-        prog.db.retract(relation, tuple)
+        prog.db.retract(relation, tuple)?;
+        if let Some(ref log) = self.mutation_log {
+            log.append_retract(name, relation, tuple)?;
+        }
+        Ok(())
     }
 }
 
 /// Compile and execute ephemeral source, returning results for the queried relation.
 pub fn eval_source(source: &str, query: Option<&str>) -> Result<Vec<Vec<Value>>> {
+    eval_source_multi(&[source], query)
+}
+
+/// Compile and execute multiple source units, returning results for the queried relation.
+pub fn eval_source_multi(sources: &[&str], query: Option<&str>) -> Result<Vec<Vec<Value>>> {
     let arena = Arena::new_with_global_interner();
-    let (mut ir, stratified) = mangle_driver::compile(source, &arena)?;
+    let (mut ir, stratified) = mangle_driver::compile_units(sources, &arena)?;
     let store = Box::new(MemStore::new());
     let interpreter = mangle_driver::execute(&mut ir, &stratified, store)?;
 
@@ -400,5 +421,94 @@ mod tests {
 
         let results = store.execute_query("routes", "reachable(X, Y)").unwrap();
         assert_eq!(results.len(), 3); // (1,2), (2,3), (1,3)
+    }
+
+    #[test]
+    fn test_durable_mutations_roundtrip() {
+        use std::collections::HashSet;
+
+        let programs_dir = tempfile::tempdir().unwrap();
+        let edb_dir = tempfile::tempdir().unwrap();
+
+        // Program with a rule over an EDB relation
+        std::fs::write(
+            programs_dir.path().join("runtime.mg"),
+            "running(Name) :- container(Name, \"running\").\n",
+        )
+        .unwrap();
+
+        // Create the EDB subdirectory (required for FileEdbSource)
+        std::fs::create_dir(edb_dir.path().join("runtime")).unwrap();
+
+        let mut persist = HashSet::new();
+        persist.insert("runtime".to_string());
+        let log = MutationLog::new(edb_dir.path().to_path_buf(), persist);
+
+        // Phase 1: Insert facts with mutation log
+        {
+            let mut store = ProgramStore::new()
+                .with_programs_dir(programs_dir.path().to_path_buf())
+                .with_edb_dir(edb_dir.path().to_path_buf())
+                .with_mutation_log(log);
+
+            store.reload("runtime").unwrap();
+
+            store
+                .insert_fact(
+                    "runtime",
+                    "container",
+                    vec![
+                        Value::String("web".to_string()),
+                        Value::String("running".to_string()),
+                    ],
+                )
+                .unwrap();
+
+            store
+                .insert_fact(
+                    "runtime",
+                    "container",
+                    vec![
+                        Value::String("db".to_string()),
+                        Value::String("running".to_string()),
+                    ],
+                )
+                .unwrap();
+
+            // Retract one
+            store
+                .retract_fact(
+                    "runtime",
+                    "container",
+                    &[
+                        Value::String("web".to_string()),
+                        Value::String("running".to_string()),
+                    ],
+                )
+                .unwrap();
+        }
+
+        // Phase 2: "Restart" — create a new store, reload from disk
+        {
+            let mut store = ProgramStore::new()
+                .with_programs_dir(programs_dir.path().to_path_buf())
+                .with_edb_dir(edb_dir.path().to_path_buf());
+
+            store.reload("runtime").unwrap();
+
+            // Only "db" should remain ("web" was retracted)
+            let results = store
+                .execute_query("runtime", "running(Name)")
+                .unwrap();
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0][0], Value::String("db".to_string()));
+
+            // The raw container facts should also reflect the retraction
+            let containers = store
+                .execute_query("runtime", "container(Name, Status)")
+                .unwrap();
+            assert_eq!(containers.len(), 1);
+            assert_eq!(containers[0][0], Value::String("db".to_string()));
+        }
     }
 }
