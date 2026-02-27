@@ -766,7 +766,7 @@ mod tests {
         for payload in parser.parse_all(&wasm) {
             match payload.expect("parsing failed") {
                 Payload::ImportSection(reader) => {
-                    for import in reader {
+                    for import in reader.into_imports() {
                         let import = import.expect("import failed");
                         if import.module == "env" && import.name == "scan_start" {
                             found_import = true;

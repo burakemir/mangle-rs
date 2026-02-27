@@ -19,7 +19,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 authors = ["Burak Emir <burak.emir@gmail.com>"]
 edition = "2024"
 description = "Rust implementation of Mangle, a logic programming language"
@@ -34,26 +34,25 @@ anyhow = "1.0"
 bumpalo = "3.14"
 fxhash = "0.2.1"
 googletest = { version = "0.14.1", features = ["anyhow"] }
-mangle-analysis = { version = "0.3.0", path = "./crates/mangle-analysis" }
-mangle-ast = { version = "0.3.0", path = "./crates/mangle-ast" }
-mangle-codegen = { version = "0.3.0", path = "./crates/mangle-codegen" }
-mangle-engine = { version = "0.3.0", path = "./crates/mangle-engine" }
-mangle-ir = { version = "0.3.0", path = "./crates/mangle-ir" }
-mangle-common = { version = "0.3.0", path = "./crates/mangle-common" }
-mangle-parse = { version = "0.3.0", path = "./crates/mangle-parse" }
-mangle-vm = { version = "0.3.0", path = "./crates/mangle-vm" }
-smol_str = "0.3.2"
+mangle-analysis = { version = "0.4.0", path = "./crates/mangle-analysis" }
+mangle-ast = { version = "0.4.0", path = "./crates/mangle-ast" }
+mangle-codegen = { version = "0.4.0", path = "./crates/mangle-codegen" }
+mangle-engine = { version = "0.4.0", path = "./crates/mangle-engine" }
+mangle-ir = { version = "0.4.0", path = "./crates/mangle-ir" }
+mangle-common = { version = "0.4.0", path = "./crates/mangle-common" }
+mangle-parse = { version = "0.4.0", path = "./crates/mangle-parse" }
+mangle-vm = { version = "0.4.0", path = "./crates/mangle-vm" }
 thiserror = "1.0.58"
 log = "0.4"
-mangle-driver = { version = "0.3.0", path = "./crates/mangle-driver" }
-mangle-interpreter = { version = "0.3.0", path = "./crates/mangle-interpreter" }
-mangle-simplecolumn = { version = "0.3.0", path = "./crates/mangle-simplecolumn" }
-wasm-encoder = "0.240"
-wasmparser = "0.240"
-wasmtime = "30"
+mangle-driver = { version = "0.4.0", path = "./crates/mangle-driver" }
+mangle-interpreter = { version = "0.4.0", path = "./crates/mangle-interpreter" }
+mangle-simplecolumn = { version = "0.4.0", path = "./crates/mangle-simplecolumn" }
+wasm-encoder = "0.245"
+wasmparser = "0.245"
+wasmtime = "41"
 csv = "1.3"
 tempfile = "3.10"
-mangle-db = { version = "0.3.0", path = "./crates/mangle-db" }
+mangle-db = { version = "0.4.0", path = "./crates/mangle-db" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
