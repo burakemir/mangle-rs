@@ -76,13 +76,14 @@ impl Ord for Value {
         match (self, other) {
             (Value::Number(a), Value::Number(b)) => a.cmp(b),
             (Value::Float(a), Value::Float(b)) => a.total_cmp(b),
+            // Cross-numeric: promote integer to float for comparison
+            (Value::Number(a), Value::Float(b)) => (*a as f64).total_cmp(b),
+            (Value::Float(a), Value::Number(b)) => a.total_cmp(&(*b as f64)),
             (Value::String(a), Value::String(b)) => a.cmp(b),
             (Value::Null, Value::Null) => std::cmp::Ordering::Equal,
-            // Cross-variant ordering: Number < Float < String < Null
-            (Value::Number(_), _) => std::cmp::Ordering::Less,
-            (_, Value::Number(_)) => std::cmp::Ordering::Greater,
-            (Value::Float(_), _) => std::cmp::Ordering::Less,
-            (_, Value::Float(_)) => std::cmp::Ordering::Greater,
+            // Cross-variant ordering for non-numeric pairs: Number/Float < String < Null
+            (Value::Number(_) | Value::Float(_), _) => std::cmp::Ordering::Less,
+            (_, Value::Number(_) | Value::Float(_)) => std::cmp::Ordering::Greater,
             (Value::String(_), _) => std::cmp::Ordering::Less,
             (_, Value::String(_)) => std::cmp::Ordering::Greater,
         }

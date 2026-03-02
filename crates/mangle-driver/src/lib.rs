@@ -778,6 +778,51 @@ mod tests {
     }
 
     #[test]
+    fn test_less_than_comparison() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            num(8.1). num(42). num(99.5).
+            big(X) :- num(X), 85 < X .
+        "#;
+
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("big")
+            .expect("relation big not found")
+            .collect();
+        assert_eq!(facts.len(), 1, "expected 1 result, got {:?}", facts);
+        assert_eq!(facts[0][0], Value::Float(99.5));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_less_equal_comparison() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            num(10). num(50). num(85). num(99).
+            up_to_85(X) :- num(X), X <= 85 .
+        "#;
+
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("up_to_85")
+            .expect("relation up_to_85 not found")
+            .collect();
+        assert_eq!(facts.len(), 3, "expected 3 results, got {:?}", facts);
+
+        Ok(())
+    }
+
+    #[test]
     fn test_compile_to_wasm() -> Result<()> {
         let arena = Arena::new_with_global_interner();
         let source = r#"
