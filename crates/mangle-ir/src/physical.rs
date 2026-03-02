@@ -144,6 +144,7 @@ pub enum Operand {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Constant {
     Number(i64),
+    Float(f64),
     String(StringId),
     Name(NameId),
 }

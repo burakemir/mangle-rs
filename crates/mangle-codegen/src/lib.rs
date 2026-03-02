@@ -18,8 +18,8 @@ use mangle_analysis::{Planner, StratifiedProgram};
 use mangle_ir::physical::{CmpOp, Condition, Constant, DataSource, Expr, Op, Operand};
 use mangle_ir::{Inst, InstId, Ir, NameId};
 use wasm_encoder::{
-    CodeSection, EntityType, ExportKind, ExportSection, Function, FunctionSection, ImportSection,
-    Instruction, MemorySection, Module, TypeSection, ValType,
+    CodeSection, EntityType, ExportKind, ExportSection, Function, FunctionSection, Ieee64,
+    ImportSection, Instruction, MemorySection, Module, TypeSection, ValType,
 };
 
 /// Backend strategy for implementing physical operations.
@@ -657,19 +657,48 @@ impl<'a, B: Backend> Codegen<'a, B> {
         }
     }
 
+    fn is_float_operand(op: &Operand) -> bool {
+        matches!(op, Operand::Const(Constant::Float(_)))
+    }
+
+    fn emit_operand_as_f64(&self, func: &mut Function, op: &Operand, ctx: &FuncContext) {
+        match op {
+            Operand::Const(Constant::Float(f)) => {
+                func.instruction(&Instruction::F64Const(Ieee64::from(*f)));
+            }
+            _ => {
+                self.emit_operand(func, op, ctx);
+                func.instruction(&Instruction::F64ReinterpretI64);
+            }
+        }
+    }
+
     fn emit_condition(&self, func: &mut Function, cond: &Condition, ctx: &FuncContext) {
         match cond {
             Condition::Cmp { op, left, right } => {
-                self.emit_operand(func, left, ctx);
-                self.emit_operand(func, right, ctx);
-                match op {
-                    CmpOp::Eq => func.instruction(&Instruction::I64Eq),
-                    CmpOp::Neq => func.instruction(&Instruction::I64Ne),
-                    CmpOp::Lt => func.instruction(&Instruction::I64LtS),
-                    CmpOp::Le => func.instruction(&Instruction::I64LeS),
-                    CmpOp::Gt => func.instruction(&Instruction::I64GtS),
-                    CmpOp::Ge => func.instruction(&Instruction::I64GeS),
-                };
+                if Self::is_float_operand(left) || Self::is_float_operand(right) {
+                    self.emit_operand_as_f64(func, left, ctx);
+                    self.emit_operand_as_f64(func, right, ctx);
+                    match op {
+                        CmpOp::Eq => func.instruction(&Instruction::F64Eq),
+                        CmpOp::Neq => func.instruction(&Instruction::F64Ne),
+                        CmpOp::Lt => func.instruction(&Instruction::F64Lt),
+                        CmpOp::Le => func.instruction(&Instruction::F64Le),
+                        CmpOp::Gt => func.instruction(&Instruction::F64Gt),
+                        CmpOp::Ge => func.instruction(&Instruction::F64Ge),
+                    };
+                } else {
+                    self.emit_operand(func, left, ctx);
+                    self.emit_operand(func, right, ctx);
+                    match op {
+                        CmpOp::Eq => func.instruction(&Instruction::I64Eq),
+                        CmpOp::Neq => func.instruction(&Instruction::I64Ne),
+                        CmpOp::Lt => func.instruction(&Instruction::I64LtS),
+                        CmpOp::Le => func.instruction(&Instruction::I64LeS),
+                        CmpOp::Gt => func.instruction(&Instruction::I64GtS),
+                        CmpOp::Ge => func.instruction(&Instruction::I64GeS),
+                    };
+                }
             }
             Condition::Call { .. } => {
                 func.instruction(&Instruction::I32Const(1));
@@ -684,23 +713,57 @@ impl<'a, B: Backend> Codegen<'a, B> {
         match expr {
             Expr::Value(op) => self.emit_operand(func, op, ctx),
             Expr::Call { function, args } => {
-                for arg in args {
-                    self.emit_operand(func, arg, ctx);
-                }
                 let name = self.ir.resolve_name(*function);
                 match name {
-                    "fn:plus" => func.instruction(&Instruction::I64Add),
-                    "fn:minus" => func.instruction(&Instruction::I64Sub),
-                    _ => {
-                        if !args.is_empty() {
-                            func.instruction(&Instruction::Drop);
+                    "fn:float:plus" | "fn:float:minus" | "fn:float:mult" | "fn:float:div" => {
+                        for arg in args {
+                            self.emit_operand_as_f64(func, arg, ctx);
                         }
-                        if args.len() > 1 {
-                            func.instruction(&Instruction::Drop);
-                        }
-                        func.instruction(&Instruction::I64Const(0))
+                        match name {
+                            "fn:float:plus" => func.instruction(&Instruction::F64Add),
+                            "fn:float:minus" => func.instruction(&Instruction::F64Sub),
+                            "fn:float:mult" => func.instruction(&Instruction::F64Mul),
+                            "fn:float:div" => func.instruction(&Instruction::F64Div),
+                            _ => unreachable!(),
+                        };
+                        func.instruction(&Instruction::I64ReinterpretF64);
                     }
-                };
+                    "fn:sqrt" => {
+                        for arg in args {
+                            self.emit_operand_as_f64(func, arg, ctx);
+                        }
+                        func.instruction(&Instruction::F64Sqrt);
+                        func.instruction(&Instruction::I64ReinterpretF64);
+                    }
+                    _ => {
+                        for arg in args {
+                            self.emit_operand(func, arg, ctx);
+                        }
+                        match name {
+                            "fn:plus" => {
+                                func.instruction(&Instruction::I64Add);
+                            }
+                            "fn:minus" => {
+                                func.instruction(&Instruction::I64Sub);
+                            }
+                            "fn:mult" => {
+                                func.instruction(&Instruction::I64Mul);
+                            }
+                            "fn:div" => {
+                                func.instruction(&Instruction::I64DivS);
+                            }
+                            _ => {
+                                if !args.is_empty() {
+                                    func.instruction(&Instruction::Drop);
+                                }
+                                if args.len() > 1 {
+                                    func.instruction(&Instruction::Drop);
+                                }
+                                func.instruction(&Instruction::I64Const(0));
+                            }
+                        };
+                    }
+                }
             }
         }
     }
@@ -717,6 +780,9 @@ impl<'a, B: Backend> Codegen<'a, B> {
             Operand::Const(c) => match c {
                 Constant::Number(n) => {
                     func.instruction(&Instruction::I64Const(*n));
+                }
+                Constant::Float(f) => {
+                    func.instruction(&Instruction::I64Const(f.to_bits() as i64));
                 }
                 Constant::String(_) | Constant::Name(_) => {
                     func.instruction(&Instruction::I64Const(0));
@@ -781,5 +847,145 @@ mod tests {
         }
         assert!(found_import, "scan_start import not found");
         assert!(found_code, "code section empty");
+    }
+
+    #[test]
+    fn test_codegen_float_constants() {
+        use mangle_ir::physical::{self, Expr, Op, Operand};
+
+        let mut ir = Ir::new();
+        let temps = ir.intern_name("temps");
+        let result = ir.intern_name("result");
+        let var_x = ir.intern_name("X");
+        let var_y = ir.intern_name("Y");
+        let fn_float_plus = ir.intern_name("fn:float:plus");
+
+        // Build: iterate temps(X), filter X > 36.0, let Y = fn:float:plus(X, 0.5), insert result(X, Y)
+        let op = Op::Iterate {
+            source: physical::DataSource::Scan {
+                relation: temps,
+                vars: vec![var_x],
+            },
+            body: Box::new(Op::Filter {
+                cond: physical::Condition::Cmp {
+                    op: physical::CmpOp::Gt,
+                    left: Operand::Var(var_x),
+                    right: Operand::Const(physical::Constant::Float(36.0)),
+                },
+                body: Box::new(Op::Let {
+                    var: var_y,
+                    expr: Expr::Call {
+                        function: fn_float_plus,
+                        args: vec![
+                            Operand::Var(var_x),
+                            Operand::Const(physical::Constant::Float(0.5)),
+                        ],
+                    },
+                    body: Box::new(Op::Insert {
+                        relation: result,
+                        args: vec![Operand::Var(var_x), Operand::Var(var_y)],
+                    }),
+                }),
+            }),
+        };
+
+        // Compile to WASM
+        let codegen = Codegen::new(&mut ir, WasmImportsBackend);
+        // Manually emit the op (generate() uses plan_rule, so we test emit_op directly
+        // by building the module ourselves)
+        let wasm = {
+            let mut module = Module::new();
+
+            let mut types = TypeSection::new();
+            types.ty().function(vec![], vec![]);
+            types
+                .ty()
+                .function(vec![ValType::I32], vec![ValType::I32]);
+            types
+                .ty()
+                .function(vec![ValType::I32, ValType::I32], vec![ValType::I64]);
+            types
+                .ty()
+                .function(vec![ValType::I32, ValType::I64], vec![]);
+            types.ty().function(
+                vec![ValType::I32, ValType::I32, ValType::I64],
+                vec![ValType::I32],
+            );
+            types.ty().function(
+                vec![ValType::I32, ValType::I32, ValType::I32],
+                vec![ValType::I32],
+            );
+            types.ty().function(vec![], vec![ValType::I32]);
+            types.ty().function(vec![ValType::I64], vec![]);
+            module.section(&types);
+
+            let mut imports = ImportSection::new();
+            imports.import("env", "scan_start", EntityType::Function(1));
+            imports.import("env", "scan_next", EntityType::Function(1));
+            imports.import("env", "get_col", EntityType::Function(2));
+            imports.import("env", "insert", EntityType::Function(3));
+            imports.import("env", "scan_delta_start", EntityType::Function(1));
+            imports.import("env", "merge_deltas", EntityType::Function(6));
+            imports.import("env", "debuglog", EntityType::Function(7));
+            imports.import("env", "scan_index_start", EntityType::Function(4));
+            imports.import("env", "scan_aggregate_start", EntityType::Function(5));
+            module.section(&imports);
+
+            let mut functions = FunctionSection::new();
+            functions.function(0);
+            module.section(&functions);
+
+            let mut memories = MemorySection::new();
+            memories.memory(wasm_encoder::MemoryType {
+                minimum: 1,
+                maximum: None,
+                memory64: false,
+                shared: false,
+                page_size_log2: None,
+            });
+            module.section(&memories);
+
+            let mut exports = ExportSection::new();
+            exports.export("run", ExportKind::Func, 9);
+            exports.export("memory", ExportKind::Memory, 0);
+            module.section(&exports);
+
+            let mut codes = CodeSection::new();
+            let locals = vec![
+                (1, ValType::I64), // Local 0: scratch
+                (1, ValType::I32), // Local 1: tuple_ptr
+                (1, ValType::I64), // Local 2: var X
+                (1, ValType::I64), // Local 3: var Y
+                (1, ValType::I32), // Local 4: iter
+            ];
+            let mut func = Function::new(locals);
+            let mut ctx = super::FuncContext {
+                var_map: HashMap::new(),
+                next_local: 4,
+                iter_base: 4,
+                iter_offset: 0,
+            };
+            ctx.var_map.insert(var_x, 2);
+            ctx.var_map.insert(var_y, 3);
+
+            codegen.emit_op(&mut func, &op, &mut ctx);
+            func.instruction(&Instruction::End);
+            codes.function(&func);
+            module.section(&codes);
+
+            module.finish()
+        };
+
+        // Validate that the WASM parses correctly
+        assert!(!wasm.is_empty());
+        let parser = wasmparser::Parser::new(0);
+        let mut found_code = false;
+        for payload in parser.parse_all(&wasm) {
+            let payload = payload.expect("WASM parsing failed for float codegen");
+            if let wasmparser::Payload::CodeSectionEntry(_) = payload {
+                found_code = true;
+            }
+        }
+        assert!(found_code, "code section not found in float WASM");
     }
 }

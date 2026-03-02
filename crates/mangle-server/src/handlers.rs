@@ -25,7 +25,15 @@ pub struct RetractRequest {
 fn json_to_values(arr: &[serde_json::Value]) -> Vec<Value> {
     arr.iter()
         .map(|v| match v {
-            serde_json::Value::Number(n) => Value::Number(n.as_i64().unwrap_or(0)),
+            serde_json::Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    Value::Number(i)
+                } else if let Some(f) = n.as_f64() {
+                    Value::Float(f)
+                } else {
+                    Value::Number(0)
+                }
+            }
             serde_json::Value::String(s) => Value::String(s.clone()),
             serde_json::Value::Null => Value::Null,
             _ => Value::String(v.to_string()),
@@ -93,6 +101,9 @@ pub struct MessageResponse {
 fn value_to_json(v: &Value) -> serde_json::Value {
     match v {
         Value::Number(n) => serde_json::Value::Number((*n).into()),
+        Value::Float(f) => serde_json::Number::from_f64(*f)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
         Value::String(s) => serde_json::Value::String(s.clone()),
         Value::Null => serde_json::Value::Null,
     }

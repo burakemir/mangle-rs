@@ -586,24 +586,42 @@ impl<'a> Interpreter<'a> {
         match fn_name {
             "fn:count" => Ok(Value::Number(group.len() as i64)),
             "fn:sum" => {
-                let mut sum = 0;
-                // Assuming single argument for sum
                 let arg = agg
                     .args
                     .first()
                     .ok_or_else(|| anyhow!("fn:sum requires 1 argument"))?;
 
+                let mut int_sum: i64 = 0;
                 for tuple in group {
-                    // We need to re-bind vars for each tuple to evaluate arg
                     for (i, var) in vars.iter().enumerate() {
                         env.vars.insert(*var, tuple[i].clone());
                     }
                     let val = self.eval_operand(arg, env)?;
-                    if let Value::Number(n) = val {
-                        sum += n;
+                    match val {
+                        Value::Number(n) => int_sum += n,
+                        _ => {}
                     }
                 }
-                Ok(Value::Number(sum))
+                Ok(Value::Number(int_sum))
+            }
+            "fn:float:sum" => {
+                let arg = agg
+                    .args
+                    .first()
+                    .ok_or_else(|| anyhow!("fn:float:sum requires 1 argument"))?;
+
+                let mut float_sum: f64 = 0.0;
+                for tuple in group {
+                    for (i, var) in vars.iter().enumerate() {
+                        env.vars.insert(*var, tuple[i].clone());
+                    }
+                    let val = self.eval_operand(arg, env)?;
+                    match val {
+                        Value::Float(f) => float_sum += f,
+                        _ => {}
+                    }
+                }
+                Ok(Value::Float(float_sum))
             }
             "fn:max" => {
                 let mut max_val = None;
@@ -650,6 +668,52 @@ impl<'a> Interpreter<'a> {
                     }
                 }
                 min_val.ok_or_else(|| anyhow!("fn:min on empty group"))
+            }
+            "fn:float:max" => {
+                let mut max_val: Option<f64> = None;
+                let arg = agg
+                    .args
+                    .first()
+                    .ok_or_else(|| anyhow!("fn:float:max requires 1 argument"))?;
+
+                for tuple in group {
+                    for (i, var) in vars.iter().enumerate() {
+                        env.vars.insert(*var, tuple[i].clone());
+                    }
+                    let val = self.eval_operand(arg, env)?;
+                    if let Value::Float(f) = val {
+                        max_val = Some(match max_val {
+                            None => f,
+                            Some(m) => f.max(m),
+                        });
+                    }
+                }
+                max_val
+                    .map(Value::Float)
+                    .ok_or_else(|| anyhow!("fn:float:max on empty group"))
+            }
+            "fn:float:min" => {
+                let mut min_val: Option<f64> = None;
+                let arg = agg
+                    .args
+                    .first()
+                    .ok_or_else(|| anyhow!("fn:float:min requires 1 argument"))?;
+
+                for tuple in group {
+                    for (i, var) in vars.iter().enumerate() {
+                        env.vars.insert(*var, tuple[i].clone());
+                    }
+                    let val = self.eval_operand(arg, env)?;
+                    if let Value::Float(f) = val {
+                        min_val = Some(match min_val {
+                            None => f,
+                            Some(m) => f.min(m),
+                        });
+                    }
+                }
+                min_val
+                    .map(Value::Float)
+                    .ok_or_else(|| anyhow!("fn:float:min on empty group"))
             }
             _ => Err(anyhow!("Unknown aggregation function: {fn_name}")),
         }
@@ -707,20 +771,48 @@ impl<'a> Interpreter<'a> {
                     vals.push(self.eval_operand(arg, env)?);
                 }
                 match fn_name {
-                    "fn:plus" => {
-                        if let (Value::Number(a), Value::Number(b)) = (&vals[0], &vals[1]) {
-                            Ok(Value::Number(a + b))
-                        } else {
-                            Err(anyhow!("Type mismatch for fn:plus"))
+                    "fn:plus" => match (&vals[0], &vals[1]) {
+                        (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a + b)),
+                        _ => Err(anyhow!("Type mismatch for fn:plus: expected integers")),
+                    },
+                    "fn:minus" => match (&vals[0], &vals[1]) {
+                        (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a - b)),
+                        _ => Err(anyhow!("Type mismatch for fn:minus: expected integers")),
+                    },
+                    "fn:mult" => match (&vals[0], &vals[1]) {
+                        (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a * b)),
+                        _ => Err(anyhow!("Type mismatch for fn:mult: expected integers")),
+                    },
+                    "fn:div" => match (&vals[0], &vals[1]) {
+                        (Value::Number(_), Value::Number(0)) => {
+                            Err(anyhow!("Division by zero in fn:div"))
                         }
-                    }
-                    "fn:minus" => {
-                        if let (Value::Number(a), Value::Number(b)) = (&vals[0], &vals[1]) {
-                            Ok(Value::Number(a - b))
-                        } else {
-                            Err(anyhow!("Type mismatch for fn:minus"))
+                        (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a / b)),
+                        _ => Err(anyhow!("Type mismatch for fn:div: expected integers")),
+                    },
+                    "fn:float:plus" => match (&vals[0], &vals[1]) {
+                        (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
+                        _ => Err(anyhow!("Type mismatch for fn:float:plus: expected floats")),
+                    },
+                    "fn:float:minus" => match (&vals[0], &vals[1]) {
+                        (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a - b)),
+                        _ => Err(anyhow!("Type mismatch for fn:float:minus: expected floats")),
+                    },
+                    "fn:float:mult" => match (&vals[0], &vals[1]) {
+                        (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a * b)),
+                        _ => Err(anyhow!("Type mismatch for fn:float:mult: expected floats")),
+                    },
+                    "fn:float:div" => match (&vals[0], &vals[1]) {
+                        (Value::Float(_), Value::Float(b)) if *b == 0.0 => {
+                            Err(anyhow!("Division by zero in fn:float:div"))
                         }
-                    }
+                        (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a / b)),
+                        _ => Err(anyhow!("Type mismatch for fn:float:div: expected floats")),
+                    },
+                    "fn:sqrt" => match &vals[0] {
+                        Value::Float(a) => Ok(Value::Float(a.sqrt())),
+                        _ => Err(anyhow!("Type mismatch for fn:sqrt: expected float")),
+                    },
                     _ => Err(anyhow!("Unknown function: {fn_name}")),
                 }
             }
@@ -736,6 +828,7 @@ impl<'a> Interpreter<'a> {
                 .ok_or_else(|| anyhow!("Variable not found")),
             Operand::Const(c) => match c {
                 Constant::Number(n) => Ok(Value::Number(*n)),
+                Constant::Float(f) => Ok(Value::Float(*f)),
                 Constant::String(sid) => {
                     Ok(Value::String(self.ir.resolve_string(*sid).to_string()))
                 }
@@ -861,5 +954,125 @@ mod tests {
             .collect();
         derived_vals.sort();
         assert_eq!(derived_vals, vec![10, 20]);
+    }
+
+    #[test]
+    fn test_float_values() {
+        use mangle_ir::physical::{self, DataSource, Expr, Operand};
+
+        let mut ir = mangle_ir::Ir::new();
+        let temps = ir.intern_name("temps");
+        let result = ir.intern_name("result");
+        let var_x = ir.intern_name("X");
+        // First, verify basic scan+insert of floats works
+        let simple_op = Op::Iterate {
+            source: DataSource::Scan {
+                relation: temps,
+                vars: vec![var_x],
+            },
+            body: Box::new(Op::Insert {
+                relation: result,
+                args: vec![Operand::Var(var_x)],
+            }),
+        };
+
+        let mut store = Box::new(MemStore::new());
+        store.add_fact("temps", vec![Value::Float(36.5)]);
+        store.add_fact("temps", vec![Value::Float(35.9)]);
+        store.add_fact("temps", vec![Value::Float(37.2)]);
+        store.create_relation("result");
+
+        let mut interpreter = Interpreter::new(&ir, store as Box<dyn Store>);
+        let count = interpreter.execute(&simple_op).unwrap();
+        assert_eq!(count, 3, "basic float scan+insert should produce 3 facts");
+
+        // Now test with filter and arithmetic
+        let mut ir2 = mangle_ir::Ir::new();
+        let temps2 = ir2.intern_name("temps");
+        let result2 = ir2.intern_name("result2");
+        let var_x2 = ir2.intern_name("X");
+        let var_y2 = ir2.intern_name("Y");
+        let fn_plus2 = ir2.intern_name("fn:float:plus");
+
+        let op = Op::Iterate {
+            source: DataSource::Scan {
+                relation: temps2,
+                vars: vec![var_x2],
+            },
+            body: Box::new(Op::Filter {
+                cond: Condition::Cmp {
+                    op: physical::CmpOp::Gt,
+                    left: Operand::Var(var_x2),
+                    right: Operand::Const(physical::Constant::Float(36.0)),
+                },
+                body: Box::new(Op::Let {
+                    var: var_y2,
+                    expr: Expr::Call {
+                        function: fn_plus2,
+                        args: vec![
+                            Operand::Var(var_x2),
+                            Operand::Const(physical::Constant::Float(0.5)),
+                        ],
+                    },
+                    body: Box::new(Op::Insert {
+                        relation: result2,
+                        args: vec![Operand::Var(var_x2), Operand::Var(var_y2)],
+                    }),
+                }),
+            }),
+        };
+
+        let mut store2 = Box::new(MemStore::new());
+        store2.add_fact("temps", vec![Value::Float(36.5)]);
+        store2.add_fact("temps", vec![Value::Float(35.9)]);
+        store2.add_fact("temps", vec![Value::Float(37.2)]);
+        store2.create_relation("result2");
+
+        let mut interpreter2 = Interpreter::new(&ir2, store2 as Box<dyn Store>);
+        let count2 = interpreter2.execute(&op).unwrap();
+
+        // Only 36.5 and 37.2 are > 36.0
+        assert_eq!(count2, 2);
+
+        // Results are in next_delta, check via scan_next_delta
+        let results: Vec<_> = interpreter2
+            .store()
+            .scan_next_delta("result2")
+            .unwrap()
+            .collect();
+        assert_eq!(results.len(), 2);
+
+        let mut output: Vec<(f64, f64)> = results
+            .iter()
+            .map(|t| match (&t[0], &t[1]) {
+                (Value::Float(a), Value::Float(b)) => (*a, *b),
+                _ => panic!("expected floats"),
+            })
+            .collect();
+        output.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+        assert_eq!(output[0], (36.5, 37.0));
+        assert_eq!(output[1], (37.2, 37.7));
+    }
+
+    #[test]
+    fn test_float_in_memstore() {
+        // Test that Float values work correctly as HashMap keys (equality, hashing)
+        let mut store = MemStore::new();
+        store.add_fact("data", vec![Value::Float(1.5), Value::Number(10)]);
+        store.add_fact("data", vec![Value::Float(2.5), Value::Number(20)]);
+        // Duplicate should not be added
+        store.add_fact("data", vec![Value::Float(1.5), Value::Number(10)]);
+
+        let facts = store.get_facts("data");
+        assert_eq!(facts.len(), 2);
+
+        // Test index lookup
+        let results: Vec<_> = store
+            .scan_index("data", 0, &Value::Float(1.5))
+            .unwrap()
+            .collect();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0][1], Value::Number(10));
     }
 }

@@ -26,11 +26,67 @@ pub use tablestore::{TableConfig, TableStoreImpl, TableStoreSchema};
 // --- New Interfaces (Moved from interpreter/vm to break cycles) ---
 
 #[cfg(feature = "edge")]
-#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Hash)]
+#[derive(Debug, Clone)]
 pub enum Value {
     Number(i64),
+    Float(f64),
     String(String),
     Null, // Used for iteration end or missing
+}
+
+#[cfg(feature = "edge")]
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Value::Number(a), Value::Number(b)) => a == b,
+            (Value::Float(a), Value::Float(b)) => a.to_bits() == b.to_bits(),
+            (Value::String(a), Value::String(b)) => a == b,
+            (Value::Null, Value::Null) => true,
+            _ => false,
+        }
+    }
+}
+
+#[cfg(feature = "edge")]
+impl Eq for Value {}
+
+#[cfg(feature = "edge")]
+impl std::hash::Hash for Value {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Value::Number(n) => n.hash(state),
+            Value::Float(f) => f.to_bits().hash(state),
+            Value::String(s) => s.hash(state),
+            Value::Null => {}
+        }
+    }
+}
+
+#[cfg(feature = "edge")]
+impl PartialOrd for Value {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[cfg(feature = "edge")]
+impl Ord for Value {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match (self, other) {
+            (Value::Number(a), Value::Number(b)) => a.cmp(b),
+            (Value::Float(a), Value::Float(b)) => a.total_cmp(b),
+            (Value::String(a), Value::String(b)) => a.cmp(b),
+            (Value::Null, Value::Null) => std::cmp::Ordering::Equal,
+            // Cross-variant ordering: Number < Float < String < Null
+            (Value::Number(_), _) => std::cmp::Ordering::Less,
+            (_, Value::Number(_)) => std::cmp::Ordering::Greater,
+            (Value::Float(_), _) => std::cmp::Ordering::Less,
+            (_, Value::Float(_)) => std::cmp::Ordering::Greater,
+            (Value::String(_), _) => std::cmp::Ordering::Less,
+            (_, Value::String(_)) => std::cmp::Ordering::Greater,
+        }
+    }
 }
 
 #[cfg(feature = "edge")]
@@ -38,6 +94,7 @@ impl std::fmt::Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Value::Number(n) => write!(f, "{n}"),
+            Value::Float(v) => write!(f, "{v}"),
             Value::String(s) => write!(f, "{s:?}"),
             Value::Null => write!(f, "null"),
         }

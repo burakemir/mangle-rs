@@ -294,6 +294,12 @@ impl<'a> Planner<'a> {
                                     Some((i, Operand::Const(physical::Constant::Name(n))));
                             }
                         }
+                        Inst::Float(fl) => {
+                            if index_lookup.is_none() {
+                                index_lookup =
+                                    Some((i, Operand::Const(physical::Constant::Float(fl))));
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -377,6 +383,9 @@ impl<'a> Planner<'a> {
                             }
                             Inst::Name(n) => {
                                 neg_args.push(Operand::Const(physical::Constant::Name(n)))
+                            }
+                            Inst::Float(fl) => {
+                                neg_args.push(Operand::Const(physical::Constant::Float(fl)))
                             }
                             _ => return Err(anyhow!("Complex expression in negated atom")),
                         }
@@ -465,6 +474,7 @@ impl<'a> Planner<'a> {
             Inst::String(s) => f(self, Operand::Const(physical::Constant::String(s))),
             Inst::Number(n) => f(self, Operand::Const(physical::Constant::Number(n))),
             Inst::Name(n) => f(self, Operand::Const(physical::Constant::Name(n))),
+            Inst::Float(fl) => f(self, Operand::Const(physical::Constant::Float(fl))),
             Inst::ApplyFn { function, args } => self.with_eval_args(
                 &args,
                 0,
@@ -569,7 +579,14 @@ impl<'a> Planner<'a> {
             let func_name = self.ir.resolve_name(function);
             if matches!(
                 func_name,
-                "fn:sum" | "fn:count" | "fn:max" | "fn:min" | "fn:collect"
+                "fn:sum"
+                    | "fn:count"
+                    | "fn:max"
+                    | "fn:min"
+                    | "fn:collect"
+                    | "fn:float:sum"
+                    | "fn:float:max"
+                    | "fn:float:min"
             ) {
                 let mut op_args = Vec::new();
                 for arg in args {
@@ -578,6 +595,9 @@ impl<'a> Planner<'a> {
                         Inst::Var(v) => op_args.push(Operand::Var(v)),
                         Inst::Number(n) => {
                             op_args.push(Operand::Const(physical::Constant::Number(n)))
+                        }
+                        Inst::Float(fl) => {
+                            op_args.push(Operand::Const(physical::Constant::Float(fl)))
                         }
                         _ => {
                             return Err(anyhow!(
