@@ -1175,6 +1175,7 @@ dependencies = [
  "mangle-ir",
  "mangle-parse",
  "mangle-vm",
+ "wasmtime",
 ]
 
 [[package]]

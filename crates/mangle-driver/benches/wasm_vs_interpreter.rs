@@ -12,7 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Benchmark comparing interpreter (edge) vs WASM (server) execution.
+//! Benchmark comparing three execution modes:
+//!
+//! 1. **interpreter** — native Rust interpreter (edge mode)
+//! 2. **codegen-wasm** — per-program WASM codegen with host calls (server mode)
+//! 3. **interp-in-wasm** — full interpreter compiled to WASM, run in wasmtime
 //!
 //! Uses transitive closure (reachability) on linear graphs of varying sizes.
 
@@ -29,12 +33,6 @@ use std::sync::{Arc, Mutex};
 // ---------------------------------------------------------------------------
 
 /// Build Mangle source for reachability with `n` nodes in a linear chain.
-///
-/// ```text
-/// edge(0,1). edge(1,2). ... edge(n-2, n-1).
-/// reachable(Y) :- edge(0, Y).
-/// reachable(Z) :- reachable(Y), edge(Y, Z).
-/// ```
 fn reachability_source(n: usize) -> String {
     let mut s = String::new();
     for i in 0..n - 1 {
@@ -46,7 +44,7 @@ fn reachability_source(n: usize) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// WASM host (minimal MemHost with delta/merge for fixpoint)
+// Codegen-WASM host (minimal MemHost with delta/merge for fixpoint)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq)]
@@ -83,14 +81,6 @@ impl WasmMemHost {
         }
     }
 
-    fn hash_name(name: &str) -> i32 {
-        let mut hash: u32 = 5381;
-        for c in name.bytes() {
-            hash = ((hash << 5).wrapping_add(hash)).wrapping_add(c as u32);
-        }
-        hash as i32
-    }
-
     fn alloc(&mut self, v: Val) -> HostVal {
         let idx = self.values.len() as u32;
         self.values.push(v);
@@ -99,13 +89,6 @@ impl WasmMemHost {
 
     fn get_val(&self, hv: HostVal) -> &Val {
         &self.values[hv.0 as usize]
-    }
-
-    fn add_fact(&mut self, rel: &str, args: &[i64]) {
-        let id = Self::hash_name(rel);
-        let hvs: Vec<HostVal> = args.iter().map(|n| self.alloc(Val::Number(*n))).collect();
-        self.stable.entry(id).or_default().push(hvs.clone());
-        self.delta.entry(id).or_default().push(hvs);
     }
 
     fn tuples_eq(&self, a: &[HostVal], b: &[HostVal]) -> bool {
@@ -316,6 +299,73 @@ impl Host for SharedHost {
 }
 
 // ---------------------------------------------------------------------------
+// Interpreter-in-WASM runner (calls mangle-wasm's run_raw via wasmtime)
+// ---------------------------------------------------------------------------
+
+struct InterpInWasm {
+    engine: wasmtime::Engine,
+    module: wasmtime::Module,
+}
+
+impl InterpInWasm {
+    fn new() -> Self {
+        let wasm_bytes = include_bytes!(
+            "../../../target/wasm32-unknown-unknown/release/mangle_wasm.wasm"
+        );
+        let engine = wasmtime::Engine::default();
+        let module = wasmtime::Module::new(&engine, wasm_bytes)
+            .expect("failed to compile mangle-wasm module");
+        Self { engine, module }
+    }
+
+    fn run(&self, source: &str, facts_json: &str) {
+        let mut store = wasmtime::Store::new(&self.engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &self.module, &[])
+            .expect("failed to instantiate");
+
+        let memory = instance
+            .get_memory(&mut store, "memory")
+            .expect("no memory export");
+        let alloc_fn = instance
+            .get_typed_func::<u32, u32>(&mut store, "alloc")
+            .expect("no alloc export");
+        let run_raw_fn = instance
+            .get_typed_func::<(u32, u32, u32, u32), i64>(&mut store, "run_raw")
+            .expect("no run_raw export");
+
+        // Write source string into WASM memory
+        let src_bytes = source.as_bytes();
+        let src_ptr = alloc_fn
+            .call(&mut store, src_bytes.len() as u32)
+            .expect("alloc failed");
+        memory.data_mut(&mut store)[src_ptr as usize..src_ptr as usize + src_bytes.len()]
+            .copy_from_slice(src_bytes);
+
+        // Write facts JSON into WASM memory
+        let facts_bytes = facts_json.as_bytes();
+        let facts_ptr = alloc_fn
+            .call(&mut store, facts_bytes.len() as u32)
+            .expect("alloc failed");
+        memory.data_mut(&mut store)[facts_ptr as usize..facts_ptr as usize + facts_bytes.len()]
+            .copy_from_slice(facts_bytes);
+
+        // Call run_raw
+        let result = run_raw_fn
+            .call(
+                &mut store,
+                (
+                    src_ptr,
+                    src_bytes.len() as u32,
+                    facts_ptr,
+                    facts_bytes.len() as u32,
+                ),
+            )
+            .expect("run_raw failed");
+        assert!(result != 0, "run_raw returned error");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Benchmark functions
 // ---------------------------------------------------------------------------
 
@@ -327,9 +377,8 @@ fn bench_interpreter(source: &str) {
     let _interpreter = execute(&mut ir, &stratified, store).expect("execute failed");
 }
 
-/// WASM path: parse → compile → codegen WASM → instantiate + run via wasmtime.
-/// Takes pre-compiled WASM + Vm engine to amortize compilation cost.
-fn bench_wasm(vm: &Vm, wasm: &[u8], strings: &[String], names: &[String]) {
+/// Codegen-WASM path: pre-compiled WASM, benchmark instantiation + execution.
+fn bench_codegen_wasm(vm: &Vm, wasm: &[u8], strings: &[String], names: &[String]) {
     let host = WasmMemHost::new(strings.to_vec(), names.to_vec());
     let shared = SharedHost {
         inner: Arc::new(Mutex::new(host)),
@@ -341,10 +390,13 @@ fn bench_wasm(vm: &Vm, wasm: &[u8], strings: &[String], names: &[String]) {
 fn reachability_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("reachability");
 
+    // Pre-load the interpreter-in-WASM module (shared across sizes)
+    let interp_wasm = InterpInWasm::new();
+
     for &n in &[10, 50, 100, 500, 1000, 5000] {
         let source = reachability_source(n);
 
-        // Interpreter benchmark: includes compilation + execution
+        // 1. Native interpreter
         group.bench_with_input(
             BenchmarkId::new("interpreter", n),
             &source,
@@ -353,17 +405,26 @@ fn reachability_benchmark(c: &mut Criterion) {
             },
         );
 
-        // WASM benchmark: pre-compile to WASM, benchmark instantiation + execution
+        // 2. Codegen WASM (server mode)
         let arena = Arena::new_with_global_interner();
         let (mut ir, stratified) = compile(&source, &arena).expect("compile failed");
         let compiled = compile_to_wasm(&mut ir, &stratified);
         let vm = Vm::new().expect("vm creation failed");
 
-        group.bench_with_input(BenchmarkId::new("wasm", n), &n, |b, _n| {
+        group.bench_with_input(BenchmarkId::new("codegen-wasm", n), &n, |b, _n| {
             b.iter(|| {
-                bench_wasm(&vm, &compiled.wasm, &compiled.strings, &compiled.names)
+                bench_codegen_wasm(&vm, &compiled.wasm, &compiled.strings, &compiled.names)
             });
         });
+
+        // 3. Interpreter-in-WASM
+        group.bench_with_input(
+            BenchmarkId::new("interp-in-wasm", n),
+            &source,
+            |b, source| {
+                b.iter(|| interp_wasm.run(source, "{}"));
+            },
+        );
     }
 
     group.finish();

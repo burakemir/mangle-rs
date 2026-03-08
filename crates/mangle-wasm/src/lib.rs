@@ -48,47 +48,21 @@ use mangle_common::{Store, Value};
 use mangle_driver::{compile, execute};
 use mangle_interpreter::MemStore;
 use serde_json;
+
+#[cfg(feature = "bindgen")]
 use wasm_bindgen::prelude::*;
 
-/// Run a Mangle program with optional initial facts (JSON).
-///
-/// Returns a JSON object mapping relation names to arrays of tuples.
-///
-/// # Facts format
-///
-/// ```json
-/// {
-///   "edge": [[1, 2], [2, 3]],
-///   "name": [["alice"], ["bob"]]
-/// }
-/// ```
-///
-/// Values can be: integers, floats, strings. Omit or pass `"{}"` for no
-/// initial facts.
+// ---------------------------------------------------------------------------
+// wasm-bindgen API (browser JS interop) — only available with "bindgen" feature
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "bindgen")]
 #[wasm_bindgen]
 pub fn run_mangle(source: &str, facts_json: &str) -> Result<String, JsError> {
-    let arena = Arena::new_with_global_interner();
-    let (mut ir, stratified) =
-        compile(source, &arena).map_err(|e| JsError::new(&e.to_string()))?;
-
-    let mut store = MemStore::new();
-    load_facts(&mut store, facts_json)?;
-    // Move inserted facts from next_delta → delta → stable so they're
-    // visible to scan() during execution.
-    store.merge_deltas();
-    store.merge_deltas();
-
-    let interpreter =
-        execute(&mut ir, &stratified, Box::new(store)).map_err(|e| JsError::new(&e.to_string()))?;
-
-    dump_results(interpreter.store())
+    run(source, facts_json).map_err(|e| JsError::new(&e.to_string()))
 }
 
-/// Run the compile-time bundled program with initial facts.
-///
-/// The Mangle source is baked in via `MANGLE_PROGRAM` env var at build time.
-/// This enables "partial evaluation": the program is fixed, only the data
-/// varies at runtime.
+#[cfg(feature = "bindgen")]
 #[wasm_bindgen]
 pub fn run_bundled(facts_json: &str) -> Result<String, JsError> {
     const PROGRAM: &str = match option_env!("MANGLE_PROGRAM") {
@@ -101,29 +75,6 @@ pub fn run_bundled(facts_json: &str) -> Result<String, JsError> {
         ));
     }
     run_mangle(PROGRAM, facts_json)
-}
-
-/// Parse JSON facts and insert them into the store.
-fn load_facts(store: &mut MemStore, json: &str) -> Result<(), JsError> {
-    let map: serde_json::Map<String, serde_json::Value> =
-        serde_json::from_str(json).map_err(|e| JsError::new(&e.to_string()))?;
-
-    for (rel, tuples) in &map {
-        store.create_relation(rel);
-        let rows = tuples
-            .as_array()
-            .ok_or_else(|| JsError::new(&format!("expected array for relation '{rel}'")))?;
-        for row in rows {
-            let cols = row
-                .as_array()
-                .ok_or_else(|| JsError::new(&format!("expected array for tuple in '{rel}'")))?;
-            let tuple: Vec<Value> = cols.iter().map(json_to_value).collect();
-            store
-                .insert(rel, tuple)
-                .map_err(|e| JsError::new(&e.to_string()))?;
-        }
-    }
-    Ok(())
 }
 
 fn json_to_value(v: &serde_json::Value) -> Value {
@@ -158,21 +109,9 @@ fn value_to_json(v: &Value) -> serde_json::Value {
     }
 }
 
-/// Serialize all relations in the store to JSON.
-fn dump_results(store: &dyn Store) -> Result<String, JsError> {
-    let mut map = serde_json::Map::new();
-    for name in store.relation_names() {
-        let tuples: Vec<serde_json::Value> = store
-            .scan(&name)
-            .map_err(|e| JsError::new(&e.to_string()))?
-            .map(|row| serde_json::Value::Array(row.iter().map(value_to_json).collect()))
-            .collect();
-        map.insert(name, serde_json::Value::Array(tuples));
-    }
-    serde_json::to_string(&map).map_err(|e| JsError::new(&e.to_string()))
-}
-
-// Internal API usable without wasm_bindgen (for native tests and embedding).
+// ---------------------------------------------------------------------------
+// Core API (no wasm-bindgen dependency)
+// ---------------------------------------------------------------------------
 
 /// Run a Mangle program with initial facts, returning results as a JSON string.
 pub fn run(source: &str, facts_json: &str) -> anyhow::Result<String> {
@@ -208,6 +147,58 @@ pub fn run(source: &str, facts_json: &str) -> anyhow::Result<String> {
         result_map.insert(name, serde_json::Value::Array(tuples));
     }
     Ok(serde_json::to_string(&result_map)?)
+}
+
+// ---------------------------------------------------------------------------
+// Raw C-ABI exports for wasmtime (no wasm-bindgen dependency).
+//
+// These are always compiled in but only reachable from WASM. They let a
+// wasmtime host call into the interpreter without the JS glue layer.
+// ---------------------------------------------------------------------------
+
+/// Allocate `size` bytes in the WASM linear memory.  Returns a pointer the
+/// host can write into.
+#[unsafe(no_mangle)]
+pub extern "C" fn alloc(size: u32) -> *mut u8 {
+    let layout = std::alloc::Layout::from_size_align(size as usize, 1).unwrap();
+    unsafe { std::alloc::alloc(layout) }
+}
+
+/// Free a previous allocation.
+#[unsafe(no_mangle)]
+pub extern "C" fn dealloc(ptr: *mut u8, size: u32) {
+    let layout = std::alloc::Layout::from_size_align(size as usize, 1).unwrap();
+    unsafe { std::alloc::dealloc(ptr, layout) }
+}
+
+/// Run a Mangle program.  The host writes the source and facts JSON into
+/// WASM memory (via [`alloc`]) and passes pointers here.
+///
+/// Returns a packed `i64`: high 32 bits = pointer to result string,
+/// low 32 bits = length.  The host reads the result from WASM memory and
+/// must call [`dealloc`] on it afterwards.
+///
+/// On error the return value is `0`.
+#[unsafe(no_mangle)]
+pub extern "C" fn run_raw(
+    source_ptr: *const u8,
+    source_len: u32,
+    facts_ptr: *const u8,
+    facts_len: u32,
+) -> i64 {
+    let source = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(source_ptr, source_len as usize)) };
+    let facts = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(facts_ptr, facts_len as usize)) };
+
+    match run(source, facts) {
+        Ok(result) => {
+            let bytes = result.into_bytes();
+            let len = bytes.len() as u32;
+            let ptr = alloc(len);
+            unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, len as usize) };
+            ((ptr as i64) << 32) | (len as i64)
+        }
+        Err(_) => 0,
+    }
 }
 
 #[cfg(test)]
