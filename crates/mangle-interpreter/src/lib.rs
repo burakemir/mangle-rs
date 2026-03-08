@@ -599,7 +599,7 @@ impl<'a> Interpreter<'a> {
                     let val = self.eval_operand(arg, env)?;
                     match val {
                         Value::Number(n) => int_sum += n,
-                        _ => {}
+                        _ => return Err(anyhow!("fn:sum: expected integer, got {val}")),
                     }
                 }
                 Ok(Value::Number(int_sum))
@@ -616,10 +616,7 @@ impl<'a> Interpreter<'a> {
                         env.vars.insert(*var, tuple[i].clone());
                     }
                     let val = self.eval_operand(arg, env)?;
-                    match val {
-                        Value::Float(f) => float_sum += f,
-                        _ => {}
-                    }
+                    float_sum += value_as_float(&val)?;
                 }
                 Ok(Value::Float(float_sum))
             }
@@ -681,12 +678,11 @@ impl<'a> Interpreter<'a> {
                         env.vars.insert(*var, tuple[i].clone());
                     }
                     let val = self.eval_operand(arg, env)?;
-                    if let Value::Float(f) = val {
-                        max_val = Some(match max_val {
-                            None => f,
-                            Some(m) => f.max(m),
-                        });
-                    }
+                    let f = value_as_float(&val)?;
+                    max_val = Some(match max_val {
+                        None => f,
+                        Some(m) => f.max(m),
+                    });
                 }
                 max_val
                     .map(Value::Float)
@@ -704,12 +700,11 @@ impl<'a> Interpreter<'a> {
                         env.vars.insert(*var, tuple[i].clone());
                     }
                     let val = self.eval_operand(arg, env)?;
-                    if let Value::Float(f) = val {
-                        min_val = Some(match min_val {
-                            None => f,
-                            Some(m) => f.min(m),
-                        });
-                    }
+                    let f = value_as_float(&val)?;
+                    min_val = Some(match min_val {
+                        None => f,
+                        Some(m) => f.min(m),
+                    });
                 }
                 min_val
                     .map(Value::Float)
@@ -754,10 +749,38 @@ impl<'a> Interpreter<'a> {
                 }
                 Ok(true) // No match found
             }
-            Condition::Call { .. } => {
-                // TODO: Implement boolean calls
-                Ok(true)
+            Condition::Call { function, args } => {
+                let fn_name = self.ir.resolve_name(*function);
+                let mut vals = Vec::new();
+                for arg in args {
+                    vals.push(self.eval_operand(arg, env)?);
+                }
+                self.eval_builtin_predicate(fn_name, &vals)
             }
+        }
+    }
+
+    fn eval_builtin_predicate(&self, name: &str, vals: &[Value]) -> Result<bool> {
+        match name {
+            ":string:starts_with" => match (&vals[0], &vals[1]) {
+                (Value::String(s), Value::String(p)) => Ok(s.starts_with(p.as_str())),
+                _ => Err(anyhow!(":string:starts_with: expected string arguments")),
+            },
+            ":string:ends_with" => match (&vals[0], &vals[1]) {
+                (Value::String(s), Value::String(p)) => Ok(s.ends_with(p.as_str())),
+                _ => Err(anyhow!(":string:ends_with: expected string arguments")),
+            },
+            ":string:contains" => match (&vals[0], &vals[1]) {
+                (Value::String(s), Value::String(p)) => Ok(s.contains(p.as_str())),
+                _ => Err(anyhow!(":string:contains: expected string arguments")),
+            },
+            ":match_prefix" => match (&vals[0], &vals[1]) {
+                (Value::String(name), Value::String(prefix)) => {
+                    Ok(name.starts_with(prefix.as_str()) && name.len() > prefix.len())
+                }
+                _ => Err(anyhow!(":match_prefix: expected string arguments")),
+            },
+            _ => Err(anyhow!("Unknown built-in predicate: {name}")),
         }
     }
 
@@ -770,51 +793,7 @@ impl<'a> Interpreter<'a> {
                 for arg in args {
                     vals.push(self.eval_operand(arg, env)?);
                 }
-                match fn_name {
-                    "fn:plus" => match (&vals[0], &vals[1]) {
-                        (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a + b)),
-                        _ => Err(anyhow!("Type mismatch for fn:plus: expected integers")),
-                    },
-                    "fn:minus" => match (&vals[0], &vals[1]) {
-                        (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a - b)),
-                        _ => Err(anyhow!("Type mismatch for fn:minus: expected integers")),
-                    },
-                    "fn:mult" => match (&vals[0], &vals[1]) {
-                        (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a * b)),
-                        _ => Err(anyhow!("Type mismatch for fn:mult: expected integers")),
-                    },
-                    "fn:div" => match (&vals[0], &vals[1]) {
-                        (Value::Number(_), Value::Number(0)) => {
-                            Err(anyhow!("Division by zero in fn:div"))
-                        }
-                        (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a / b)),
-                        _ => Err(anyhow!("Type mismatch for fn:div: expected integers")),
-                    },
-                    "fn:float:plus" => match (&vals[0], &vals[1]) {
-                        (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
-                        _ => Err(anyhow!("Type mismatch for fn:float:plus: expected floats")),
-                    },
-                    "fn:float:minus" => match (&vals[0], &vals[1]) {
-                        (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a - b)),
-                        _ => Err(anyhow!("Type mismatch for fn:float:minus: expected floats")),
-                    },
-                    "fn:float:mult" => match (&vals[0], &vals[1]) {
-                        (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a * b)),
-                        _ => Err(anyhow!("Type mismatch for fn:float:mult: expected floats")),
-                    },
-                    "fn:float:div" => match (&vals[0], &vals[1]) {
-                        (Value::Float(_), Value::Float(b)) if *b == 0.0 => {
-                            Err(anyhow!("Division by zero in fn:float:div"))
-                        }
-                        (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a / b)),
-                        _ => Err(anyhow!("Type mismatch for fn:float:div: expected floats")),
-                    },
-                    "fn:sqrt" => match &vals[0] {
-                        Value::Float(a) => Ok(Value::Float(a.sqrt())),
-                        _ => Err(anyhow!("Type mismatch for fn:sqrt: expected float")),
-                    },
-                    _ => Err(anyhow!("Unknown function: {fn_name}")),
-                }
+                eval_function(fn_name, &vals)
             }
         }
     }
@@ -835,6 +814,227 @@ impl<'a> Interpreter<'a> {
                 Constant::Name(nid) => Ok(Value::String(self.ir.resolve_name(*nid).to_string())),
             },
         }
+    }
+}
+
+// --- Helper functions ---
+
+fn value_as_float(v: &Value) -> Result<f64> {
+    match v {
+        Value::Float(f) => Ok(*f),
+        Value::Number(n) => Ok(*n as f64),
+        _ => Err(anyhow!("expected numeric value, got {v}")),
+    }
+}
+
+fn value_to_string(v: &Value) -> String {
+    match v {
+        Value::Number(n) => n.to_string(),
+        Value::Float(f) => format!("{f}"),
+        Value::String(s) => s.clone(),
+        Value::Null => "null".to_string(),
+    }
+}
+
+/// Evaluate a built-in function call.
+pub fn eval_function(fn_name: &str, vals: &[Value]) -> Result<Value> {
+    match fn_name {
+        // --- Integer arithmetic (variadic) ---
+        "fn:plus" => {
+            let mut sum: i64 = 0;
+            for v in vals {
+                match v {
+                    Value::Number(n) => sum += n,
+                    _ => return Err(anyhow!("fn:plus: expected integer, got {v}")),
+                }
+            }
+            Ok(Value::Number(sum))
+        }
+        "fn:minus" => {
+            if vals.is_empty() {
+                return Err(anyhow!("fn:minus: requires at least 1 argument"));
+            }
+            let first = match &vals[0] {
+                Value::Number(n) => *n,
+                v => return Err(anyhow!("fn:minus: expected integer, got {v}")),
+            };
+            if vals.len() == 1 {
+                return Ok(Value::Number(-first));
+            }
+            let mut result = first;
+            for v in &vals[1..] {
+                match v {
+                    Value::Number(n) => result -= n,
+                    _ => return Err(anyhow!("fn:minus: expected integer, got {v}")),
+                }
+            }
+            Ok(Value::Number(result))
+        }
+        "fn:mult" => {
+            let mut product: i64 = 1;
+            for v in vals {
+                match v {
+                    Value::Number(n) => product *= n,
+                    _ => return Err(anyhow!("fn:mult: expected integer, got {v}")),
+                }
+            }
+            Ok(Value::Number(product))
+        }
+        "fn:div" => {
+            if vals.is_empty() {
+                return Err(anyhow!("fn:div: requires at least 1 argument"));
+            }
+            let first = match &vals[0] {
+                Value::Number(n) => *n,
+                v => return Err(anyhow!("fn:div: expected integer, got {v}")),
+            };
+            if vals.len() == 1 {
+                if first == 0 {
+                    return Err(anyhow!("Division by zero in fn:div"));
+                }
+                return Ok(Value::Number(1 / first));
+            }
+            let mut result = first;
+            for v in &vals[1..] {
+                match v {
+                    Value::Number(0) => return Err(anyhow!("Division by zero in fn:div")),
+                    Value::Number(n) => {
+                        result /= n;
+                        if result == 0 {
+                            return Ok(Value::Number(0));
+                        }
+                    }
+                    _ => return Err(anyhow!("fn:div: expected integer, got {v}")),
+                }
+            }
+            Ok(Value::Number(result))
+        }
+
+        // --- Float arithmetic (variadic, accepts Number via promotion) ---
+        "fn:float:plus" => {
+            let mut sum: f64 = 0.0;
+            for v in vals {
+                sum += value_as_float(v)?;
+            }
+            Ok(Value::Float(sum))
+        }
+        "fn:float:minus" => {
+            if vals.is_empty() {
+                return Err(anyhow!("fn:float:minus: requires at least 1 argument"));
+            }
+            let first = value_as_float(&vals[0])?;
+            if vals.len() == 1 {
+                return Ok(Value::Float(-first));
+            }
+            let mut result = first;
+            for v in &vals[1..] {
+                result -= value_as_float(v)?;
+            }
+            Ok(Value::Float(result))
+        }
+        "fn:float:mult" => {
+            let mut product: f64 = 1.0;
+            for v in vals {
+                product *= value_as_float(v)?;
+            }
+            Ok(Value::Float(product))
+        }
+        "fn:float:div" => {
+            if vals.is_empty() {
+                return Err(anyhow!("fn:float:div: requires at least 1 argument"));
+            }
+            let first = value_as_float(&vals[0])?;
+            if vals.len() == 1 {
+                if first == 0.0 {
+                    return Err(anyhow!("Division by zero in fn:float:div"));
+                }
+                return Ok(Value::Float(1.0 / first));
+            }
+            let mut result = first;
+            for v in &vals[1..] {
+                let d = value_as_float(v)?;
+                if d == 0.0 {
+                    return Err(anyhow!("Division by zero in fn:float:div"));
+                }
+                result /= d;
+            }
+            Ok(Value::Float(result))
+        }
+        "fn:sqrt" => {
+            if vals.len() != 1 {
+                return Err(anyhow!("fn:sqrt: requires exactly 1 argument"));
+            }
+            let f = value_as_float(&vals[0])?;
+            Ok(Value::Float(f.sqrt()))
+        }
+
+        // --- String functions ---
+        "fn:string:concat" => {
+            let mut result = String::new();
+            for v in vals {
+                result.push_str(&value_to_string(v));
+            }
+            Ok(Value::String(result))
+        }
+        "fn:string:replace" => {
+            if vals.len() != 4 {
+                return Err(anyhow!("fn:string:replace: requires 4 arguments (string, old, new, count)"));
+            }
+            let s = match &vals[0] {
+                Value::String(s) => s,
+                v => return Err(anyhow!("fn:string:replace: first arg must be string, got {v}")),
+            };
+            let old = match &vals[1] {
+                Value::String(s) => s,
+                v => return Err(anyhow!("fn:string:replace: second arg must be string, got {v}")),
+            };
+            let new_s = match &vals[2] {
+                Value::String(s) => s,
+                v => return Err(anyhow!("fn:string:replace: third arg must be string, got {v}")),
+            };
+            let count = match &vals[3] {
+                Value::Number(n) => *n,
+                v => return Err(anyhow!("fn:string:replace: fourth arg must be number, got {v}")),
+            };
+            let result = if count < 0 {
+                s.replace(old.as_str(), new_s.as_str())
+            } else {
+                s.replacen(old.as_str(), new_s.as_str(), count as usize)
+            };
+            Ok(Value::String(result))
+        }
+
+        // --- Type conversion functions ---
+        "fn:number:to_string" => {
+            if vals.len() != 1 {
+                return Err(anyhow!("fn:number:to_string: requires 1 argument"));
+            }
+            match &vals[0] {
+                Value::Number(n) => Ok(Value::String(n.to_string())),
+                v => Err(anyhow!("fn:number:to_string: expected number, got {v}")),
+            }
+        }
+        "fn:float64:to_string" => {
+            if vals.len() != 1 {
+                return Err(anyhow!("fn:float64:to_string: requires 1 argument"));
+            }
+            match &vals[0] {
+                Value::Float(f) => Ok(Value::String(format!("{f}"))),
+                v => Err(anyhow!("fn:float64:to_string: expected float, got {v}")),
+            }
+        }
+        "fn:name:to_string" => {
+            if vals.len() != 1 {
+                return Err(anyhow!("fn:name:to_string: requires 1 argument"));
+            }
+            match &vals[0] {
+                // Names are stored as String in the Rust Value representation
+                Value::String(s) => Ok(Value::String(s.clone())),
+                v => Err(anyhow!("fn:name:to_string: expected name, got {v}")),
+            }
+        }
+
+        _ => Err(anyhow!("Unknown function: {fn_name}")),
     }
 }
 
@@ -1074,5 +1274,138 @@ mod tests {
             .collect();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0][1], Value::Number(10));
+    }
+
+    // --- eval_function unit tests ---
+
+    #[test]
+    fn test_fn_plus_variadic() {
+        assert_eq!(
+            eval_function("fn:plus", &[Value::Number(1), Value::Number(2), Value::Number(3)]).unwrap(),
+            Value::Number(6)
+        );
+        // Zero args returns 0 (identity)
+        assert_eq!(eval_function("fn:plus", &[]).unwrap(), Value::Number(0));
+    }
+
+    #[test]
+    fn test_fn_minus_variadic() {
+        // Unary
+        assert_eq!(
+            eval_function("fn:minus", &[Value::Number(5)]).unwrap(),
+            Value::Number(-5)
+        );
+        // Binary
+        assert_eq!(
+            eval_function("fn:minus", &[Value::Number(10), Value::Number(3)]).unwrap(),
+            Value::Number(7)
+        );
+        // Variadic: 100 - 10 - 20 = 70
+        assert_eq!(
+            eval_function("fn:minus", &[Value::Number(100), Value::Number(10), Value::Number(20)]).unwrap(),
+            Value::Number(70)
+        );
+        // Zero args is an error
+        assert!(eval_function("fn:minus", &[]).is_err());
+    }
+
+    #[test]
+    fn test_fn_mult_variadic() {
+        assert_eq!(
+            eval_function("fn:mult", &[Value::Number(2), Value::Number(3), Value::Number(4)]).unwrap(),
+            Value::Number(24)
+        );
+        // Zero args returns 1 (identity)
+        assert_eq!(eval_function("fn:mult", &[]).unwrap(), Value::Number(1));
+    }
+
+    #[test]
+    fn test_fn_div() {
+        // Binary
+        assert_eq!(
+            eval_function("fn:div", &[Value::Number(10), Value::Number(3)]).unwrap(),
+            Value::Number(3)
+        );
+        // Unary: 1/n
+        assert_eq!(
+            eval_function("fn:div", &[Value::Number(5)]).unwrap(),
+            Value::Number(0)
+        );
+        assert_eq!(
+            eval_function("fn:div", &[Value::Number(1)]).unwrap(),
+            Value::Number(1)
+        );
+        // Division by zero
+        assert!(eval_function("fn:div", &[Value::Number(1), Value::Number(0)]).is_err());
+        assert!(eval_function("fn:div", &[Value::Number(0)]).is_err());
+    }
+
+    #[test]
+    fn test_fn_float_promotion() {
+        // fn:float:plus accepts both Float and Number
+        assert_eq!(
+            eval_function("fn:float:plus", &[Value::Float(1.5), Value::Number(2)]).unwrap(),
+            Value::Float(3.5)
+        );
+        // fn:sqrt accepts Number
+        assert_eq!(
+            eval_function("fn:sqrt", &[Value::Number(9)]).unwrap(),
+            Value::Float(3.0)
+        );
+    }
+
+    #[test]
+    fn test_fn_string_concat() {
+        assert_eq!(
+            eval_function(
+                "fn:string:concat",
+                &[Value::String("a".into()), Value::String("b".into()), Value::String("c".into())]
+            ).unwrap(),
+            Value::String("abc".to_string())
+        );
+        // Mixed types
+        assert_eq!(
+            eval_function(
+                "fn:string:concat",
+                &[Value::String("n=".into()), Value::Number(42)]
+            ).unwrap(),
+            Value::String("n=42".to_string())
+        );
+    }
+
+    #[test]
+    fn test_fn_string_replace() {
+        // Replace all (-1)
+        assert_eq!(
+            eval_function(
+                "fn:string:replace",
+                &[Value::String("a-b-c".into()), Value::String("-".into()), Value::String("_".into()), Value::Number(-1)]
+            ).unwrap(),
+            Value::String("a_b_c".to_string())
+        );
+        // Replace first only (1)
+        assert_eq!(
+            eval_function(
+                "fn:string:replace",
+                &[Value::String("a-b-c".into()), Value::String("-".into()), Value::String("_".into()), Value::Number(1)]
+            ).unwrap(),
+            Value::String("a_b-c".to_string())
+        );
+    }
+
+    #[test]
+    fn test_fn_to_string() {
+        assert_eq!(
+            eval_function("fn:number:to_string", &[Value::Number(42)]).unwrap(),
+            Value::String("42".to_string())
+        );
+        assert_eq!(
+            eval_function("fn:float64:to_string", &[Value::Float(3.14)]).unwrap(),
+            Value::String("3.14".to_string())
+        );
+        assert_eq!(
+            eval_function("fn:name:to_string", &[Value::String("/role/admin".into())]).unwrap(),
+            Value::String("/role/admin".to_string())
+        );
     }
 }

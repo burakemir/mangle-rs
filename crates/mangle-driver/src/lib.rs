@@ -839,4 +839,288 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn test_greater_than_comparison() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            num(10). num(50). num(85). num(99).
+            big(X) :- num(X), X > 50 .
+        "#;
+
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("big")
+            .expect("relation big not found")
+            .collect();
+        assert_eq!(facts.len(), 2, "expected 2 results, got {:?}", facts);
+
+        let mut values: Vec<i64> = facts
+            .iter()
+            .map(|t| match t[0] {
+                Value::Number(n) => n,
+                _ => panic!("expected number"),
+            })
+            .collect();
+        values.sort();
+        assert_eq!(values, vec![85, 99]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_greater_equal_comparison() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            num(10). num(50). num(85). num(99).
+            at_least_85(X) :- num(X), X >= 85 .
+        "#;
+
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("at_least_85")
+            .expect("relation at_least_85 not found")
+            .collect();
+        assert_eq!(facts.len(), 2, "expected 2 results, got {:?}", facts);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_variadic_arithmetic() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            p(1).
+            p(2).
+            q(Y) :- p(X) |> let Y = fn:plus(X, 10, 100).
+        "#;
+
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("q")
+            .expect("relation q not found")
+            .collect();
+        let mut values: Vec<i64> = facts
+            .iter()
+            .map(|t| match t[0] {
+                Value::Number(n) => n,
+                _ => panic!("expected number"),
+            })
+            .collect();
+        values.sort();
+        assert_eq!(values, vec![111, 112]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_unary_minus() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            p(5).
+            q(Y) :- p(X) |> let Y = fn:minus(X).
+        "#;
+
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("q")
+            .expect("relation q not found")
+            .collect();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0][0], Value::Number(-5));
+        Ok(())
+    }
+
+    #[test]
+    fn test_string_concat() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            p("hello", "world").
+            q(R) :- p(A, B) |> let R = fn:string:concat(A, " ", B).
+        "#;
+
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("q")
+            .expect("relation q not found")
+            .collect();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0][0], Value::String("hello world".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn test_string_replace() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        // Use fn:minus(1) since Mangle has no negative number literals
+        let source = r#"
+            p("foo-bar-baz").
+            q(R) :- p(S) |> let N = fn:minus(1); let R = fn:string:replace(S, "-", "_", N).
+        "#;
+
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("q")
+            .expect("relation q not found")
+            .collect();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0][0], Value::String("foo_bar_baz".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn test_number_to_string() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            p(42).
+            q(R) :- p(X) |> let R = fn:number:to_string(X).
+        "#;
+
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("q")
+            .expect("relation q not found")
+            .collect();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0][0], Value::String("42".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn test_float64_to_string() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            p(3.14).
+            q(R) :- p(X) |> let R = fn:float64:to_string(X).
+        "#;
+
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("q")
+            .expect("relation q not found")
+            .collect();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0][0], Value::String("3.14".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn test_float_promotion_in_sqrt() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            p(16).
+            q(R) :- p(X) |> let R = fn:sqrt(X).
+        "#;
+
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("q")
+            .expect("relation q not found")
+            .collect();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0][0], Value::Float(4.0));
+        Ok(())
+    }
+
+    #[test]
+    fn test_builtin_string_predicates() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            path("/api/users").
+            path("/api/posts").
+            path("/home").
+            path("/api/users/admin").
+            api_path(P) :- path(P), :string:starts_with(P, "/api").
+            users_path(P) :- path(P), :string:contains(P, "users").
+            html_path(P) :- path(P), :string:ends_with(P, "admin").
+        "#;
+
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let api_facts: Vec<_> = interpreter
+            .store()
+            .scan("api_path")
+            .expect("relation api_path not found")
+            .collect();
+        assert_eq!(api_facts.len(), 3, "api_path: {:?}", api_facts);
+
+        let users_facts: Vec<_> = interpreter
+            .store()
+            .scan("users_path")
+            .expect("relation users_path not found")
+            .collect();
+        assert_eq!(users_facts.len(), 2, "users_path: {:?}", users_facts);
+
+        let html_facts: Vec<_> = interpreter
+            .store()
+            .scan("html_path")
+            .expect("relation html_path not found")
+            .collect();
+        assert_eq!(html_facts.len(), 1, "html_path: {:?}", html_facts);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_match_prefix() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            name("/role/admin").
+            name("/role").
+            name("/other").
+            under_role(N) :- name(N), :match_prefix(N, "/role").
+        "#;
+
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("under_role")
+            .expect("relation under_role not found")
+            .collect();
+        // "/role" itself should NOT match (must be strictly longer)
+        assert_eq!(facts.len(), 1, "under_role: {:?}", facts);
+        assert_eq!(facts[0][0], Value::String("/role/admin".to_string()));
+
+        Ok(())
+    }
 }

@@ -55,6 +55,14 @@ fn le_sym(arena: &Arena) -> ast::PredicateIndex {
     arena.predicate_sym(":le", Some(2))
 }
 
+fn gt_sym(arena: &Arena) -> ast::PredicateIndex {
+    arena.predicate_sym(":gt", Some(2))
+}
+
+fn ge_sym(arena: &Arena) -> ast::PredicateIndex {
+    arena.predicate_sym(":ge", Some(2))
+}
+
 fn fn_list_sym(arena: &Arena) -> ast::FunctionIndex {
     arena.function_sym("fn:list", None)
 }
@@ -367,8 +375,8 @@ where
                 let left_base_term = self.parse_base_term()?;
                 let op = self.token.clone();
                 match op {
-                    Token::Eq | Token::BangEq | Token::Lt | Token::Le => self.next_token()?,
-                    _ => bail!("parse_terms: expected `=` or `!=` got {}", self.token),
+                    Token::Eq | Token::BangEq | Token::Lt | Token::Le | Token::Gt | Token::Ge => self.next_token()?,
+                    _ => bail!("parse_terms: expected comparison operator, got {}", self.token),
                 };
                 let right_base_term = self.parse_base_term()?;
                 let term = match op {
@@ -383,6 +391,17 @@ where
                     )),
                     Token::Le => ast::Term::Atom(self.arena.alloc(ast::Atom {
                         sym: le_sym(self.arena),
+                        args: alloc_slice!(self, &[left_base_term, right_base_term]),
+                    })),
+                    Token::Gt => ast::Term::Atom(alloc!(
+                        self,
+                        ast::Atom {
+                            sym: gt_sym(self.arena),
+                            args: alloc_slice!(self, &[left_base_term, right_base_term]),
+                        }
+                    )),
+                    Token::Ge => ast::Term::Atom(self.arena.alloc(ast::Atom {
+                        sym: ge_sym(self.arena),
                         args: alloc_slice!(self, &[left_base_term, right_base_term]),
                     })),
                     _ => unreachable!(),

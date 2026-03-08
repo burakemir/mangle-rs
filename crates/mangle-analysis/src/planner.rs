@@ -262,13 +262,17 @@ impl<'a> Planner<'a> {
 
         match inst {
             Inst::Atom { predicate, args }
-                if matches!(self.ir.resolve_name(predicate), ":lt" | ":le") =>
+                if matches!(
+                    self.ir.resolve_name(predicate),
+                    ":lt" | ":le" | ":gt" | ":ge"
+                ) =>
             {
-                // Built-in comparison predicates: :lt (less-than) and :le (less-or-equal)
-                let cmp_op = if self.ir.resolve_name(predicate) == ":lt" {
-                    CmpOp::Lt
-                } else {
-                    CmpOp::Le
+                let cmp_op = match self.ir.resolve_name(predicate) {
+                    ":lt" => CmpOp::Lt,
+                    ":le" => CmpOp::Le,
+                    ":gt" => CmpOp::Gt,
+                    ":ge" => CmpOp::Ge,
+                    _ => unreachable!(),
                 };
                 if args.len() != 2 {
                     return Err(anyhow!("Comparison predicate requires exactly 2 arguments"));
@@ -281,6 +285,33 @@ impl<'a> Planner<'a> {
                                 op: cmp_op,
                                 left: left_op.clone(),
                                 right: right_op,
+                            },
+                            body: Box::new(body),
+                        })
+                    })
+                })
+            }
+            Inst::Atom { predicate, args }
+                if matches!(
+                    self.ir.resolve_name(predicate),
+                    ":string:starts_with"
+                        | ":string:ends_with"
+                        | ":string:contains"
+                        | ":match_prefix"
+                ) =>
+            {
+                if args.len() != 2 {
+                    return Err(anyhow!(
+                        "Built-in predicate requires exactly 2 arguments"
+                    ));
+                }
+                let body = self.plan_join_sequence(premises, bound_vars, continuation)?;
+                self.with_eval(args[0], |this, left_op| {
+                    this.with_eval(args[1], |_this, right_op| {
+                        Ok(Op::Filter {
+                            cond: Condition::Call {
+                                function: predicate,
+                                args: vec![left_op.clone(), right_op],
                             },
                             body: Box::new(body),
                         })

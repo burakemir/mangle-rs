@@ -111,6 +111,10 @@ where
                     let _ = self.next_char()?;
                     Ok(Token::ColonDash)
                 }
+                Some(c) if is_ident_start(c) => {
+                    // Built-in predicate name like :string:contains
+                    self.builtin_predicate()
+                }
                 _ => Ok(Token::Colon),
             },
             Some('|') => match self.peek()? {
@@ -144,6 +148,28 @@ where
             Some(ch) => Err(anyhow!(ScanError::Unexpected(self.get_error_context(), ch))),
             None => Ok(Token::Eof),
         }
+    }
+
+    /// Scans a built-in predicate name starting with `:`, e.g. `:string:contains`.
+    fn builtin_predicate(&mut self) -> Result<Token> {
+        self.text.clear();
+        self.text.push(':');
+        loop {
+            match self.peek()? {
+                Some(ch) if is_ident(ch) => {
+                    self.next_char()?;
+                    self.text.push(ch);
+                }
+                Some(':') => {
+                    self.next_char()?;
+                    self.text.push(':');
+                }
+                _ => break,
+            }
+        }
+        Ok(Token::Ident {
+            name: self.text.clone(),
+        })
     }
 
     fn name(&mut self) -> Result<Token> {
@@ -239,7 +265,10 @@ where
                     self.next_char()?;
                     self.text.push(ch);
                 }
-                Some(':') if self.text == "fn" => {
+                Some(':')
+                    if (self.text.starts_with("fn:") || self.text == "fn")
+                        && !self.text.ends_with(':') =>
+                {
                     self.next_char()?;
                     self.text.push(':');
                 }
