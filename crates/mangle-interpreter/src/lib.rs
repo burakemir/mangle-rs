@@ -451,7 +451,13 @@ impl Store for MemStore {
     }
 
     fn relation_names(&self) -> Vec<String> {
-        self.stable.keys().cloned().collect()
+        let mut names: Vec<String> = self.stable.keys().cloned().collect();
+        for key in self.delta.keys() {
+            if !names.contains(key) {
+                names.push(key.clone());
+            }
+        }
+        names
     }
 }
 

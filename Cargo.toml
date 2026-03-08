@@ -15,7 +15,8 @@ members = [
     "crates/mangle-interpreter",
     "crates/mangle-simplecolumn",
     "crates/mangle-server",
-    "crates/mangle-db"
+    "crates/mangle-db",
+    "crates/mangle-wasm"
 ]
 
 [workspace.package]
@@ -56,4 +57,5 @@ mangle-db = { version = "0.4.0", path = "./crates/mangle-db" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+wasm-bindgen = "0.2"
 criterion = { version = "0.5", features = ["html_reports"] }
