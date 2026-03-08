@@ -136,6 +136,10 @@ where
             Some(delim @ '\'') => self.string(delim, false),
             Some(delim @ '"') => self.string(delim, false),
             Some(first @ '0'..='9') => self.numeric(first),
+            Some('-') => match self.peek()? {
+                Some('0'..='9' | '.') => self.numeric('-'),
+                _ => Err(anyhow!(ScanError::Unexpected(self.get_error_context(), '-'))),
+            },
             Some(ch) if is_ident_start(ch) => {
                 if ch == 'b'
                     && let Some(delim @ ('\'' | '"')) = self.peek()?
@@ -502,6 +506,18 @@ mod test {
     fn test_names_negative() -> Result<()> {
         scan_all("/").unwrap_err();
         scan_all("/foo/").unwrap_err();
+        Ok(())
+    }
+
+    #[test]
+    fn test_negative_numbers() -> Result<()> {
+        let got = scan_all("-42 -3.14 -.5")?;
+        let want = vec![
+            Token::Int { decoded: -42 },
+            Token::Float { decoded: -3.14 },
+            Token::Float { decoded: -0.5 },
+        ];
+        assert!(want == got, "want {:?} got {:?}", want, got);
         Ok(())
     }
 }

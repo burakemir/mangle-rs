@@ -971,10 +971,9 @@ mod tests {
     #[test]
     fn test_string_replace() -> Result<()> {
         let arena = Arena::new_with_global_interner();
-        // Use fn:minus(1) since Mangle has no negative number literals
         let source = r#"
             p("foo-bar-baz").
-            q(R) :- p(S) |> let N = fn:minus(1); let R = fn:string:replace(S, "-", "_", N).
+            q(R) :- p(S) |> let R = fn:string:replace(S, "-", "_", -1).
         "#;
 
         let (mut ir, stratified) = compile(source, &arena)?;
@@ -1054,6 +1053,39 @@ mod tests {
             .collect();
         assert_eq!(facts.len(), 1);
         assert_eq!(facts[0][0], Value::Float(4.0));
+        Ok(())
+    }
+
+    #[test]
+    fn test_negative_number_literals() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            temp(-10).
+            temp(5).
+            temp(20).
+            below_zero(X) :- temp(X), X < 0 .
+            offset(X, Y) :- temp(X) |> let Y = fn:float:plus(X, -0.5).
+        "#;
+
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("below_zero")
+            .expect("relation below_zero not found")
+            .collect();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0][0], Value::Number(-10));
+
+        let offset_facts: Vec<_> = interpreter
+            .store()
+            .scan("offset")
+            .expect("relation offset not found")
+            .collect();
+        assert_eq!(offset_facts.len(), 3);
+
         Ok(())
     }
 
