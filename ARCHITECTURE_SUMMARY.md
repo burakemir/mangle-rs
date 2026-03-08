@@ -123,17 +123,34 @@ Acts as the central interface crate to prevent dependency cycles.
 *   **`mangle-vm::composite_host`:** Routes relations to different sub-hosts.
 *   **`mangle-db`:** Persistent storage layer with durable EDB writes.
 
-## 8. Performance
+## 8. Browser WASM Target
+
+**Crate:** `mangle-wasm`
+
+*   Compiles the edge-mode interpreter to `wasm32-unknown-unknown` for browser use.
+*   **Dynamic mode:** `run_mangle(source, facts_json)` — supply program and data at runtime.
+*   **Bundled mode:** `run_bundled(facts_json)` — program baked in at compile time via
+    `MANGLE_PROGRAM` env var (partial evaluation).
+*   `wasm-bindgen` is optional (feature `bindgen`). Without it, raw C-ABI exports
+    (`alloc`, `dealloc`, `run_raw`) enable use from wasmtime or other WASM runtimes.
+*   Built with: `wasm-pack build --target web crates/mangle-wasm`
+
+## 9. Performance
 
 A criterion benchmark (`mangle-driver/benches/wasm_vs_interpreter.rs`) compares
-both execution modes on transitive closure (reachability) over linear graphs.
+three execution modes on transitive closure (reachability) over linear graphs:
 
-At small sizes (10 nodes), WASM is ~25x slower due to instantiation overhead.
-At larger sizes (5000 nodes), the gap narrows to ~2x, with the remaining
-overhead attributable to externref host-call boundary crossing on every value
-operation.
+1.  **Interpreter** — native Rust interpreter (edge mode).
+2.  **Codegen-WASM** — per-program WASM codegen with externref host calls (server mode).
+3.  **Interp-in-WASM** — full interpreter compiled to WASM, run in wasmtime.
 
-## 9. Key Data Structures
+At small-medium sizes (up to ~1000 nodes), interp-in-WASM outperforms
+codegen-WASM because it avoids the externref host-call boundary. At 5000 nodes,
+codegen-WASM (2.2x native) beats interp-in-WASM (6.3x native), as the
+JIT-compiled control flow is more efficient than interpreted IR dispatch inside
+WASM.
+
+## 10. Key Data Structures
 
 *   **`InstId`**: Index into the IR instruction vector.
 *   **`NameId`**: Interned string reference.
