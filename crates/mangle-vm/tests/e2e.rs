@@ -20,6 +20,16 @@ use mangle_vm::csv_host::CsvHost;
 #[cfg(feature = "csv_storage")]
 #[test]
 fn test_e2e_composite_storage() -> Result<()> {
+    use anyhow::Result;
+    use mangle_analysis::LoweringContext;
+    use mangle_ast as ast;
+    use mangle_codegen::{Codegen, WasmImportsBackend};
+    use mangle_vm::composite_host::CompositeHost;
+    use mangle_vm::{Host, HostVal, Vm};
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+    use tempfile::NamedTempFile;
+
     // 1. CSV for 'p' (10, 30)
     let mut file_p = NamedTempFile::new()?;
     writeln!(file_p, "10")?;
@@ -73,29 +83,60 @@ fn test_e2e_composite_storage() -> Result<()> {
     let mut ir = ctx.lower_unit(&unit);
 
     let mut codegen = Codegen::new(&mut ir, WasmImportsBackend);
-    let wasm = codegen.generate();
+    let compiled = codegen.generate();
 
     // 6. Execute via Shared Wrapper
     #[derive(Clone)]
     struct SharedHost<H>(Arc<Mutex<H>>);
     impl<H: Host> Host for SharedHost<H> {
-        fn scan_start(&mut self, id: i32) -> i32 {
-            self.0.lock().unwrap().scan_start(id)
-        }
-        fn scan_next(&mut self, id: i32) -> i32 {
-            self.0.lock().unwrap().scan_next(id)
-        }
-        fn get_col(&mut self, p: i32, i: i32) -> i64 {
-            self.0.lock().unwrap().get_col(p, i)
-        }
-        fn insert(&mut self, id: i32, v: i64) {
-            self.0.lock().unwrap().insert(id, v)
-        }
+        fn scan_start(&mut self, id: i32) -> i32 { self.0.lock().unwrap().scan_start(id) }
+        fn scan_delta_start(&mut self, id: i32) -> i32 { self.0.lock().unwrap().scan_delta_start(id) }
+        fn scan_next(&mut self, id: i32) -> i32 { self.0.lock().unwrap().scan_next(id) }
+        fn merge_deltas(&mut self) -> i32 { self.0.lock().unwrap().merge_deltas() }
+        fn scan_aggregate_start(&mut self, id: i32, desc: Vec<i32>) -> i32 { self.0.lock().unwrap().scan_aggregate_start(id, desc) }
+        fn scan_index_start(&mut self, id: i32, col: i32, val: HostVal) -> i32 { self.0.lock().unwrap().scan_index_start(id, col, val) }
+        fn get_col(&mut self, p: i32, i: i32) -> HostVal { self.0.lock().unwrap().get_col(p, i) }
+        fn insert_begin(&mut self, id: i32) { self.0.lock().unwrap().insert_begin(id) }
+        fn insert_push(&mut self, v: HostVal) { self.0.lock().unwrap().insert_push(v) }
+        fn insert_end(&mut self) { self.0.lock().unwrap().insert_end() }
+        fn const_number(&mut self, n: i64) -> HostVal { self.0.lock().unwrap().const_number(n) }
+        fn const_float(&mut self, b: i64) -> HostVal { self.0.lock().unwrap().const_float(b) }
+        fn const_string(&mut self, id: i32) -> HostVal { self.0.lock().unwrap().const_string(id) }
+        fn const_name(&mut self, id: i32) -> HostVal { self.0.lock().unwrap().const_name(id) }
+        fn const_time(&mut self, n: i64) -> HostVal { self.0.lock().unwrap().const_time(n) }
+        fn const_duration(&mut self, n: i64) -> HostVal { self.0.lock().unwrap().const_duration(n) }
+        fn val_add(&mut self, a: HostVal, b: HostVal) -> HostVal { self.0.lock().unwrap().val_add(a, b) }
+        fn val_sub(&mut self, a: HostVal, b: HostVal) -> HostVal { self.0.lock().unwrap().val_sub(a, b) }
+        fn val_mul(&mut self, a: HostVal, b: HostVal) -> HostVal { self.0.lock().unwrap().val_mul(a, b) }
+        fn val_div(&mut self, a: HostVal, b: HostVal) -> HostVal { self.0.lock().unwrap().val_div(a, b) }
+        fn val_sqrt(&mut self, a: HostVal) -> HostVal { self.0.lock().unwrap().val_sqrt(a) }
+        fn val_eq(&mut self, a: HostVal, b: HostVal) -> i32 { self.0.lock().unwrap().val_eq(a, b) }
+        fn val_neq(&mut self, a: HostVal, b: HostVal) -> i32 { self.0.lock().unwrap().val_neq(a, b) }
+        fn val_lt(&mut self, a: HostVal, b: HostVal) -> i32 { self.0.lock().unwrap().val_lt(a, b) }
+        fn val_le(&mut self, a: HostVal, b: HostVal) -> i32 { self.0.lock().unwrap().val_le(a, b) }
+        fn val_gt(&mut self, a: HostVal, b: HostVal) -> i32 { self.0.lock().unwrap().val_gt(a, b) }
+        fn val_ge(&mut self, a: HostVal, b: HostVal) -> i32 { self.0.lock().unwrap().val_ge(a, b) }
+        fn str_concat(&mut self, a: HostVal, b: HostVal) -> HostVal { self.0.lock().unwrap().str_concat(a, b) }
+        fn str_replace(&mut self, s: HostVal, o: HostVal, n: HostVal, c: HostVal) -> HostVal { self.0.lock().unwrap().str_replace(s, o, n, c) }
+        fn val_to_string(&mut self, v: HostVal) -> HostVal { self.0.lock().unwrap().val_to_string(v) }
+        fn compound_begin(&mut self, k: i32) { self.0.lock().unwrap().compound_begin(k) }
+        fn compound_push(&mut self, v: HostVal) { self.0.lock().unwrap().compound_push(v) }
+        fn compound_end(&mut self) -> HostVal { self.0.lock().unwrap().compound_end() }
+        fn compound_get(&mut self, c: HostVal, k: HostVal) -> HostVal { self.0.lock().unwrap().compound_get(c, k) }
+        fn compound_len(&mut self, c: HostVal) -> HostVal { self.0.lock().unwrap().compound_len(c) }
+        fn pair_first(&mut self, c: HostVal) -> HostVal { self.0.lock().unwrap().pair_first(c) }
+        fn pair_second(&mut self, c: HostVal) -> HostVal { self.0.lock().unwrap().pair_second(c) }
+        fn debuglog(&mut self, v: HostVal) { self.0.lock().unwrap().debuglog(v) }
     }
 
     let shared_host = SharedHost(Arc::new(Mutex::new(comp_host)));
     let vm = Vm::new()?;
-    vm.execute(&wasm, shared_host)?;
+    vm.execute(
+        &compiled.wasm,
+        shared_host,
+        compiled.strings,
+        compiled.names,
+    )?;
 
     Ok(())
 }

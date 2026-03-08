@@ -230,6 +230,18 @@ pub mod store {
         fn create_relation(&mut self, relation: &str) {
             self.mem.create_relation(relation)
         }
+
+        fn retract(&mut self, relation: &str, tuple: &[Value]) -> Result<bool> {
+            self.mem.retract(relation, tuple)
+        }
+
+        fn clear(&mut self, relation: &str) {
+            self.mem.clear(relation)
+        }
+
+        fn relation_names(&self) -> Vec<String> {
+            self.mem.relation_names()
+        }
     }
 
     fn term_to_value(term: &ast::BaseTerm) -> Value {
@@ -247,21 +259,18 @@ pub mod store {
 pub mod host {
     use super::*;
     use mangle_ast::Arena;
-    use mangle_common::Host;
+    use mangle_common::{Host, HostVal};
     use std::collections::HashMap;
     use std::fs::File;
     use std::path::Path;
 
     pub struct SimpleColumnHost {
-        // We'll reuse the internal logic by loading into a structure similar to MemHost
-        // Since we need an Arena to parse, we must own or borrow one.
-        // For simplicity, we create one internally?
-        // But `read_simple_column` requires `&Arena`.
-        // We'll create one in `new`.
         arena: Arena,
-        data: HashMap<i32, Vec<Vec<i64>>>, // Only supports i64 for now as per VM limitation
+        data: HashMap<i32, Vec<Vec<i64>>>,
         iters: HashMap<i32, (i32, usize)>,
         next_iter_id: i32,
+        /// Value slab for HostVal handles
+        values: Vec<i64>,
     }
 
     impl SimpleColumnHost {
@@ -271,16 +280,23 @@ pub mod host {
                 data: HashMap::new(),
                 iters: HashMap::new(),
                 next_iter_id: 1,
+                values: Vec::new(),
             }
+        }
+
+        fn alloc_number(&mut self, n: i64) -> HostVal {
+            let idx = self.values.len() as u32;
+            self.values.push(n);
+            HostVal(idx)
+        }
+
+        fn get_number(&self, hv: HostVal) -> i64 {
+            self.values[hv.0 as usize]
         }
 
         pub fn load_file(&mut self, _rel_name: &str, path: &Path) -> Result<()> {
             let file = File::open(path)?;
             let sc_data = read_simple_column(&self.arena, std::io::BufReader::new(file))?;
-
-            // Assume the file contains the relation we asked for (or others)
-            // But sc_data has names from file.
-            // We map them to hash IDs.
 
             for (pred, facts) in sc_data.tables {
                 let id = hash_name(&pred);
@@ -291,8 +307,6 @@ pub mod host {
                         if let ast::BaseTerm::Const(ast::Const::Number(n)) = term {
                             tuple.push(*n);
                         } else {
-                            // Skip non-numeric for now? Or error?
-                            // eprintln!("Skipping non-numeric term in SimpleColumnHost");
                             tuple.push(0);
                         }
                     }
@@ -333,44 +347,57 @@ pub mod host {
             0
         }
 
-        fn get_col(&mut self, ptr: i32, col_idx: i32) -> i64 {
+        fn get_col(&mut self, ptr: i32, col_idx: i32) -> HostVal {
             let iter_id = ptr >> 16;
             let tuple_idx = (ptr & 0xFFFF) - 1;
 
             if let Some((rel_id, _)) = self.iters.get(&iter_id) {
                 if let Some(tuples) = self.data.get(rel_id) {
                     if let Some(row) = tuples.get(tuple_idx as usize) {
-                        return row.get(col_idx as usize).copied().unwrap_or(0);
+                        let n = row.get(col_idx as usize).copied().unwrap_or(0);
+                        return self.alloc_number(n);
                     }
                 }
             }
-            0
+            HostVal(0)
         }
 
-        fn insert(&mut self, rel_id: i32, val: i64) {
-            // SimpleColumnHost is primarily read-only EDB, but if we insert, we assume single-column?
-            // Or we just append a row with one value.
-            self.data.entry(rel_id).or_default().push(vec![val]);
-        }
+        fn insert_begin(&mut self, _rel_id: i32) {}
+        fn insert_push(&mut self, _val: HostVal) {}
+        fn insert_end(&mut self) {}
 
-        fn scan_delta_start(&mut self, _rel_id: i32) -> i32 {
-            // SimpleColumnHost is for testing simple EDBs, no delta/recursion logic yet.
-            // Just return 0 (no deltas).
-            0
-        }
+        fn scan_delta_start(&mut self, _rel_id: i32) -> i32 { 0 }
+        fn scan_index_start(&mut self, _rel_id: i32, _col_idx: i32, _val: HostVal) -> i32 { 0 }
+        fn scan_aggregate_start(&mut self, _rel_id: i32, _description: Vec<i32>) -> i32 { 0 }
+        fn merge_deltas(&mut self) -> i32 { 0 }
 
-        fn scan_index_start(&mut self, _rel_id: i32, _col_idx: i32, _val: i64) -> i32 {
-            0
-        }
-
-        fn scan_aggregate_start(&mut self, _rel_id: i32, _description: Vec<i32>) -> i32 {
-            0
-        }
-
-        fn merge_deltas(&mut self) -> i32 {
-            0
-        }
-
-        fn debuglog(&mut self, _val: i64) {}
+        fn const_number(&mut self, n: i64) -> HostVal { self.alloc_number(n) }
+        fn const_float(&mut self, _bits: i64) -> HostVal { HostVal(0) }
+        fn const_string(&mut self, _id: i32) -> HostVal { HostVal(0) }
+        fn const_name(&mut self, _id: i32) -> HostVal { HostVal(0) }
+        fn const_time(&mut self, _nanos: i64) -> HostVal { HostVal(0) }
+        fn const_duration(&mut self, _nanos: i64) -> HostVal { HostVal(0) }
+        fn val_add(&mut self, _a: HostVal, _b: HostVal) -> HostVal { HostVal(0) }
+        fn val_sub(&mut self, _a: HostVal, _b: HostVal) -> HostVal { HostVal(0) }
+        fn val_mul(&mut self, _a: HostVal, _b: HostVal) -> HostVal { HostVal(0) }
+        fn val_div(&mut self, _a: HostVal, _b: HostVal) -> HostVal { HostVal(0) }
+        fn val_sqrt(&mut self, _a: HostVal) -> HostVal { HostVal(0) }
+        fn val_eq(&mut self, a: HostVal, b: HostVal) -> i32 { (self.get_number(a) == self.get_number(b)) as i32 }
+        fn val_neq(&mut self, a: HostVal, b: HostVal) -> i32 { (self.get_number(a) != self.get_number(b)) as i32 }
+        fn val_lt(&mut self, _a: HostVal, _b: HostVal) -> i32 { 0 }
+        fn val_le(&mut self, _a: HostVal, _b: HostVal) -> i32 { 0 }
+        fn val_gt(&mut self, _a: HostVal, _b: HostVal) -> i32 { 0 }
+        fn val_ge(&mut self, _a: HostVal, _b: HostVal) -> i32 { 0 }
+        fn str_concat(&mut self, _a: HostVal, _b: HostVal) -> HostVal { HostVal(0) }
+        fn str_replace(&mut self, _s: HostVal, _old: HostVal, _new: HostVal, _count: HostVal) -> HostVal { HostVal(0) }
+        fn val_to_string(&mut self, _val: HostVal) -> HostVal { HostVal(0) }
+        fn compound_begin(&mut self, _kind: i32) {}
+        fn compound_push(&mut self, _val: HostVal) {}
+        fn compound_end(&mut self) -> HostVal { HostVal(0) }
+        fn compound_get(&mut self, _compound: HostVal, _key: HostVal) -> HostVal { HostVal(0) }
+        fn compound_len(&mut self, _compound: HostVal) -> HostVal { HostVal(0) }
+        fn pair_first(&mut self, _compound: HostVal) -> HostVal { HostVal(0) }
+        fn pair_second(&mut self, _compound: HostVal) -> HostVal { HostVal(0) }
+        fn debuglog(&mut self, _val: HostVal) {}
     }
 }

@@ -571,6 +571,81 @@ impl<'a> Planner<'a> {
                     })
                 }),
             ),
+            // Compound types: route through function calls
+            Inst::List(args) => {
+                let fn_name = self.ir.intern_name("fn:list".to_string());
+                self.with_eval_args(
+                    &args,
+                    0,
+                    Vec::new(),
+                    Box::new(|this, ops| {
+                        let tmp = this.fresh_var("list");
+                        let inner = f(this, Operand::Var(tmp))?;
+                        Ok(Op::Let {
+                            var: tmp,
+                            expr: Expr::Call {
+                                function: fn_name,
+                                args: ops,
+                            },
+                            body: Box::new(inner),
+                        })
+                    }),
+                )
+            }
+            Inst::Map { keys, values } => {
+                // Interleave keys and values: [k1, v1, k2, v2, ...]
+                let mut interleaved = Vec::with_capacity(keys.len() + values.len());
+                for (k, v) in keys.iter().zip(values.iter()) {
+                    interleaved.push(*k);
+                    interleaved.push(*v);
+                }
+                let fn_name = self.ir.intern_name("fn:map".to_string());
+                self.with_eval_args(
+                    &interleaved,
+                    0,
+                    Vec::new(),
+                    Box::new(|this, ops| {
+                        let tmp = this.fresh_var("map");
+                        let inner = f(this, Operand::Var(tmp))?;
+                        Ok(Op::Let {
+                            var: tmp,
+                            expr: Expr::Call {
+                                function: fn_name,
+                                args: ops,
+                            },
+                            body: Box::new(inner),
+                        })
+                    }),
+                )
+            }
+            Inst::Struct { fields, values } => {
+                // Interleave field names and values: [name1, val1, name2, val2, ...]
+                let mut interleaved = Vec::with_capacity(fields.len() + values.len());
+                for (field, val) in fields.iter().zip(values.iter()) {
+                    // Field names are NameIds, emit as Name constants
+                    let name_inst = self.ir.add_inst(Inst::Name(*field));
+                    interleaved.push(name_inst);
+                    interleaved.push(*val);
+                }
+                let fn_name = self.ir.intern_name("fn:struct".to_string());
+                self.with_eval_args(
+                    &interleaved,
+                    0,
+                    Vec::new(),
+                    Box::new(|this, ops| {
+                        let tmp = this.fresh_var("struct");
+                        let inner = f(this, Operand::Var(tmp))?;
+                        Ok(Op::Let {
+                            var: tmp,
+                            expr: Expr::Call {
+                                function: fn_name,
+                                args: ops,
+                            },
+                            body: Box::new(inner),
+                        })
+                    }),
+                )
+            }
             _ => Err(anyhow!("Unsupported expression in evaluation")),
         }
     }

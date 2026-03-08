@@ -1,69 +1,143 @@
 # Mangle Rust Implementation Architecture Summary
 
-This document summarizes the architecture of the Rust implementation of Mangle.
+This document describes the architecture of `mangle-rs`, the Rust implementation
+of the [Mangle](https://mangle.readthedocs.io/en/latest/) deductive database
+language.
 
 ## 1. Abstract Syntax Tree (AST) & Parsing
-**Location:** `third_party/mangle/rust/ast`, `third_party/mangle/rust/parse`
 
-*   **Memory Management:** Utilizes a bump-pointer allocator (`bumpalo`) for efficient allocation of AST nodes.
-*   **Interning:** Uses a global or thread-local string `Interner` to deduplicate identifiers.
-*   **Parser:** Recursive descent parser generating AST from source string.
+**Crates:** `mangle-ast`, `mangle-parse`
+
+*   **Memory Management:** Bump-pointer allocator (`bumpalo`) for arena-allocated
+    AST nodes. All AST types carry a lifetime tied to the arena.
+*   **Interning:** Global string `Interner` deduplicates predicate names,
+    variable names, and string constants.
+*   **Parser:** Recursive-descent parser producing `ast::Unit` (declarations +
+    clauses) from source bytes. Supports Mangle syntax including transforms
+    (`|> let X = ...`), negation (`!p(X)`), and package/use directives.
 
 ## 2. Intermediate Representation (IR)
-**Location:** `third_party/mangle/rust/ir`
 
-*   **Design:** A flat, vector-based representation inspired by Carbon's SemIR.
-*   **Logical IR (`Inst`):** Represents the declarative logic (Rules, Atoms, Expressions).
-*   **Physical Plan IR (`physical::Op`):** Represents imperative execution logic (Iterate, Scan, Filter, Insert).
+**Crate:** `mangle-ir`
+
+*   **Design:** Flat, vector-based representation inspired by Carbon's SemIR.
+    Instructions are identified by `InstId` indices into a single `Vec<Inst>`.
+*   **Logical IR (`Inst`):** Declarative logic — `Rule`, `Atom`, `NegAtom`,
+    `Expr`, `Const`, `Variable`, `LetTransform`.
+*   **Physical Plan IR (`physical::Op`):** Imperative execution plan — `Iterate`,
+    `IterateDelta`, `IndexLookup`, `Filter`, `Insert`, `Aggregate`, `Project`.
+    Produced by the `Planner`.
 
 ## 3. Analysis & Lowering
-**Location:** `third_party/mangle/rust/analysis`
+
+**Crate:** `mangle-analysis`
 
 *   **Lowering (`lowering.rs`):** Converts AST into Logical IR.
-*   **Planner (`planner.rs`):** Transforms Logical IR into Physical Plan IR (nested-loop joins).
-*   **Type Checking (`type_check.rs`):** Validates predicates and types.
+*   **Planner (`planner.rs`):** Transforms Logical IR rules into Physical Plan
+    IR. Generates nested-loop joins, index lookups (when a body atom has bound
+    constants), and semi-naive delta plans for recursive predicates.
+*   **Stratification (`program.rs`):** Dependency analysis and topological
+    ordering of predicates to handle negation correctly. Produces
+    `StratifiedProgram` with ordered strata.
+*   **Type Checking (`type_check.rs`):** Validates predicate arities and type
+    consistency.
 
 ## 4. Driver & Orchestration
-**Location:** `third_party/mangle/rust/driver`
 
-*   **Role:** Orchestrates the entire compilation and execution pipeline.
-*   **Stratification:** Handles program stratification (in `SimpleProgram`) to correctly evaluate negation.
-*   **API:** Provides high-level `compile` and `execute` functions.
+**Crate:** `mangle-driver`
+
+*   **API:**
+    *   `compile(source, arena)` — Parse → rename → stratify → lower to IR.
+    *   `execute(ir, stratified, store)` — Plan → interpret (Edge Mode).
+    *   `compile_to_wasm(ir, stratified)` — Plan → codegen → `CompiledModule`.
+*   **Multi-unit compilation:** `compile_units()` supports multiple source units
+    with package/use namespacing.
+*   **Fixpoint evaluation:** For recursive strata, runs semi-naive iteration
+    (initial rules → merge deltas → delta rules → repeat until no changes).
 
 ## 5. Execution Modes
 
 ### A. Server Mode (WASM)
-**Location:** `third_party/mangle/rust/codegen`, `third_party/mangle/rust/vm`
 
-*   **Codegen:** Translates Physical IR to WebAssembly.
-*   **VM:** Executes WASM using `wasmtime` with host functions for data storage operations.
-*   **Pluggable Storage:** The VM defines a `Host` trait that abstracts data access (`scan`, `insert`). This allows for modular, pluggable relation storage (e.g., in-memory, B-Tree, external DB) without changing the core engine or generated code.
+**Crates:** `mangle-codegen`, `mangle-vm`
+
+*   **Value representation:** All Mangle values (numbers, floats, strings, names,
+    timestamps, durations, compounds) are opaque `externref` handles in WASM.
+    Each handle wraps a `HostVal(u32)` index into the host's value slab.
+
+*   **Codegen (`mangle-codegen`):**
+    *   Translates Physical Plan IR into WASM bytecode using `wasm-encoder`.
+    *   Generates a single `run()` function with the fixpoint loop embedded.
+    *   38 host imports organized as:
+        *   **Scan/iter control** (0-10): `scan_start`, `scan_next`, `get_col`,
+            `insert_begin/push/end`, `scan_delta_start`, `merge_deltas`,
+            `debuglog`, `scan_index_start`, `scan_aggregate_start`
+        *   **Constants** (11-16): `const_number`, `const_float`, `const_string`,
+            `const_name`, `const_time`, `const_duration`
+        *   **Arithmetic** (17-21): `val_add/sub/mul/div`, `val_sqrt`
+        *   **Comparisons** (22-27): `val_eq/neq/lt/le/gt/ge`
+        *   **String ops** (28-30): `str_concat`, `str_replace`, `val_to_string`
+        *   **Compound ops** (31-37): `compound_begin/push/end`,
+            `compound_get/len`, `pair_first/second`
+    *   Returns `CompiledModule { wasm, strings, names }`.
+
+*   **VM (`mangle-vm`):**
+    *   Executes compiled WASM via `wasmtime`.
+    *   Links all 38 imports using the `Host` trait.
+    *   `externref` boxing/unboxing via `extract_hv()` / `make_ref()`.
+    *   Pluggable storage: any `Host` impl works (MemHost, CsvHost,
+        CompositeHost, SimpleColumnHost).
+    *   `CompositeHost`: Routes relations to different sub-hosts with a value
+        remapping table for HostVal handles.
 
 ### B. Edge Mode (Interpreter)
-**Location:** `third_party/mangle/rust/interpreter`
 
-*   **Interpreter:** Directly interprets Physical IR operations (`Op`).
-*   **State:** Manages in-memory fact storage for local execution.
+**Crate:** `mangle-interpreter`
 
-## 6. Data Storage & Interfaces (New)
-**Location:** `third_party/mangle/rust/factstore`
+*   **Interpreter:** Directly interprets `physical::Op` operations.
+*   **Store trait:** Abstract interface for relation storage with operations for
+    scan, scan_delta, scan_index, insert, merge_deltas, retract, clear.
+*   **MemStore:** Default in-memory implementation with hash-set-based dedup and
+    delta tracking for semi-naive evaluation.
+*   **Value enum:** `Number(i64)`, `Float(f64)`, `String(String)`, `Name(String)`,
+    `Time(i64)`, `Duration(i64)`, `Compound(CompoundKind, Vec<Value>)`.
 
-*   **Role:** Acts as the central interface definition crate to prevent dependency cycles.
-*   **Interfaces:**
-    *   `Store` (Feature `edge`): The abstract interface for storage in Edge mode, used by `mangle-interpreter`.
-    *   `Host` (Feature `server`): The abstract interface for the host environment in Server mode, used by `mangle-vm`.
-*   **Implementations:**
-    *   `MemStore` (in `mangle-interpreter`): In-memory implementation of `Store`.
-    *   `SimpleColumnStore`/`SimpleColumnHost` (in `mangle-simplecolumn`): Implementations for the SimpleColumn file format.
+## 6. Shared Interfaces
 
-## 7. Key Data Structures
+**Crate:** `mangle-common`
 
-*   **`InstId`**: Reference to an instruction in the IR.
+Acts as the central interface crate to prevent dependency cycles.
+
+*   **Feature `edge`:**
+    *   `Value` enum — typed values used by the interpreter.
+    *   `Store` trait — abstract storage for Edge Mode.
+*   **Feature `server`:**
+    *   `HostVal(u32)` — opaque handle to a value in the host's slab.
+    *   `Host` trait — 34-method interface for WASM host callbacks.
+
+## 7. Storage Adapters
+
+*   **`mangle-simplecolumn`:** Reads the SimpleColumn columnar file format.
+    Provides `SimpleColumnStore` (Edge) and `SimpleColumnHost` (Server).
+*   **`mangle-vm::csv_host`:** CSV-based storage for Server Mode.
+*   **`mangle-vm::composite_host`:** Routes relations to different sub-hosts.
+*   **`mangle-db`:** Persistent storage layer with durable EDB writes.
+
+## 8. Performance
+
+A criterion benchmark (`mangle-driver/benches/wasm_vs_interpreter.rs`) compares
+both execution modes on transitive closure (reachability) over linear graphs.
+
+At small sizes (10 nodes), WASM is ~25x slower due to instantiation overhead.
+At larger sizes (5000 nodes), the gap narrows to ~2x, with the remaining
+overhead attributable to externref host-call boundary crossing on every value
+operation.
+
+## 9. Key Data Structures
+
+*   **`InstId`**: Index into the IR instruction vector.
 *   **`NameId`**: Interned string reference.
-*   **`physical::Op`**: Imperative operation (e.g., `Iterate`, `Insert`).
-
-## 8. TODO Parity Goals (Go vs Rust)
-
-*   **Primitives**: Check support for all Go primitives (int, float, bytes, etc.) in Rust (`i64`, `String` currently dominant).
-*   **Functions**: Match built-in function availability.
-*   **Parser**: Ensure syntax compliance matches the Go reference parser.
+*   **`physical::Op`**: Imperative operation tree (Iterate, Insert, etc.).
+*   **`HostVal(u32)`**: Opaque value handle for the WASM/host boundary.
+*   **`CompiledModule`**: WASM bytecode + string/name tables.
+*   **`StratifiedProgram`**: Ordered strata with extensional/intensional pred sets.

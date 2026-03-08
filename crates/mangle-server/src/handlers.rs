@@ -107,6 +107,9 @@ fn value_to_json(v: &Value) -> serde_json::Value {
         Value::String(s) => serde_json::Value::String(s.clone()),
         Value::Time(t) => serde_json::Value::String(format!("{}", Value::Time(*t))),
         Value::Duration(d) => serde_json::Value::String(format!("{}", Value::Duration(*d))),
+        Value::Compound(_, elems) => {
+            serde_json::Value::Array(elems.iter().map(value_to_json).collect())
+        }
         Value::Null => serde_json::Value::Null,
     }
 }

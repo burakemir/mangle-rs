@@ -21,6 +21,15 @@ mangle-vm = { workspace = true, optional = true } # For server mode
 anyhow.workspace = true
 # log.workspace = true
 
+[dev-dependencies]
+criterion.workspace = true
+mangle-vm.workspace = true
+
 [features]
 default = []
 server = ["dep:mangle-vm"]
+
+[[bench]]
+name = "wasm_vs_interpreter"
+harness = false
+required-features = ["server"]

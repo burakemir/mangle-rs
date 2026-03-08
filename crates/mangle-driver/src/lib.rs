@@ -146,8 +146,12 @@ pub fn compile_units<'a>(sources: &[&str], arena: &'a Arena) -> Result<(Ir, Stra
 /// Compiles the Intermediate Representation (IR) into a WebAssembly (WASM) module.
 ///
 /// This uses the default `WasmImportsBackend` which expects certain host functions
-/// to be available for data access.
-pub fn compile_to_wasm(ir: &mut Ir, stratified: &StratifiedProgram) -> Vec<u8> {
+/// to be available for data access. Returns a `CompiledModule` containing the WASM
+/// bytecode and string/name tables needed by the host runtime.
+pub fn compile_to_wasm(
+    ir: &mut Ir,
+    stratified: &StratifiedProgram,
+) -> mangle_codegen::CompiledModule {
     let mut codegen = Codegen::new_with_stratified(ir, stratified, WasmImportsBackend);
     codegen.generate()
 }
@@ -831,11 +835,11 @@ mod tests {
         "#;
 
         let (mut ir, stratified) = compile(source, &arena)?;
-        let wasm_bytes = compile_to_wasm(&mut ir, &stratified);
+        let compiled = compile_to_wasm(&mut ir, &stratified);
 
         // Basic check that we generated something that looks like WASM
-        assert!(!wasm_bytes.is_empty());
-        assert_eq!(&wasm_bytes[0..4], b"\0asm"); // WASM magic header
+        assert!(!compiled.wasm.is_empty());
+        assert_eq!(&compiled.wasm[0..4], b"\0asm"); // WASM magic header
 
         Ok(())
     }
@@ -1435,6 +1439,283 @@ mod tests {
             }
             v => panic!("expected Duration, got {v:?}"),
         }
+        Ok(())
+    }
+
+    #[test]
+    fn test_list_construction() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            data(1). data(2). data(3).
+            result(L) :- data(X) |> let L = fn:list(X).
+        "#;
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("result")
+            .expect("relation result not found")
+            .collect();
+        // Each data fact produces a single-element list
+        assert_eq!(facts.len(), 3);
+        for fact in &facts {
+            match &fact[0] {
+                Value::Compound(_, elems) => assert_eq!(elems.len(), 1),
+                v => panic!("expected Compound, got {v:?}"),
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_list_literal_syntax() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        // The parser desugars [1, 2, 3] to fn:list(1, 2, 3)
+        let source = r#"
+            result([1, 2, 3]).
+        "#;
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("result")
+            .expect("relation result not found")
+            .collect();
+        assert_eq!(facts.len(), 1);
+        match &facts[0][0] {
+            Value::Compound(_, elems) => {
+                assert_eq!(elems.len(), 3);
+                assert_eq!(elems[0], Value::Number(1));
+                assert_eq!(elems[1], Value::Number(2));
+                assert_eq!(elems[2], Value::Number(3));
+            }
+            v => panic!("expected Compound, got {v:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_struct_construction() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            result({/name: "alice", /age: 30}).
+        "#;
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("result")
+            .expect("relation result not found")
+            .collect();
+        assert_eq!(facts.len(), 1);
+        match &facts[0][0] {
+            Value::Compound(_, elems) => {
+                // Interleaved: ["/name", "alice", "/age", 30]
+                assert_eq!(elems.len(), 4);
+                assert_eq!(elems[0], Value::String("/name".to_string()));
+                assert_eq!(elems[1], Value::String("alice".to_string()));
+                assert_eq!(elems[2], Value::String("/age".to_string()));
+                assert_eq!(elems[3], Value::Number(30));
+            }
+            v => panic!("expected Compound, got {v:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_pair_construction() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            data("key", 42).
+            result(P) :- data(K, V) |> let P = fn:pair(K, V).
+        "#;
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("result")
+            .expect("relation result not found")
+            .collect();
+        assert_eq!(facts.len(), 1);
+        match &facts[0][0] {
+            Value::Compound(_, elems) => {
+                assert_eq!(elems.len(), 2);
+                assert_eq!(elems[0], Value::String("key".to_string()));
+                assert_eq!(elems[1], Value::Number(42));
+            }
+            v => panic!("expected Compound, got {v:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_list_get_and_len() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            data([10, 20, 30]).
+            first(F) :- data(L) |> let F = fn:list:get(L, 0).
+            length(N) :- data(L) |> let N = fn:len(L).
+        "#;
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("first")
+            .expect("relation first not found")
+            .collect();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0][0], Value::Number(10));
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("length")
+            .expect("relation length not found")
+            .collect();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0][0], Value::Number(3));
+        Ok(())
+    }
+
+    #[test]
+    fn test_struct_get() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            data({/name: "alice", /age: 30}).
+            name(N) :- data(S) |> let N = fn:struct:get(S, /name).
+            age(A) :- data(S) |> let A = fn:struct:get(S, /age).
+        "#;
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("name")
+            .expect("relation name not found")
+            .collect();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0][0], Value::String("alice".to_string()));
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("age")
+            .expect("relation age not found")
+            .collect();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0][0], Value::Number(30));
+        Ok(())
+    }
+
+    #[test]
+    fn test_pair_accessors() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        // Use intermediate relation since multiple |> chains not supported
+        let source = r#"
+            data(42, "hello").
+            pair_data(P) :- data(A, B) |> let P = fn:pair(A, B).
+            result_first(F) :- pair_data(P) |> let F = fn:pair:first(P).
+            result_second(S) :- pair_data(P) |> let S = fn:pair:second(P).
+        "#;
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("result_first")
+            .expect("relation result_first not found")
+            .collect();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0][0], Value::Number(42));
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("result_second")
+            .expect("relation result_second not found")
+            .collect();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0][0], Value::String("hello".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn test_map_operations() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            data([/a: 10, /b: 20]).
+            val_a(V) :- data(M) |> let V = fn:map:get(M, /a).
+            val_b(V) :- data(M) |> let V = fn:map:get(M, /b).
+            nkeys(N) :- data(M) |> let N = fn:map:len(M).
+        "#;
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("val_a")
+            .expect("relation val_a not found")
+            .collect();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0][0], Value::Number(10));
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("val_b")
+            .expect("relation val_b not found")
+            .collect();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0][0], Value::Number(20));
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("nkeys")
+            .expect("relation nkeys not found")
+            .collect();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0][0], Value::Number(2));
+        Ok(())
+    }
+
+    #[test]
+    fn test_nested_compound() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        // A list of pairs
+        let source = r#"
+            data("a", 1).
+            data("b", 2).
+            pairs(P) :- data(K, V) |> let P = fn:pair(K, V).
+            first_key(K) :- pairs(P) |> let K = fn:pair:first(P).
+        "#;
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("first_key")
+            .expect("relation first_key not found")
+            .collect();
+        assert_eq!(facts.len(), 2);
+        let mut keys: Vec<String> = facts
+            .iter()
+            .map(|t| match &t[0] {
+                Value::String(s) => s.clone(),
+                v => panic!("expected string, got {v:?}"),
+            })
+            .collect();
+        keys.sort();
+        assert_eq!(keys, vec!["a", "b"]);
         Ok(())
     }
 }

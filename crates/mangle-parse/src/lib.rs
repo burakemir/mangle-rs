@@ -628,6 +628,9 @@ where
                     break;
                 }
                 self.next_token()?;
+                if Token::RBracket == self.token {
+                    break; // trailing comma
+                }
                 items.push(self.parse_base_term()?);
                 self.expect(Token::Colon)?;
                 items.push(self.parse_base_term()?);
@@ -659,6 +662,10 @@ where
         loop {
             if Token::Comma != self.token {
                 break;
+            }
+            self.next_token()?;
+            if Token::RBrace == self.token {
+                break; // trailing comma
             }
             let name = self.parse_base_term()?;
             if let ast::BaseTerm::Const(ast::Const::Name { .. }) = name {
@@ -702,7 +709,7 @@ where
         Ok(())
     }
 
-    /// base_terms ::= base_term { `,` base_term }
+    /// base_terms ::= base_term { `,` base_term } [`,`]
     fn parse_base_terms(
         &mut self,
         base_terms: &mut Vec<&'arena ast::BaseTerm<'arena>>,
@@ -710,6 +717,9 @@ where
         base_terms.push(self.parse_base_term()?);
         while let Token::Comma = self.token {
             self.next_token()?;
+            if !base_term_start(&self.token) {
+                break; // trailing comma
+            }
             base_terms.push(self.parse_base_term()?);
         }
 
@@ -737,7 +747,7 @@ fn base_term_start(t: &Token) -> bool {
         | Token::LBracket
         | Token::LBrace
         | Token::DotIdent { .. } => true,
-        Token::Ident { name } => is_variable(name) || is_fn(name),
+        Token::Ident { name } => is_variable(name) || is_fn(name) || name == "_",
         _ => false,
     }
 }
@@ -935,7 +945,7 @@ mod test {
     fn test_structured_data_and_types() -> googletest::Result<()> {
         let arena = Arena::new_with_global_interner();
         let input =
-            "[] [1,2,3] [1: 'one', 2: 'two'] {} {/foo: /bar} .List<.Option</name>, /string>";
+            "[] [1,2,3] [1: 'one', 2: 'two'] {} {/foo: /bar} {/name: \"alice\", /age: 30} .List<.Option</name>, /string>";
         let mut p = make_parser(&arena, input);
         let mut got_base_terms = vec![];
         loop {
@@ -974,6 +984,15 @@ mod test {
                 ],
             ),
             arena.apply_fn(
+                fn_struct_sym(&arena),
+                &[
+                    arena.const_(arena.name("/name")),
+                    arena.const_(ast::Const::String("alice")),
+                    arena.const_(arena.name("/age")),
+                    arena.const_(ast::Const::Number(30)),
+                ],
+            ),
+            arena.apply_fn(
                 fn_list_type_sym(&arena),
                 &[
                     arena.apply_fn(
@@ -981,6 +1000,50 @@ mod test {
                         &[arena.const_(arena.name("/name"))],
                     ),
                     arena.const_(arena.name("/string")),
+                ],
+            ),
+        ];
+        verify_that!(got_base_terms, eq(&expected))
+    }
+
+    #[gtest]
+    fn test_trailing_commas() -> googletest::Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let input = "[1, 2, 3,] [1: 'one', 2: 'two',] {/a: 1, /b: 2,}";
+        let mut p = make_parser(&arena, input);
+        let mut got_base_terms = vec![];
+        loop {
+            if Token::Eof == p.token {
+                break;
+            }
+            let base_term = p.parse_base_term().unwrap();
+            got_base_terms.push(base_term);
+        }
+        let expected = vec![
+            arena.apply_fn(
+                fn_list_sym(&arena),
+                &[
+                    arena.const_(ast::Const::Number(1)),
+                    arena.const_(ast::Const::Number(2)),
+                    arena.const_(ast::Const::Number(3)),
+                ],
+            ),
+            arena.apply_fn(
+                fn_map_sym(&arena),
+                &[
+                    arena.const_(ast::Const::Number(1)),
+                    arena.const_(ast::Const::String("one")),
+                    arena.const_(ast::Const::Number(2)),
+                    arena.const_(ast::Const::String("two")),
+                ],
+            ),
+            arena.apply_fn(
+                fn_struct_sym(&arena),
+                &[
+                    arena.const_(arena.name("/a")),
+                    arena.const_(ast::Const::Number(1)),
+                    arena.const_(arena.name("/b")),
+                    arena.const_(ast::Const::Number(2)),
                 ],
             ),
         ];

@@ -31,24 +31,109 @@ use mangle_ir::physical::{Aggregate, CmpOp, Condition, Constant, DataSource, Exp
 use mangle_ir::{Ir, NameId};
 use std::collections::HashMap;
 
-pub use mangle_common::{Store, Value};
+pub use mangle_common::{CompoundKind, Store, Value};
+
+/// Internal storage cell. Compound values are stored inline as a `CompoundStart`
+/// marker (holding the kind and element count) followed by that many cells
+/// (which may themselves be nested compounds). Scalar values are stored directly.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+enum Cell {
+    Val(Value),
+    /// Marks the start of a compound with `n` logical elements following.
+    CompoundStart(CompoundKind, usize),
+}
+
+/// Flatten a `Value` into a sequence of `Cell`s.
+/// Scalar values become a single `Cell::Val`. Compound values become
+/// `Cell::CompoundStart(n)` followed by the flattened cells of each element.
+fn flatten_value(v: &Value, out: &mut Vec<Cell>) {
+    match v {
+        Value::Compound(kind, elems) => {
+            out.push(Cell::CompoundStart(*kind, elems.len()));
+            for elem in elems {
+                flatten_value(elem, out);
+            }
+        }
+        _ => out.push(Cell::Val(v.clone())),
+    }
+}
+
+/// Flatten a tuple of Values into a flat Vec of Cells.
+fn flatten_tuple(tuple: &[Value]) -> Vec<Cell> {
+    let mut cells = Vec::new();
+    for v in tuple {
+        flatten_value(v, &mut cells);
+    }
+    cells
+}
+
+/// Read one logical Value from cells starting at `pos`, advancing `pos`.
+fn unflatten_one(cells: &[Cell], pos: &mut usize) -> Value {
+    match &cells[*pos] {
+        Cell::Val(v) => {
+            *pos += 1;
+            v.clone()
+        }
+        Cell::CompoundStart(kind, n) => {
+            let kind = *kind;
+            let n = *n;
+            *pos += 1;
+            let mut elems = Vec::with_capacity(n);
+            for _ in 0..n {
+                elems.push(unflatten_one(cells, pos));
+            }
+            Value::Compound(kind, elems)
+        }
+    }
+}
+
+/// Skip past one logical value in a cell slice, advancing `pos`.
+fn skip_one(cells: &[Cell], pos: &mut usize) {
+    match &cells[*pos] {
+        Cell::Val(_) => *pos += 1,
+        Cell::CompoundStart(_, n) => {
+            let n = *n;
+            *pos += 1;
+            for _ in 0..n {
+                skip_one(cells, pos);
+            }
+        }
+    }
+}
+
+/// Reconstruct a `Vec<Value>` tuple from flat cells, reading `n_cols` logical values.
+fn unflatten_tuple(cells: &[Cell], n_cols: usize) -> Vec<Value> {
+    let mut pos = 0;
+    let mut tuple = Vec::with_capacity(n_cols);
+    for _ in 0..n_cols {
+        tuple.push(unflatten_one(cells, &mut pos));
+    }
+    tuple
+}
 
 /// A simple in-memory implementation of `Store`.
 /// Supports semi-naive evaluation by tracking "stable" and "delta" facts.
+///
+/// Compound values are stored inline: each `Value::Compound` is flattened into
+/// a `CompoundStart(n)` marker followed by its elements. This avoids nested
+/// heap allocations in stored tuples and enables future per-field indexing.
 #[derive(Default)]
 pub struct MemStore {
     // Stable facts from previous iterations
-    stable: HashMap<String, Vec<Vec<Value>>>,
+    stable: HashMap<String, Vec<Vec<Cell>>>,
     // New facts from the current iteration
-    delta: HashMap<String, Vec<Vec<Value>>>,
+    delta: HashMap<String, Vec<Vec<Cell>>>,
     // Facts being collected for the next iteration
-    next_delta: HashMap<String, Vec<Vec<Value>>>,
+    next_delta: HashMap<String, Vec<Vec<Cell>>>,
 
-    // Secondary indexes: (relation_name, col_idx) -> { Value -> [row_indices] }
-    // These only index stable facts for simplicity, or we re-build them.
-    // Actually, let's index ALL facts (stable + delta).
-    stable_indexes: HashMap<(String, usize), HashMap<Value, Vec<usize>>>,
-    delta_indexes: HashMap<(String, usize), HashMap<Value, Vec<usize>>>,
+    // Number of logical columns per relation (set on first insert).
+    arity: HashMap<String, usize>,
+
+    // Secondary indexes: (relation_name, col_idx) -> { Cell -> [row_indices] }
+    // Indexes use the first Cell of each logical column (scalars: the value itself,
+    // compounds: CompoundStart(n)). This enables index lookups on scalar columns.
+    stable_indexes: HashMap<(String, usize), HashMap<Cell, Vec<usize>>>,
+    delta_indexes: HashMap<(String, usize), HashMap<Cell, Vec<usize>>>,
 }
 
 impl MemStore {
@@ -63,83 +148,138 @@ impl MemStore {
 
     /// Add a fact manually (for testing/setup). Auto-creates relation in stable.
     pub fn add_fact(&mut self, relation: &str, args: Vec<Value>) {
+        let n_cols = args.len();
+        let cells = flatten_tuple(&args);
         let table = self.stable.entry(relation.to_string()).or_default();
-        if !table.contains(&args) {
+        if !table.contains(&cells) {
             let row_idx = table.len();
-            table.push(args.clone());
-            // Update stable index
-            for (col_idx, val) in args.into_iter().enumerate() {
-                self.stable_indexes
-                    .entry((relation.to_string(), col_idx))
-                    .or_default()
-                    .entry(val)
-                    .or_default()
-                    .push(row_idx);
-            }
+            self.arity.entry(relation.to_string()).or_insert(n_cols);
+            table.push(cells.clone());
+            index_cells(&mut self.stable_indexes, relation, &cells, n_cols, row_idx);
         }
     }
 
     /// Rebuilds stable and delta indexes for a single relation after mutation.
     fn rebuild_indexes_for(&mut self, relation: &str) {
-        // Clear existing indexes for this relation
         self.stable_indexes.retain(|(rel, _), _| rel != relation);
         self.delta_indexes.retain(|(rel, _), _| rel != relation);
 
-        // Rebuild stable indexes
+        let n_cols = self.arity.get(relation).copied().unwrap_or(0);
+
         if let Some(table) = self.stable.get(relation) {
-            for (row_idx, tuple) in table.iter().enumerate() {
-                for (col_idx, val) in tuple.iter().enumerate() {
-                    self.stable_indexes
-                        .entry((relation.to_string(), col_idx))
-                        .or_default()
-                        .entry(val.clone())
-                        .or_default()
-                        .push(row_idx);
-                }
+            for (row_idx, cells) in table.iter().enumerate() {
+                index_cells(&mut self.stable_indexes, relation, cells, n_cols, row_idx);
             }
         }
 
-        // Rebuild delta indexes
         if let Some(table) = self.delta.get(relation) {
-            for (row_idx, tuple) in table.iter().enumerate() {
-                for (col_idx, val) in tuple.iter().enumerate() {
-                    self.delta_indexes
-                        .entry((relation.to_string(), col_idx))
-                        .or_default()
-                        .entry(val.clone())
-                        .or_default()
-                        .push(row_idx);
-                }
+            for (row_idx, cells) in table.iter().enumerate() {
+                index_cells(&mut self.delta_indexes, relation, cells, n_cols, row_idx);
             }
         }
     }
 
+    /// Unflatten stored cells into Values using the relation's arity.
+    fn to_values(&self, relation: &str, cells: &[Cell]) -> Vec<Value> {
+        let n_cols = self.arity.get(relation).copied().unwrap_or(0);
+        if n_cols == 0 {
+            // Fallback: treat each cell as a scalar
+            cells
+                .iter()
+                .map(|c| match c {
+                    Cell::Val(v) => v.clone(),
+                    Cell::CompoundStart(_, _) => Value::Null,
+                })
+                .collect()
+        } else {
+            unflatten_tuple(cells, n_cols)
+        }
+    }
+
     pub fn get_facts(&self, relation: &str) -> Vec<Vec<Value>> {
-        let mut all = self.stable.get(relation).cloned().unwrap_or_default();
+        let mut all: Vec<Vec<Value>> = self
+            .stable
+            .get(relation)
+            .into_iter()
+            .flatten()
+            .map(|cells| self.to_values(relation, cells))
+            .collect();
         if let Some(d) = self.delta.get(relation) {
-            all.extend(d.iter().cloned());
+            for cells in d {
+                all.push(self.to_values(relation, cells));
+            }
         }
         all
     }
 }
 
+/// Index a flattened tuple's logical columns.
+fn index_cells(
+    indexes: &mut HashMap<(String, usize), HashMap<Cell, Vec<usize>>>,
+    relation: &str,
+    cells: &[Cell],
+    n_cols: usize,
+    row_idx: usize,
+) {
+    let mut pos = 0;
+    for col_idx in 0..n_cols {
+        let key = cells[pos].clone();
+        skip_one(cells, &mut pos);
+        indexes
+            .entry((relation.to_string(), col_idx))
+            .or_default()
+            .entry(key)
+            .or_default()
+            .push(row_idx);
+    }
+}
+
+/// Convert a Value to its index Cell key (for index lookup matching).
+fn value_to_index_key(v: &Value) -> Cell {
+    match v {
+        Value::Compound(kind, elems) => Cell::CompoundStart(*kind, elems.len()),
+        _ => Cell::Val(v.clone()),
+    }
+}
+
 impl Store for MemStore {
     fn scan(&self, relation: &str) -> Result<Box<dyn Iterator<Item = Vec<Value>> + '_>> {
-        let s = self.stable.get(relation).into_iter().flatten().cloned();
-        let d = self.delta.get(relation).into_iter().flatten().cloned();
+        let n_cols = self.arity.get(relation).copied().unwrap_or(0);
+        let s = self
+            .stable
+            .get(relation)
+            .into_iter()
+            .flatten()
+            .map(move |cells| unflatten_tuple(cells, n_cols));
+        let d = self
+            .delta
+            .get(relation)
+            .into_iter()
+            .flatten()
+            .map(move |cells| unflatten_tuple(cells, n_cols));
         Ok(Box::new(s.chain(d)))
     }
 
     fn scan_delta(&self, relation: &str) -> Result<Box<dyn Iterator<Item = Vec<Value>> + '_>> {
+        let n_cols = self.arity.get(relation).copied().unwrap_or(0);
         match self.delta.get(relation) {
-            Some(tuples) => Ok(Box::new(tuples.iter().cloned())),
+            Some(tuples) => Ok(Box::new(
+                tuples
+                    .iter()
+                    .map(move |cells| unflatten_tuple(cells, n_cols)),
+            )),
             None => Ok(Box::new(std::iter::empty())),
         }
     }
 
     fn scan_next_delta(&self, relation: &str) -> Result<Box<dyn Iterator<Item = Vec<Value>> + '_>> {
+        let n_cols = self.arity.get(relation).copied().unwrap_or(0);
         match self.next_delta.get(relation) {
-            Some(tuples) => Ok(Box::new(tuples.iter().cloned())),
+            Some(tuples) => Ok(Box::new(
+                tuples
+                    .iter()
+                    .map(move |cells| unflatten_tuple(cells, n_cols)),
+            )),
             None => Ok(Box::new(std::iter::empty())),
         }
     }
@@ -150,23 +290,25 @@ impl Store for MemStore {
         col_idx: usize,
         key: &Value,
     ) -> Result<Box<dyn Iterator<Item = Vec<Value>> + '_>> {
+        let n_cols = self.arity.get(relation).copied().unwrap_or(0);
+        let cell_key = value_to_index_key(key);
         let mut results: Vec<Vec<Value>> = Vec::new();
 
         if let Some(idx_map) = self.stable_indexes.get(&(relation.to_string(), col_idx))
-            && let Some(row_indices) = idx_map.get(key)
+            && let Some(row_indices) = idx_map.get(&cell_key)
             && let Some(table) = self.stable.get(relation)
         {
             for &i in row_indices {
-                results.push(table[i].clone());
+                results.push(unflatten_tuple(&table[i], n_cols));
             }
         }
 
         if let Some(idx_map) = self.delta_indexes.get(&(relation.to_string(), col_idx))
-            && let Some(row_indices) = idx_map.get(key)
+            && let Some(row_indices) = idx_map.get(&cell_key)
             && let Some(table) = self.delta.get(relation)
         {
             for &i in row_indices {
-                results.push(table[i].clone());
+                results.push(unflatten_tuple(&table[i], n_cols));
             }
         }
 
@@ -179,14 +321,16 @@ impl Store for MemStore {
         col_idx: usize,
         key: &Value,
     ) -> Result<Box<dyn Iterator<Item = Vec<Value>> + '_>> {
+        let n_cols = self.arity.get(relation).copied().unwrap_or(0);
+        let cell_key = value_to_index_key(key);
         let mut results: Vec<Vec<Value>> = Vec::new();
 
         if let Some(idx_map) = self.delta_indexes.get(&(relation.to_string(), col_idx))
-            && let Some(row_indices) = idx_map.get(key)
+            && let Some(row_indices) = idx_map.get(&cell_key)
             && let Some(table) = self.delta.get(relation)
         {
             for &i in row_indices {
-                results.push(table[i].clone());
+                results.push(unflatten_tuple(&table[i], n_cols));
             }
         }
 
@@ -194,43 +338,49 @@ impl Store for MemStore {
     }
 
     fn insert(&mut self, relation: &str, tuple: Vec<Value>) -> Result<bool> {
+        let n_cols = tuple.len();
+        let cells = flatten_tuple(&tuple);
+
         // Check if fact is already in stable, delta, or next_delta
         if self
             .stable
             .get(relation)
-            .is_some_and(|v| v.contains(&tuple))
-            || self.delta.get(relation).is_some_and(|v| v.contains(&tuple))
+            .is_some_and(|v| v.contains(&cells))
+            || self
+                .delta
+                .get(relation)
+                .is_some_and(|v| v.contains(&cells))
             || self
                 .next_delta
                 .get(relation)
-                .is_some_and(|v| v.contains(&tuple))
+                .is_some_and(|v| v.contains(&cells))
         {
             return Ok(false);
         }
 
+        self.arity.entry(relation.to_string()).or_insert(n_cols);
         self.next_delta
             .entry(relation.to_string())
             .or_default()
-            .push(tuple);
+            .push(cells);
         Ok(true)
     }
 
     fn merge_deltas(&mut self) {
         // 1. Move current delta to stable
         for (rel_name, mut tuples) in self.delta.drain() {
+            let n_cols = self.arity.get(&rel_name).copied().unwrap_or(0);
             let table = self.stable.entry(rel_name.clone()).or_default();
-            for tuple in tuples.drain(..) {
+            for cells in tuples.drain(..) {
                 let row_idx = table.len();
-                // Update stable index
-                for (col_idx, val) in tuple.iter().enumerate() {
-                    self.stable_indexes
-                        .entry((rel_name.clone(), col_idx))
-                        .or_default()
-                        .entry(val.clone())
-                        .or_default()
-                        .push(row_idx);
-                }
-                table.push(tuple);
+                index_cells(
+                    &mut self.stable_indexes,
+                    &rel_name,
+                    &cells,
+                    n_cols,
+                    row_idx,
+                );
+                table.push(cells);
             }
         }
         self.delta_indexes.clear();
@@ -238,15 +388,15 @@ impl Store for MemStore {
         // 2. Move next_delta to delta and build delta index
         self.delta = std::mem::take(&mut self.next_delta);
         for (rel_name, tuples) in &self.delta {
-            for (row_idx, tuple) in tuples.iter().enumerate() {
-                for (col_idx, val) in tuple.iter().enumerate() {
-                    self.delta_indexes
-                        .entry((rel_name.clone(), col_idx))
-                        .or_default()
-                        .entry(val.clone())
-                        .or_default()
-                        .push(row_idx);
-                }
+            let n_cols = self.arity.get(rel_name).copied().unwrap_or(0);
+            for (row_idx, cells) in tuples.iter().enumerate() {
+                index_cells(
+                    &mut self.delta_indexes,
+                    rel_name,
+                    cells,
+                    n_cols,
+                    row_idx,
+                );
             }
         }
     }
@@ -256,8 +406,9 @@ impl Store for MemStore {
     }
 
     fn retract(&mut self, relation: &str, tuple: &[Value]) -> Result<bool> {
+        let cells = flatten_tuple(tuple);
         let removed = if let Some(table) = self.stable.get_mut(relation) {
-            if let Some(pos) = table.iter().position(|t| t.as_slice() == tuple) {
+            if let Some(pos) = table.iter().position(|t| *t == cells) {
                 table.swap_remove(pos);
                 true
             } else {
@@ -269,12 +420,12 @@ impl Store for MemStore {
 
         // Also remove from delta and next_delta
         if let Some(table) = self.delta.get_mut(relation) {
-            if let Some(pos) = table.iter().position(|t| t.as_slice() == tuple) {
+            if let Some(pos) = table.iter().position(|t| *t == cells) {
                 table.swap_remove(pos);
             }
         }
         if let Some(table) = self.next_delta.get_mut(relation) {
-            if let Some(pos) = table.iter().position(|t| t.as_slice() == tuple) {
+            if let Some(pos) = table.iter().position(|t| *t == cells) {
                 table.swap_remove(pos);
             }
         }
@@ -295,7 +446,6 @@ impl Store for MemStore {
         if let Some(table) = self.next_delta.get_mut(relation) {
             table.clear();
         }
-        // Remove index entries for this relation
         self.stable_indexes.retain(|(rel, _), _| rel != relation);
         self.delta_indexes.retain(|(rel, _), _| rel != relation);
     }
@@ -836,6 +986,7 @@ fn value_to_string(v: &Value) -> String {
         Value::String(s) => s.clone(),
         Value::Time(t) => format!("{}", Value::Time(*t)),
         Value::Duration(d) => format!("{}", Value::Duration(*d)),
+        Value::Compound(kind, elems) => format!("{}", Value::Compound(*kind, elems.clone())),
         Value::Null => "null".to_string(),
     }
 }
@@ -1242,6 +1393,127 @@ pub fn eval_function(fn_name: &str, vals: &[Value]) -> Result<Value> {
                     Ok(Value::Duration(nanos))
                 }
                 v => Err(anyhow!("fn:duration:parse: expected string, got {v}")),
+            }
+        }
+
+        // --- Compound type constructors ---
+        "fn:list" => Ok(Value::Compound(CompoundKind::List, vals.to_vec())),
+        "fn:pair" => {
+            if vals.len() != 2 {
+                return Err(anyhow!("fn:pair: requires exactly 2 arguments"));
+            }
+            Ok(Value::Compound(CompoundKind::Pair, vals.to_vec()))
+        }
+        "fn:struct" => {
+            // Args are interleaved: field_name, value, field_name, value, ...
+            if vals.len() % 2 != 0 {
+                return Err(anyhow!(
+                    "fn:struct: requires even number of arguments (field, value pairs)"
+                ));
+            }
+            Ok(Value::Compound(CompoundKind::Struct, vals.to_vec()))
+        }
+        "fn:map" => {
+            // Args are interleaved: key, value, key, value, ...
+            if vals.len() % 2 != 0 {
+                return Err(anyhow!(
+                    "fn:map: requires even number of arguments (key, value pairs)"
+                ));
+            }
+            Ok(Value::Compound(CompoundKind::Map, vals.to_vec()))
+        }
+
+        // --- Compound type accessors ---
+        "fn:list:get" => {
+            if vals.len() != 2 {
+                return Err(anyhow!("fn:list:get: requires 2 arguments (list, index)"));
+            }
+            match (&vals[0], &vals[1]) {
+                (Value::Compound(_, elems), Value::Number(idx)) => {
+                    let i = *idx as usize;
+                    elems
+                        .get(i)
+                        .cloned()
+                        .ok_or_else(|| anyhow!("fn:list:get: index {i} out of bounds (len {})", elems.len()))
+                }
+                _ => Err(anyhow!("fn:list:get: expected (compound, number)")),
+            }
+        }
+        "fn:list:len" | "fn:len" => {
+            if vals.len() != 1 {
+                return Err(anyhow!("fn:len: requires 1 argument"));
+            }
+            match &vals[0] {
+                Value::Compound(_, elems) => Ok(Value::Number(elems.len() as i64)),
+                _ => Err(anyhow!("fn:len: expected compound value")),
+            }
+        }
+        "fn:pair:first" => {
+            if vals.len() != 1 {
+                return Err(anyhow!("fn:pair:first: requires 1 argument"));
+            }
+            match &vals[0] {
+                Value::Compound(_, elems) if elems.len() >= 1 => Ok(elems[0].clone()),
+                _ => Err(anyhow!("fn:pair:first: expected compound with at least 1 element")),
+            }
+        }
+        "fn:pair:second" => {
+            if vals.len() != 1 {
+                return Err(anyhow!("fn:pair:second: requires 1 argument"));
+            }
+            match &vals[0] {
+                Value::Compound(_, elems) if elems.len() >= 2 => Ok(elems[1].clone()),
+                _ => Err(anyhow!("fn:pair:second: expected compound with at least 2 elements")),
+            }
+        }
+        "fn:struct:get" | "fn:map:get" => {
+            if vals.len() != 2 {
+                return Err(anyhow!("{fn_name}: requires 2 arguments (compound, key)"));
+            }
+            match &vals[0] {
+                Value::Compound(_, elems) => {
+                    // Interleaved key-value pairs: [k1, v1, k2, v2, ...]
+                    for pair in elems.chunks_exact(2) {
+                        if pair[0] == vals[1] {
+                            return Ok(pair[1].clone());
+                        }
+                    }
+                    Err(anyhow!("{fn_name}: key not found"))
+                }
+                _ => Err(anyhow!("{fn_name}: expected compound value")),
+            }
+        }
+        "fn:map:len" | "fn:struct:len" => {
+            if vals.len() != 1 {
+                return Err(anyhow!("{fn_name}: requires 1 argument"));
+            }
+            match &vals[0] {
+                Value::Compound(_, elems) => Ok(Value::Number((elems.len() / 2) as i64)),
+                _ => Err(anyhow!("{fn_name}: expected compound value")),
+            }
+        }
+        "fn:map:keys" => {
+            if vals.len() != 1 {
+                return Err(anyhow!("fn:map:keys: requires 1 argument"));
+            }
+            match &vals[0] {
+                Value::Compound(_, elems) => {
+                    let keys: Vec<Value> = elems.chunks_exact(2).map(|p| p[0].clone()).collect();
+                    Ok(Value::Compound(CompoundKind::List, keys))
+                }
+                _ => Err(anyhow!("fn:map:keys: expected compound value")),
+            }
+        }
+        "fn:map:values" | "fn:struct:values" => {
+            if vals.len() != 1 {
+                return Err(anyhow!("{fn_name}: requires 1 argument"));
+            }
+            match &vals[0] {
+                Value::Compound(_, elems) => {
+                    let values: Vec<Value> = elems.chunks_exact(2).map(|p| p[1].clone()).collect();
+                    Ok(Value::Compound(CompoundKind::List, values))
+                }
+                _ => Err(anyhow!("{fn_name}: expected compound value")),
             }
         }
 

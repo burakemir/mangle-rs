@@ -132,6 +132,11 @@ impl<K: InternKey> Store<K> {
     pub fn lookup(&self, name: &str) -> Option<K> {
         self.map.get(name).copied()
     }
+
+    /// Returns all interned strings in ID order (index 0 = ID 1, etc.).
+    pub fn values(&self) -> &[String] {
+        &self.vec
+    }
 }
 
 /// The IR container.

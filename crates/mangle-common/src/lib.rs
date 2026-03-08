@@ -25,6 +25,18 @@ pub use tablestore::{TableConfig, TableStoreImpl, TableStoreSchema};
 
 // --- New Interfaces (Moved from interpreter/vm to break cycles) ---
 
+/// Identifies the kind of a compound value. When type information is available
+/// (concrete types), the kind is redundant. For `/any` or union-typed columns
+/// the kind tag makes the value self-describing.
+#[cfg(feature = "edge")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum CompoundKind {
+    List,
+    Pair,
+    Map,
+    Struct,
+}
+
 #[cfg(feature = "edge")]
 #[derive(Debug, Clone)]
 pub enum Value {
@@ -35,6 +47,11 @@ pub enum Value {
     Time(i64),
     /// Duration as nanoseconds (consistent with Go implementation).
     Duration(i64),
+    /// A compound value: a flat sequence of values. The `CompoundKind` tag
+    /// identifies the interpretation. For lists and pairs, elements are stored
+    /// directly. For structs and maps, keys/field-names and values are
+    /// interleaved: [k1, v1, k2, v2, ...].
+    Compound(CompoundKind, Vec<Value>),
     Null, // Used for iteration end or missing
 }
 
@@ -47,6 +64,7 @@ impl PartialEq for Value {
             (Value::String(a), Value::String(b)) => a == b,
             (Value::Time(a), Value::Time(b)) => a == b,
             (Value::Duration(a), Value::Duration(b)) => a == b,
+            (Value::Compound(ka, a), Value::Compound(kb, b)) => ka == kb && a == b,
             (Value::Null, Value::Null) => true,
             _ => false,
         }
@@ -66,6 +84,10 @@ impl std::hash::Hash for Value {
             Value::String(s) => s.hash(state),
             Value::Time(t) => t.hash(state),
             Value::Duration(d) => d.hash(state),
+            Value::Compound(k, v) => {
+                k.hash(state);
+                v.hash(state);
+            }
             Value::Null => {}
         }
     }
@@ -90,8 +112,9 @@ impl Ord for Value {
             (Value::String(a), Value::String(b)) => a.cmp(b),
             (Value::Time(a), Value::Time(b)) => a.cmp(b),
             (Value::Duration(a), Value::Duration(b)) => a.cmp(b),
+            (Value::Compound(ka, a), Value::Compound(kb, b)) => ka.cmp(kb).then_with(|| a.cmp(b)),
             (Value::Null, Value::Null) => std::cmp::Ordering::Equal,
-            // Cross-variant ordering: Number/Float < String < Time < Duration < Null
+            // Cross-variant ordering: Number/Float < String < Time < Duration < Compound < Null
             (Value::Number(_) | Value::Float(_), _) => std::cmp::Ordering::Less,
             (_, Value::Number(_) | Value::Float(_)) => std::cmp::Ordering::Greater,
             (Value::String(_), _) => std::cmp::Ordering::Less,
@@ -100,6 +123,8 @@ impl Ord for Value {
             (_, Value::Time(_)) => std::cmp::Ordering::Greater,
             (Value::Duration(_), _) => std::cmp::Ordering::Less,
             (_, Value::Duration(_)) => std::cmp::Ordering::Greater,
+            (Value::Compound(..), _) => std::cmp::Ordering::Less,
+            (_, Value::Compound(..)) => std::cmp::Ordering::Greater,
         }
     }
 }
@@ -113,6 +138,38 @@ impl std::fmt::Display for Value {
             Value::String(s) => write!(f, "{s:?}"),
             Value::Time(nanos) => write!(f, "{}", format_time_nanos(*nanos)),
             Value::Duration(nanos) => write!(f, "{}", format_duration_nanos(*nanos)),
+            Value::Compound(kind, elems) => match kind {
+                CompoundKind::List | CompoundKind::Pair => {
+                    write!(f, "[")?;
+                    for (i, e) in elems.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "{e}")?;
+                    }
+                    write!(f, "]")
+                }
+                CompoundKind::Map => {
+                    write!(f, "[")?;
+                    for (i, pair) in elems.chunks_exact(2).enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "{}: {}", pair[0], pair[1])?;
+                    }
+                    write!(f, "]")
+                }
+                CompoundKind::Struct => {
+                    write!(f, "{{")?;
+                    for (i, pair) in elems.chunks_exact(2).enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "{}: {}", pair[0], pair[1])?;
+                    }
+                    write!(f, "}}")
+                }
+            },
             Value::Null => write!(f, "null"),
         }
     }
@@ -230,6 +287,16 @@ fn format_duration_nanos(nanos: i64) -> String {
 }
 
 /// Abstract interface for relation storage (Edge Mode).
+///
+/// Tuples are currently stored as `Vec<Value>` where compound values
+/// (lists, structs, maps) appear as `Value::Compound(...)`.
+///
+/// TODO: Support explicit table flattening. When a user annotates a type
+/// declaration, compound columns should be inlined into the tuple as
+/// length-prefixed sequences of scalar values. This flattening should
+/// only apply to explicitly requested levels of the type tree (no
+/// automatic recursive flattening). The Store would then see wider
+/// tuples of scalar values instead of Compound entries.
 #[cfg(feature = "edge")]
 pub trait Store {
     /// Returns an iterator over all tuples in the relation.
@@ -279,19 +346,78 @@ pub trait Store {
     fn relation_names(&self) -> Vec<String>;
 }
 
+/// Opaque handle to a value in the host's value store.
+/// In WASM, these are represented as `externref`.
+#[cfg(feature = "server")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HostVal(pub u32);
+
 /// Trait for the host environment that provides storage and data access (Server Mode).
+///
+/// All Mangle values (numbers, floats, strings, compounds) are represented as
+/// opaque `HostVal` handles. In WASM, these map to `externref` — the WASM module
+/// never inspects values directly; all operations go through host calls.
 #[cfg(feature = "server")]
 pub trait Host {
+    // --- Iterator/scan (control flow) ---
     fn scan_start(&mut self, rel_id: i32) -> i32;
     fn scan_delta_start(&mut self, rel_id: i32) -> i32;
-    fn scan_index_start(&mut self, rel_id: i32, col_idx: i32, val: i64) -> i32;
-    fn scan_aggregate_start(&mut self, rel_id: i32, description: Vec<i32>) -> i32;
     fn scan_next(&mut self, iter_id: i32) -> i32;
-    fn get_col(&mut self, tuple_ptr: i32, col_idx: i32) -> i64;
-    fn insert(&mut self, rel_id: i32, val: i64);
     /// Merges deltas and returns 1 if changes occurred, 0 otherwise.
     fn merge_deltas(&mut self) -> i32;
-    fn debuglog(&mut self, val: i64);
+    fn scan_aggregate_start(&mut self, rel_id: i32, description: Vec<i32>) -> i32;
+    fn scan_index_start(&mut self, rel_id: i32, col_idx: i32, val: HostVal) -> i32;
+
+    // --- Value access ---
+    fn get_col(&mut self, tuple_ptr: i32, col_idx: i32) -> HostVal;
+
+    // --- Multi-column insertion ---
+    fn insert_begin(&mut self, rel_id: i32);
+    fn insert_push(&mut self, val: HostVal);
+    fn insert_end(&mut self);
+
+    // --- Constants ---
+    fn const_number(&mut self, n: i64) -> HostVal;
+    fn const_float(&mut self, bits: i64) -> HostVal;
+    fn const_string(&mut self, id: i32) -> HostVal;
+    fn const_name(&mut self, id: i32) -> HostVal;
+    fn const_time(&mut self, nanos: i64) -> HostVal;
+    fn const_duration(&mut self, nanos: i64) -> HostVal;
+
+    // --- Arithmetic (handles int/float promotion internally) ---
+    fn val_add(&mut self, a: HostVal, b: HostVal) -> HostVal;
+    fn val_sub(&mut self, a: HostVal, b: HostVal) -> HostVal;
+    fn val_mul(&mut self, a: HostVal, b: HostVal) -> HostVal;
+    fn val_div(&mut self, a: HostVal, b: HostVal) -> HostVal;
+    fn val_sqrt(&mut self, a: HostVal) -> HostVal;
+
+    // --- Comparisons (return 0 or 1) ---
+    fn val_eq(&mut self, a: HostVal, b: HostVal) -> i32;
+    fn val_neq(&mut self, a: HostVal, b: HostVal) -> i32;
+    fn val_lt(&mut self, a: HostVal, b: HostVal) -> i32;
+    fn val_le(&mut self, a: HostVal, b: HostVal) -> i32;
+    fn val_gt(&mut self, a: HostVal, b: HostVal) -> i32;
+    fn val_ge(&mut self, a: HostVal, b: HostVal) -> i32;
+
+    // --- String operations ---
+    fn str_concat(&mut self, a: HostVal, b: HostVal) -> HostVal;
+    fn str_replace(&mut self, s: HostVal, old: HostVal, new: HostVal, count: HostVal) -> HostVal;
+    fn val_to_string(&mut self, val: HostVal) -> HostVal;
+
+    // --- Compound operations ---
+    /// Begin building a compound value. kind: 0=List, 1=Pair, 2=Map, 3=Struct.
+    fn compound_begin(&mut self, kind: i32);
+    fn compound_push(&mut self, val: HostVal);
+    fn compound_end(&mut self) -> HostVal;
+    /// Get element by index (list) or value by key (map/struct).
+    fn compound_get(&mut self, compound: HostVal, key: HostVal) -> HostVal;
+    /// Get length/size of compound, returned as a Number HostVal.
+    fn compound_len(&mut self, compound: HostVal) -> HostVal;
+    fn pair_first(&mut self, compound: HostVal) -> HostVal;
+    fn pair_second(&mut self, compound: HostVal) -> HostVal;
+
+    // --- Debug ---
+    fn debuglog(&mut self, val: HostVal);
 }
 
 // --- Legacy Interfaces ---
