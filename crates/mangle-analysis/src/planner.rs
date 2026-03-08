@@ -265,13 +265,15 @@ impl<'a> Planner<'a> {
                 if matches!(
                     self.ir.resolve_name(predicate),
                     ":lt" | ":le" | ":gt" | ":ge"
+                        | ":time:lt" | ":time:le" | ":time:gt" | ":time:ge"
+                        | ":duration:lt" | ":duration:le" | ":duration:gt" | ":duration:ge"
                 ) =>
             {
                 let cmp_op = match self.ir.resolve_name(predicate) {
-                    ":lt" => CmpOp::Lt,
-                    ":le" => CmpOp::Le,
-                    ":gt" => CmpOp::Gt,
-                    ":ge" => CmpOp::Ge,
+                    ":lt" | ":time:lt" | ":duration:lt" => CmpOp::Lt,
+                    ":le" | ":time:le" | ":duration:le" => CmpOp::Le,
+                    ":gt" | ":time:gt" | ":duration:gt" => CmpOp::Gt,
+                    ":ge" | ":time:ge" | ":duration:ge" => CmpOp::Ge,
                     _ => unreachable!(),
                 };
                 if args.len() != 2 {
@@ -355,6 +357,18 @@ impl<'a> Planner<'a> {
                             if index_lookup.is_none() {
                                 index_lookup =
                                     Some((i, Operand::Const(physical::Constant::Float(fl))));
+                            }
+                        }
+                        Inst::Time(t) => {
+                            if index_lookup.is_none() {
+                                index_lookup =
+                                    Some((i, Operand::Const(physical::Constant::Time(t))));
+                            }
+                        }
+                        Inst::Duration(d) => {
+                            if index_lookup.is_none() {
+                                index_lookup =
+                                    Some((i, Operand::Const(physical::Constant::Duration(d))));
                             }
                         }
                         _ => {}
@@ -444,6 +458,12 @@ impl<'a> Planner<'a> {
                             Inst::Float(fl) => {
                                 neg_args.push(Operand::Const(physical::Constant::Float(fl)))
                             }
+                            Inst::Time(t) => {
+                                neg_args.push(Operand::Const(physical::Constant::Time(t)))
+                            }
+                            Inst::Duration(d) => {
+                                neg_args.push(Operand::Const(physical::Constant::Duration(d)))
+                            }
                             _ => return Err(anyhow!("Complex expression in negated atom")),
                         }
                     }
@@ -532,6 +552,8 @@ impl<'a> Planner<'a> {
             Inst::Number(n) => f(self, Operand::Const(physical::Constant::Number(n))),
             Inst::Name(n) => f(self, Operand::Const(physical::Constant::Name(n))),
             Inst::Float(fl) => f(self, Operand::Const(physical::Constant::Float(fl))),
+            Inst::Time(t) => f(self, Operand::Const(physical::Constant::Time(t))),
+            Inst::Duration(d) => f(self, Operand::Const(physical::Constant::Duration(d))),
             Inst::ApplyFn { function, args } => self.with_eval_args(
                 &args,
                 0,

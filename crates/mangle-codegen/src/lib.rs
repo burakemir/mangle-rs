@@ -787,6 +787,12 @@ impl<'a, B: Backend> Codegen<'a, B> {
                 Constant::String(_) | Constant::Name(_) => {
                     func.instruction(&Instruction::I64Const(0));
                 }
+                Constant::Time(t) => {
+                    func.instruction(&Instruction::I64Const(*t));
+                }
+                Constant::Duration(d) => {
+                    func.instruction(&Instruction::I64Const(*d));
+                }
             },
         }
     }

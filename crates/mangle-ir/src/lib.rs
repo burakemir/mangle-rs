@@ -186,6 +186,10 @@ pub enum Inst {
     Bytes(Vec<u8>),
     /// A name constant (e.g. /foo).
     Name(NameId),
+    /// Time as nanoseconds since Unix epoch.
+    Time(i64),
+    /// Duration as nanoseconds.
+    Duration(i64),
 
     /// A list of values. args point to other Constant-like instructions.
     List(Vec<InstId>),

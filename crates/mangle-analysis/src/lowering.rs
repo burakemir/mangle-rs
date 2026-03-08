@@ -166,6 +166,8 @@ impl<'a> LoweringContext<'a> {
             ast::Const::Bool(b) => self.ir.add_inst(Inst::Bool(*b)),
             ast::Const::Number(n) => self.ir.add_inst(Inst::Number(*n)),
             ast::Const::Float(f) => self.ir.add_inst(Inst::Float(*f)),
+            ast::Const::Time(t) => self.ir.add_inst(Inst::Time(*t)),
+            ast::Const::Duration(d) => self.ir.add_inst(Inst::Duration(*d)),
             ast::Const::String(s) => {
                 let id = self.ir.intern_string(*s);
                 self.ir.add_inst(Inst::String(id))

@@ -581,6 +581,8 @@ where
             }
             Token::Int { decoded } => ast::BaseTerm::Const(ast::Const::Number(*decoded)),
             Token::Float { decoded } => ast::BaseTerm::Const(ast::Const::Float(*decoded)),
+            Token::Timestamp { nanos } => ast::BaseTerm::Const(ast::Const::Time(*nanos)),
+            Token::Duration { nanos } => ast::BaseTerm::Const(ast::Const::Duration(*nanos)),
             Token::Name { name } => {
                 let name = self.arena.intern(name);
                 ast::BaseTerm::Const(ast::Const::Name(name))
@@ -730,6 +732,8 @@ fn base_term_start(t: &Token) -> bool {
         | Token::Float { .. }
         | Token::String { .. }
         | Token::Bytes { .. }
+        | Token::Timestamp { .. }
+        | Token::Duration { .. }
         | Token::LBracket
         | Token::LBrace
         | Token::DotIdent { .. } => true,

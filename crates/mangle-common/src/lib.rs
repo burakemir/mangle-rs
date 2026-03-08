@@ -31,6 +31,10 @@ pub enum Value {
     Number(i64),
     Float(f64),
     String(String),
+    /// Time as nanoseconds since Unix epoch (consistent with Go implementation).
+    Time(i64),
+    /// Duration as nanoseconds (consistent with Go implementation).
+    Duration(i64),
     Null, // Used for iteration end or missing
 }
 
@@ -41,6 +45,8 @@ impl PartialEq for Value {
             (Value::Number(a), Value::Number(b)) => a == b,
             (Value::Float(a), Value::Float(b)) => a.to_bits() == b.to_bits(),
             (Value::String(a), Value::String(b)) => a == b,
+            (Value::Time(a), Value::Time(b)) => a == b,
+            (Value::Duration(a), Value::Duration(b)) => a == b,
             (Value::Null, Value::Null) => true,
             _ => false,
         }
@@ -58,6 +64,8 @@ impl std::hash::Hash for Value {
             Value::Number(n) => n.hash(state),
             Value::Float(f) => f.to_bits().hash(state),
             Value::String(s) => s.hash(state),
+            Value::Time(t) => t.hash(state),
+            Value::Duration(d) => d.hash(state),
             Value::Null => {}
         }
     }
@@ -80,12 +88,18 @@ impl Ord for Value {
             (Value::Number(a), Value::Float(b)) => (*a as f64).total_cmp(b),
             (Value::Float(a), Value::Number(b)) => a.total_cmp(&(*b as f64)),
             (Value::String(a), Value::String(b)) => a.cmp(b),
+            (Value::Time(a), Value::Time(b)) => a.cmp(b),
+            (Value::Duration(a), Value::Duration(b)) => a.cmp(b),
             (Value::Null, Value::Null) => std::cmp::Ordering::Equal,
-            // Cross-variant ordering for non-numeric pairs: Number/Float < String < Null
+            // Cross-variant ordering: Number/Float < String < Time < Duration < Null
             (Value::Number(_) | Value::Float(_), _) => std::cmp::Ordering::Less,
             (_, Value::Number(_) | Value::Float(_)) => std::cmp::Ordering::Greater,
             (Value::String(_), _) => std::cmp::Ordering::Less,
             (_, Value::String(_)) => std::cmp::Ordering::Greater,
+            (Value::Time(_), _) => std::cmp::Ordering::Less,
+            (_, Value::Time(_)) => std::cmp::Ordering::Greater,
+            (Value::Duration(_), _) => std::cmp::Ordering::Less,
+            (_, Value::Duration(_)) => std::cmp::Ordering::Greater,
         }
     }
 }
@@ -97,9 +111,122 @@ impl std::fmt::Display for Value {
             Value::Number(n) => write!(f, "{n}"),
             Value::Float(v) => write!(f, "{v}"),
             Value::String(s) => write!(f, "{s:?}"),
+            Value::Time(nanos) => write!(f, "{}", format_time_nanos(*nanos)),
+            Value::Duration(nanos) => write!(f, "{}", format_duration_nanos(*nanos)),
             Value::Null => write!(f, "null"),
         }
     }
+}
+
+#[cfg(feature = "edge")]
+fn format_time_nanos(nanos: i64) -> String {
+    let secs = nanos.div_euclid(1_000_000_000);
+    let ns = nanos.rem_euclid(1_000_000_000) as u32;
+
+    // Convert seconds since epoch to date/time components
+    // Using a simplified algorithm (valid for dates from 1970 onwards)
+    let days = secs.div_euclid(86400);
+    let time_of_day = secs.rem_euclid(86400);
+    let hour = time_of_day / 3600;
+    let minute = (time_of_day % 3600) / 60;
+    let second = time_of_day % 60;
+
+    // Civil date from days since epoch (algorithm from Howard Hinnant)
+    let z = days + 719468;
+    let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
+    let doe = (z - era * 146097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+
+    if ns == 0 {
+        format!("{y:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}Z")
+    } else {
+        // Trim trailing zeros from fractional seconds
+        let mut frac = format!("{ns:09}");
+        frac = frac.trim_end_matches('0').to_string();
+        format!("{y:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}.{frac}Z")
+    }
+}
+
+/// Formats a duration in nanoseconds to match Go's time.Duration.String() output.
+/// Produces compound forms like "1h30m0s", "2.5s", "500ms", "150ns".
+#[cfg(feature = "edge")]
+fn format_duration_nanos(nanos: i64) -> String {
+    if nanos == 0 {
+        return "0s".to_string();
+    }
+
+    let mut result = String::new();
+    let mut remaining = if nanos < 0 {
+        result.push('-');
+        nanos.unsigned_abs()
+    } else {
+        nanos as u64
+    };
+
+    const NANOS_PER_NS: u64 = 1;
+    const NANOS_PER_US: u64 = 1_000;
+    const NANOS_PER_MS: u64 = 1_000_000;
+    const NANOS_PER_S: u64 = 1_000_000_000;
+    const NANOS_PER_M: u64 = 60 * NANOS_PER_S;
+    const NANOS_PER_H: u64 = 60 * NANOS_PER_M;
+
+    // For durations >= 1s, Go uses compound h/m/s format
+    if remaining >= NANOS_PER_S {
+        let hours = remaining / NANOS_PER_H;
+        remaining %= NANOS_PER_H;
+        let minutes = remaining / NANOS_PER_M;
+        remaining %= NANOS_PER_M;
+        let seconds = remaining / NANOS_PER_S;
+        let sub_second_nanos = remaining % NANOS_PER_S;
+
+        if hours > 0 {
+            result.push_str(&format!("{hours}h"));
+        }
+        if minutes > 0 || hours > 0 {
+            result.push_str(&format!("{minutes}m"));
+        }
+        if sub_second_nanos == 0 {
+            result.push_str(&format!("{seconds}s"));
+        } else {
+            // Format fractional seconds, trimming trailing zeros
+            let frac = format!("{sub_second_nanos:09}");
+            let frac = frac.trim_end_matches('0');
+            result.push_str(&format!("{seconds}.{frac}s"));
+        }
+    } else if remaining >= NANOS_PER_MS {
+        // Milliseconds with optional fractional part
+        let ms = remaining / NANOS_PER_MS;
+        let sub = remaining % NANOS_PER_MS;
+        if sub == 0 {
+            result.push_str(&format!("{ms}ms"));
+        } else {
+            let frac = format!("{sub:06}");
+            let frac = frac.trim_end_matches('0');
+            result.push_str(&format!("{ms}.{frac}ms"));
+        }
+    } else if remaining >= NANOS_PER_US {
+        // Microseconds
+        let us = remaining / NANOS_PER_US;
+        let sub = remaining % NANOS_PER_US;
+        if sub == 0 {
+            result.push_str(&format!("{us}µs"));
+        } else {
+            let frac = format!("{sub:03}");
+            let frac = frac.trim_end_matches('0');
+            result.push_str(&format!("{us}.{frac}µs"));
+        }
+    } else {
+        // Nanoseconds
+        result.push_str(&format!("{}ns", remaining));
+    }
+
+    result
 }
 
 /// Abstract interface for relation storage (Edge Mode).

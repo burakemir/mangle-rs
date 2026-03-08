@@ -105,6 +105,8 @@ fn value_to_json(v: &Value) -> serde_json::Value {
             .map(serde_json::Value::Number)
             .unwrap_or(serde_json::Value::Null),
         Value::String(s) => serde_json::Value::String(s.clone()),
+        Value::Time(t) => serde_json::Value::String(format!("{}", Value::Time(*t))),
+        Value::Duration(d) => serde_json::Value::String(format!("{}", Value::Duration(*d))),
         Value::Null => serde_json::Value::Null,
     }
 }

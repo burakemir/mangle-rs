@@ -97,6 +97,8 @@ impl<'a> fmt::Display for Pretty<'a, Const<'a>> {
             Const::Float(fl) => write!(f, "{fl}"),
             Const::String(s) => write!(f, "{s:?}"), // Use Debug for quoting
             Const::Bytes(b) => write!(f, "{b:?}"),
+            Const::Time(t) => write!(f, "t#{t}"),
+            Const::Duration(d) => write!(f, "d#{d}"),
             Const::List(l) => {
                 write!(f, "[")?;
                 for (i, c) in l.iter().enumerate() {

@@ -1155,4 +1155,286 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn test_timestamp_literals() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            event(2024-01-15T10:30:00Z).
+            event(2024-06-01T00:00:00Z).
+            has_event(X) :- event(X).
+        "#;
+
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("has_event")
+            .expect("relation has_event not found")
+            .collect();
+        assert_eq!(facts.len(), 2);
+        // Both should be Time values
+        for fact in &facts {
+            assert!(matches!(fact[0], Value::Time(_)), "expected Time, got {:?}", fact[0]);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_duration_literals() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            timeout(30s).
+            timeout(500ms).
+            has_timeout(X) :- timeout(X).
+        "#;
+
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("has_timeout")
+            .expect("relation has_timeout not found")
+            .collect();
+        assert_eq!(facts.len(), 2);
+        for fact in &facts {
+            assert!(matches!(fact[0], Value::Duration(_)), "expected Duration, got {:?}", fact[0]);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_time_arithmetic() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            start(2024-01-15T10:00:00Z).
+            result(Y) :- start(X) |> let Y = fn:time:add(X, 1h).
+        "#;
+
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("result")
+            .expect("relation result not found")
+            .collect();
+        assert_eq!(facts.len(), 1);
+        // 2024-01-15T10:00:00Z + 1h = 2024-01-15T11:00:00Z
+        match &facts[0][0] {
+            Value::Time(nanos) => {
+                let expected = 1705276800_000_000_000i64 + (11 * 3600) * 1_000_000_000;
+                assert_eq!(*nanos, expected, "time should be 2024-01-15T11:00:00Z");
+            }
+            v => panic!("expected Time, got {v:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_time_sub() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            pair(2024-01-15T12:00:00Z, 2024-01-15T10:00:00Z).
+            diff(D) :- pair(A, B) |> let D = fn:time:sub(A, B).
+        "#;
+
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("diff")
+            .expect("relation diff not found")
+            .collect();
+        assert_eq!(facts.len(), 1);
+        match &facts[0][0] {
+            Value::Duration(nanos) => {
+                assert_eq!(*nanos, 2 * 3600 * 1_000_000_000, "diff should be 2h");
+            }
+            v => panic!("expected Duration, got {v:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_time_components() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            ts(2024-06-15T14:30:45Z).
+            year_of(Y) :- ts(T) |> let Y = fn:time:year(T).
+            month_of(M) :- ts(T) |> let M = fn:time:month(T).
+            day_of(D) :- ts(T) |> let D = fn:time:day(T).
+            hour_of(H) :- ts(T) |> let H = fn:time:hour(T).
+            minute_of(Min) :- ts(T) |> let Min = fn:time:minute(T).
+            second_of(S) :- ts(T) |> let S = fn:time:second(T).
+        "#;
+
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let check = |rel: &str, expected: i64| {
+            let facts: Vec<_> = interpreter.store().scan(rel).expect(rel).collect();
+            assert_eq!(facts.len(), 1, "{rel}");
+            assert_eq!(facts[0][0], Value::Number(expected), "{rel}");
+        };
+        check("year_of", 2024);
+        check("month_of", 6);
+        check("day_of", 15);
+        check("hour_of", 14);
+        check("minute_of", 30);
+        check("second_of", 45);
+        Ok(())
+    }
+
+    #[test]
+    fn test_duration_components() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            dur(90s).
+            dur_seconds(S) :- dur(D) |> let S = fn:duration:seconds(D).
+            dur_nanos(N) :- dur(D) |> let N = fn:duration:nanos(D).
+        "#;
+
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let secs: Vec<_> = interpreter.store().scan("dur_seconds").expect("dur_seconds").collect();
+        assert_eq!(secs.len(), 1);
+        assert_eq!(secs[0][0], Value::Float(90.0));
+
+        let nanos: Vec<_> = interpreter.store().scan("dur_nanos").expect("dur_nanos").collect();
+        assert_eq!(nanos.len(), 1);
+        assert_eq!(nanos[0][0], Value::Number(90_000_000_000));
+        Ok(())
+    }
+
+    #[test]
+    fn test_time_comparison_predicates() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            event(2024-01-01T00:00:00Z).
+            event(2024-06-15T00:00:00Z).
+            event(2024-12-31T00:00:00Z).
+            recent(T) :- event(T), :time:gt(T, 2024-06-01T00:00:00Z).
+        "#;
+
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("recent")
+            .expect("relation recent not found")
+            .collect();
+        assert_eq!(facts.len(), 2, "recent: {:?}", facts);
+        Ok(())
+    }
+
+    #[test]
+    fn test_date_only_timestamp() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            d(2024-01-15).
+            has(X) :- d(X).
+        "#;
+
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("has")
+            .expect("relation has not found")
+            .collect();
+        assert_eq!(facts.len(), 1);
+        match &facts[0][0] {
+            Value::Time(nanos) => {
+                // 2024-01-15T00:00:00Z
+                assert_eq!(*nanos, 1705276800_000_000_000);
+            }
+            v => panic!("expected Time, got {v:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_time_trunc() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            ts(2024-06-15T14:30:45Z).
+            truncated(Y) :- ts(T) |> let Y = fn:time:trunc(T, /hour).
+        "#;
+
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("truncated")
+            .expect("relation truncated not found")
+            .collect();
+        assert_eq!(facts.len(), 1);
+        match &facts[0][0] {
+            Value::Time(nanos) => {
+                // Should be truncated to 2024-06-15T14:00:00Z
+                let display = format!("{}", Value::Time(*nanos));
+                assert_eq!(display, "2024-06-15T14:00:00Z");
+            }
+            v => panic!("expected Time, got {v:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_duration_arithmetic() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            d(1h, 30m).
+            total(T) :- d(A, B) |> let T = fn:duration:add(A, B).
+            doubled(T) :- d(A, _) |> let T = fn:duration:mult(A, 2).
+        "#;
+
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("total")
+            .expect("relation total not found")
+            .collect();
+        assert_eq!(facts.len(), 1);
+        match &facts[0][0] {
+            Value::Duration(nanos) => {
+                assert_eq!(*nanos, 90 * 60 * 1_000_000_000, "1h + 30m = 90m");
+            }
+            v => panic!("expected Duration, got {v:?}"),
+        }
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("doubled")
+            .expect("relation doubled not found")
+            .collect();
+        assert_eq!(facts.len(), 1);
+        match &facts[0][0] {
+            Value::Duration(nanos) => {
+                assert_eq!(*nanos, 2 * 3600 * 1_000_000_000, "2 * 1h = 2h");
+            }
+            v => panic!("expected Duration, got {v:?}"),
+        }
+        Ok(())
+    }
 }

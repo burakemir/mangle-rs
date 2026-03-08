@@ -812,6 +812,8 @@ impl<'a> Interpreter<'a> {
                     Ok(Value::String(self.ir.resolve_string(*sid).to_string()))
                 }
                 Constant::Name(nid) => Ok(Value::String(self.ir.resolve_name(*nid).to_string())),
+                Constant::Time(t) => Ok(Value::Time(*t)),
+                Constant::Duration(d) => Ok(Value::Duration(*d)),
             },
         }
     }
@@ -832,6 +834,8 @@ fn value_to_string(v: &Value) -> String {
         Value::Number(n) => n.to_string(),
         Value::Float(f) => format!("{f}"),
         Value::String(s) => s.clone(),
+        Value::Time(t) => format!("{}", Value::Time(*t)),
+        Value::Duration(d) => format!("{}", Value::Duration(*d)),
         Value::Null => "null".to_string(),
     }
 }
@@ -1034,8 +1038,441 @@ pub fn eval_function(fn_name: &str, vals: &[Value]) -> Result<Value> {
             }
         }
 
+        // --- Time functions ---
+        "fn:time:now" => {
+            if !vals.is_empty() {
+                return Err(anyhow!("fn:time:now: takes no arguments"));
+            }
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|e| anyhow!("fn:time:now: {e}"))?
+                .as_nanos() as i64;
+            Ok(Value::Time(nanos))
+        }
+        "fn:time:add" => {
+            if vals.len() != 2 {
+                return Err(anyhow!("fn:time:add: requires 2 arguments (time, duration)"));
+            }
+            match (&vals[0], &vals[1]) {
+                (Value::Time(t), Value::Duration(d)) => Ok(Value::Time(t + d)),
+                _ => Err(anyhow!("fn:time:add: expected (time, duration), got ({}, {})", vals[0], vals[1])),
+            }
+        }
+        "fn:time:sub" => {
+            if vals.len() != 2 {
+                return Err(anyhow!("fn:time:sub: requires 2 arguments"));
+            }
+            match (&vals[0], &vals[1]) {
+                (Value::Time(t1), Value::Time(t2)) => Ok(Value::Duration(t1 - t2)),
+                (Value::Time(t), Value::Duration(d)) => Ok(Value::Time(t - d)),
+                _ => Err(anyhow!("fn:time:sub: expected (time, time) or (time, duration)")),
+            }
+        }
+        "fn:time:year" => time_component(vals, |secs, _| {
+            let (y, _, _) = civil_from_epoch_secs(secs);
+            y as i64
+        }),
+        "fn:time:month" => time_component(vals, |secs, _| {
+            let (_, m, _) = civil_from_epoch_secs(secs);
+            m as i64
+        }),
+        "fn:time:day" => time_component(vals, |secs, _| {
+            let (_, _, d) = civil_from_epoch_secs(secs);
+            d as i64
+        }),
+        "fn:time:hour" => time_component(vals, |secs, _| {
+            secs.rem_euclid(86400) / 3600
+        }),
+        "fn:time:minute" => time_component(vals, |secs, _| {
+            (secs.rem_euclid(86400) % 3600) / 60
+        }),
+        "fn:time:second" => time_component(vals, |secs, _| {
+            secs.rem_euclid(86400) % 60
+        }),
+        "fn:time:from_unix_nanos" => {
+            if vals.len() != 1 {
+                return Err(anyhow!("fn:time:from_unix_nanos: requires 1 argument"));
+            }
+            match &vals[0] {
+                Value::Number(n) => Ok(Value::Time(*n)),
+                v => Err(anyhow!("fn:time:from_unix_nanos: expected number, got {v}")),
+            }
+        }
+        "fn:time:to_unix_nanos" => {
+            if vals.len() != 1 {
+                return Err(anyhow!("fn:time:to_unix_nanos: requires 1 argument"));
+            }
+            match &vals[0] {
+                Value::Time(t) => Ok(Value::Number(*t)),
+                v => Err(anyhow!("fn:time:to_unix_nanos: expected time, got {v}")),
+            }
+        }
+        "fn:time:trunc" => {
+            if vals.len() != 2 {
+                return Err(anyhow!("fn:time:trunc: requires 2 arguments (time, unit_name)"));
+            }
+            let t = match &vals[0] {
+                Value::Time(t) => *t,
+                v => return Err(anyhow!("fn:time:trunc: first arg must be time, got {v}")),
+            };
+            let unit_name = match &vals[1] {
+                Value::String(s) => s.as_str(),
+                v => return Err(anyhow!("fn:time:trunc: second arg must be name, got {v}")),
+            };
+            let d: i64 = match unit_name {
+                "/nanosecond" => 1,
+                "/microsecond" => 1_000,
+                "/millisecond" => 1_000_000,
+                "/second" => 1_000_000_000,
+                "/minute" => 60 * 1_000_000_000,
+                "/hour" => 3600 * 1_000_000_000,
+                "/day" => 24 * 3600 * 1_000_000_000,
+                _ => return Err(anyhow!("fn:time:trunc: unknown unit {unit_name:?}")),
+            };
+            Ok(Value::Time(t - t.rem_euclid(d)))
+        }
+        "fn:time:format" => {
+            if vals.len() != 2 {
+                return Err(anyhow!("fn:time:format: requires 2 arguments (time, precision)"));
+            }
+            let t = match &vals[0] {
+                Value::Time(t) => *t,
+                v => return Err(anyhow!("fn:time:format: first arg must be time, got {v}")),
+            };
+            let precision = match &vals[1] {
+                Value::String(s) => s.as_str(),
+                v => return Err(anyhow!("fn:time:format: second arg must be name, got {v}")),
+            };
+            Ok(Value::String(format_time_with_precision(t, precision)?))
+        }
+        "fn:time:format_civil" => {
+            if vals.len() != 3 {
+                return Err(anyhow!("fn:time:format_civil: requires 3 arguments (time, timezone, precision)"));
+            }
+            let t = match &vals[0] {
+                Value::Time(t) => *t,
+                v => return Err(anyhow!("fn:time:format_civil: first arg must be time, got {v}")),
+            };
+            let tz = match &vals[1] {
+                Value::String(s) => s.as_str(),
+                v => return Err(anyhow!("fn:time:format_civil: second arg must be string, got {v}")),
+            };
+            let precision = match &vals[2] {
+                Value::String(s) => s.as_str(),
+                v => return Err(anyhow!("fn:time:format_civil: third arg must be name, got {v}")),
+            };
+            let offset = parse_timezone_offset(tz)?;
+            let adjusted = t + offset * 1_000_000_000;
+            let formatted = format_time_with_precision(adjusted, precision)?;
+            Ok(Value::String(formatted))
+        }
+        "fn:time:parse_rfc3339" => {
+            if vals.len() != 1 {
+                return Err(anyhow!("fn:time:parse_rfc3339: requires 1 argument"));
+            }
+            match &vals[0] {
+                Value::String(s) => {
+                    let nanos = parse_rfc3339_to_nanos(s)?;
+                    Ok(Value::Time(nanos))
+                }
+                v => Err(anyhow!("fn:time:parse_rfc3339: expected string, got {v}")),
+            }
+        }
+        "fn:time:parse_civil" => {
+            if vals.len() != 2 {
+                return Err(anyhow!("fn:time:parse_civil: requires 2 arguments (string, timezone)"));
+            }
+            let s = match &vals[0] {
+                Value::String(s) => s.as_str(),
+                v => return Err(anyhow!("fn:time:parse_civil: first arg must be string, got {v}")),
+            };
+            let tz = match &vals[1] {
+                Value::String(s) => s.as_str(),
+                v => return Err(anyhow!("fn:time:parse_civil: second arg must be string, got {v}")),
+            };
+            let offset = parse_timezone_offset(tz)?;
+            let nanos = parse_civil_datetime_to_nanos(s)?;
+            // Subtract offset to convert local time to UTC
+            Ok(Value::Time(nanos - offset * 1_000_000_000))
+        }
+
+        // --- Duration functions ---
+        "fn:duration:add" => {
+            if vals.len() != 2 {
+                return Err(anyhow!("fn:duration:add: requires 2 arguments"));
+            }
+            match (&vals[0], &vals[1]) {
+                (Value::Duration(a), Value::Duration(b)) => Ok(Value::Duration(a + b)),
+                _ => Err(anyhow!("fn:duration:add: expected (duration, duration)")),
+            }
+        }
+        "fn:duration:mult" => {
+            if vals.len() != 2 {
+                return Err(anyhow!("fn:duration:mult: requires 2 arguments"));
+            }
+            match (&vals[0], &vals[1]) {
+                (Value::Duration(d), Value::Number(n)) => Ok(Value::Duration(d * n)),
+                (Value::Number(n), Value::Duration(d)) => Ok(Value::Duration(n * d)),
+                _ => Err(anyhow!("fn:duration:mult: expected (duration, number) or (number, duration)")),
+            }
+        }
+        "fn:duration:hours" => duration_component_float(vals, |nanos| nanos as f64 / (60.0 * 60.0 * 1_000_000_000.0)),
+        "fn:duration:minutes" => duration_component_float(vals, |nanos| nanos as f64 / (60.0 * 1_000_000_000.0)),
+        "fn:duration:seconds" => duration_component_float(vals, |nanos| nanos as f64 / 1_000_000_000.0),
+        "fn:duration:nanos" => duration_component_int(vals, |nanos| nanos),
+        "fn:duration:from_nanos" => {
+            if vals.len() != 1 {
+                return Err(anyhow!("fn:duration:from_nanos: requires 1 argument"));
+            }
+            match &vals[0] {
+                Value::Number(n) => Ok(Value::Duration(*n)),
+                v => Err(anyhow!("fn:duration:from_nanos: expected number, got {v}")),
+            }
+        }
+        "fn:duration:from_hours" => duration_from(vals, "hours", 60 * 60 * 1_000_000_000),
+        "fn:duration:from_minutes" => duration_from(vals, "minutes", 60 * 1_000_000_000),
+        "fn:duration:from_seconds" => duration_from(vals, "seconds", 1_000_000_000),
+        "fn:duration:parse" => {
+            if vals.len() != 1 {
+                return Err(anyhow!("fn:duration:parse: requires 1 argument"));
+            }
+            match &vals[0] {
+                Value::String(s) => {
+                    let nanos = parse_duration_string(s)?;
+                    Ok(Value::Duration(nanos))
+                }
+                v => Err(anyhow!("fn:duration:parse: expected string, got {v}")),
+            }
+        }
+
         _ => Err(anyhow!("Unknown function: {fn_name}")),
     }
+}
+
+fn time_component(vals: &[Value], extract: impl Fn(i64, i64) -> i64) -> Result<Value> {
+    if vals.len() != 1 {
+        return Err(anyhow!("time component function: requires 1 argument"));
+    }
+    match &vals[0] {
+        Value::Time(nanos) => {
+            let secs = nanos.div_euclid(1_000_000_000);
+            let sub_nanos = nanos.rem_euclid(1_000_000_000);
+            Ok(Value::Number(extract(secs, sub_nanos)))
+        }
+        v => Err(anyhow!("time component function: expected time, got {v}")),
+    }
+}
+
+fn civil_from_epoch_secs(secs: i64) -> (i32, u32, u32) {
+    let days = secs.div_euclid(86400);
+    let z = days + 719468;
+    let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
+    let doe = (z - era * 146097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y as i32, m, d)
+}
+
+fn duration_component_float(vals: &[Value], extract: impl Fn(i64) -> f64) -> Result<Value> {
+    if vals.len() != 1 {
+        return Err(anyhow!("duration component function: requires 1 argument"));
+    }
+    match &vals[0] {
+        Value::Duration(nanos) => Ok(Value::Float(extract(*nanos))),
+        v => Err(anyhow!("duration component function: expected duration, got {v}")),
+    }
+}
+
+fn duration_component_int(vals: &[Value], extract: impl Fn(i64) -> i64) -> Result<Value> {
+    if vals.len() != 1 {
+        return Err(anyhow!("duration component function: requires 1 argument"));
+    }
+    match &vals[0] {
+        Value::Duration(nanos) => Ok(Value::Number(extract(*nanos))),
+        v => Err(anyhow!("duration component function: expected duration, got {v}")),
+    }
+}
+
+fn duration_from(vals: &[Value], name: &str, multiplier: i64) -> Result<Value> {
+    if vals.len() != 1 {
+        return Err(anyhow!("fn:duration:from_{name}: requires 1 argument"));
+    }
+    match &vals[0] {
+        Value::Number(n) => Ok(Value::Duration(n * multiplier)),
+        v => Err(anyhow!("fn:duration:from_{name}: expected number, got {v}")),
+    }
+}
+
+/// Format a time (in UTC nanoseconds) with a given precision specifier.
+fn format_time_with_precision(nanos: i64, precision: &str) -> Result<String> {
+    let secs = nanos.div_euclid(1_000_000_000);
+    let sub_nanos = nanos.rem_euclid(1_000_000_000);
+    let (y, m, d) = civil_from_epoch_secs(secs);
+    let time_of_day = secs.rem_euclid(86400);
+    let hour = time_of_day / 3600;
+    let minute = (time_of_day % 3600) / 60;
+    let second = time_of_day % 60;
+
+    match precision {
+        "/year" => Ok(format!("{y:04}")),
+        "/month" => Ok(format!("{y:04}-{m:02}")),
+        "/day" => Ok(format!("{y:04}-{m:02}-{d:02}")),
+        "/hour" => Ok(format!("{y:04}-{m:02}-{d:02}T{hour:02}Z")),
+        "/minute" => Ok(format!("{y:04}-{m:02}-{d:02}T{hour:02}:{minute:02}Z")),
+        "/second" => Ok(format!("{y:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}Z")),
+        "/millisecond" => {
+            let ms = sub_nanos / 1_000_000;
+            Ok(format!("{y:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}.{ms:03}Z"))
+        }
+        "/microsecond" => {
+            let us = sub_nanos / 1_000;
+            Ok(format!("{y:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}.{us:06}Z"))
+        }
+        "/nanosecond" => {
+            if sub_nanos == 0 {
+                Ok(format!("{y:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}Z"))
+            } else {
+                let ns_str = format!("{sub_nanos:09}");
+                let ns_trimmed = ns_str.trim_end_matches('0');
+                Ok(format!("{y:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}.{ns_trimmed}Z"))
+            }
+        }
+        _ => Err(anyhow!("unknown time precision: {precision:?}")),
+    }
+}
+
+/// Parse a timezone string. Supports "UTC" and fixed offsets like "+05:30", "-08:00".
+/// Returns offset in seconds from UTC.
+fn parse_timezone_offset(tz: &str) -> Result<i64> {
+    match tz {
+        "UTC" => Ok(0),
+        s if s.starts_with('+') || s.starts_with('-') => {
+            let sign: i64 = if s.starts_with('-') { -1 } else { 1 };
+            let rest = &s[1..];
+            let parts: Vec<&str> = rest.split(':').collect();
+            if parts.len() != 2 {
+                return Err(anyhow!("invalid timezone offset: {tz:?}"));
+            }
+            let hours: i64 = parts[0].parse().map_err(|_| anyhow!("invalid timezone: {tz:?}"))?;
+            let minutes: i64 = parts[1].parse().map_err(|_| anyhow!("invalid timezone: {tz:?}"))?;
+            Ok(sign * (hours * 3600 + minutes * 60))
+        }
+        _ => Err(anyhow!("unsupported timezone: {tz:?} (use \"UTC\" or offset like \"+05:30\")")),
+    }
+}
+
+/// Parse an RFC3339-like timestamp string to nanoseconds since epoch.
+fn parse_rfc3339_to_nanos(s: &str) -> Result<i64> {
+    // Minimal RFC3339: "2006-01-02T15:04:05Z" or with fractional seconds
+    if s.len() < 10 {
+        return Err(anyhow!("fn:time:parse_rfc3339: string too short: {s:?}"));
+    }
+    let year: i64 = s[0..4].parse().map_err(|_| anyhow!("invalid year in {s:?}"))?;
+    let month: u32 = s[5..7].parse().map_err(|_| anyhow!("invalid month in {s:?}"))?;
+    let day: u32 = s[8..10].parse().map_err(|_| anyhow!("invalid day in {s:?}"))?;
+
+    let (hour, minute, second, frac_nanos) = if s.len() > 10 && s.as_bytes()[10] == b'T' {
+        if s.len() < 19 {
+            return Err(anyhow!("fn:time:parse_rfc3339: incomplete time in {s:?}"));
+        }
+        let h: u32 = s[11..13].parse().map_err(|_| anyhow!("invalid hour"))?;
+        let min: u32 = s[14..16].parse().map_err(|_| anyhow!("invalid minute"))?;
+        let sec: u32 = s[17..19].parse().map_err(|_| anyhow!("invalid second"))?;
+
+        let frac = if s.len() > 19 && s.as_bytes()[19] == b'.' {
+            let end = s.len() - if s.ends_with('Z') { 1 } else { 0 };
+            let frac_str = &s[20..end];
+            let padded = format!("{frac_str:0<9}");
+            padded[..9].parse::<i64>().unwrap_or(0)
+        } else {
+            0
+        };
+        (h, min, sec, frac)
+    } else {
+        (0, 0, 0, 0)
+    };
+
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = (if y >= 0 { y } else { y - 399 }) / 400;
+    let yoe = (y - era * 400) as u32;
+    let m_adj = if month > 2 { month - 3 } else { month + 9 };
+    let doy = (153 * m_adj + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe as i64 - 719468;
+
+    let total_seconds = days * 86400 + hour as i64 * 3600 + minute as i64 * 60 + second as i64;
+    Ok(total_seconds * 1_000_000_000 + frac_nanos)
+}
+
+/// Parse a civil datetime string like "2024-01-15T10:30:00" or "2024-01-15T10:30:00.000000000".
+fn parse_civil_datetime_to_nanos(s: &str) -> Result<i64> {
+    // Reuse RFC3339 parser — civil format is the same without 'Z' suffix
+    parse_rfc3339_to_nanos(s)
+}
+
+/// Parse a Go-style duration string like "1h30m", "500ms", "-2h45m30s", "1.5h".
+fn parse_duration_string(s: &str) -> Result<i64> {
+    if s.is_empty() {
+        return Err(anyhow!("fn:duration:parse: empty string"));
+    }
+    if s == "0" || s == "0s" {
+        return Ok(0);
+    }
+
+    let (sign, mut rest) = if s.starts_with('-') {
+        (-1i64, &s[1..])
+    } else if s.starts_with('+') {
+        (1i64, &s[1..])
+    } else {
+        (1i64, s)
+    };
+
+    let mut total_nanos: i64 = 0;
+
+    while !rest.is_empty() {
+        // Parse numeric part (integer or float)
+        let num_end = rest
+            .find(|c: char| !c.is_ascii_digit() && c != '.')
+            .unwrap_or(rest.len());
+        if num_end == 0 {
+            return Err(anyhow!("fn:duration:parse: expected number in {s:?}"));
+        }
+        let num_str = &rest[..num_end];
+        rest = &rest[num_end..];
+
+        // Parse unit suffix
+        let (unit_nanos, unit_len) = if rest.starts_with("ns") {
+            (1i64, 2)
+        } else if rest.starts_with("us") || rest.starts_with("µs") {
+            (1_000i64, if rest.starts_with("µ") { 3 } else { 2 })
+        } else if rest.starts_with("ms") {
+            (1_000_000i64, 2)
+        } else if rest.starts_with('s') {
+            (1_000_000_000i64, 1)
+        } else if rest.starts_with('m') {
+            (60 * 1_000_000_000i64, 1)
+        } else if rest.starts_with('h') {
+            (3600 * 1_000_000_000i64, 1)
+        } else {
+            return Err(anyhow!("fn:duration:parse: unknown unit in {s:?}"));
+        };
+        rest = &rest[unit_len..];
+
+        if num_str.contains('.') {
+            let val: f64 = num_str.parse().map_err(|_| anyhow!("fn:duration:parse: invalid number {num_str:?}"))?;
+            total_nanos += (val * unit_nanos as f64) as i64;
+        } else {
+            let val: i64 = num_str.parse().map_err(|_| anyhow!("fn:duration:parse: invalid number {num_str:?}"))?;
+            total_nanos += val * unit_nanos;
+        }
+    }
+
+    Ok(sign * total_nanos)
 }
 
 #[cfg(test)]

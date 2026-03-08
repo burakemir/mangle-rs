@@ -366,6 +366,8 @@ impl<'arena> Arena {
             Const::Bool(b) => self.alloc(Const::Bool(*b)),
             Const::Number(n) => self.alloc(Const::Number(*n)),
             Const::Float(f) => self.alloc(Const::Float(*f)),
+            Const::Time(t) => self.alloc(Const::Time(*t)),
+            Const::Duration(d) => self.alloc(Const::Duration(*d)),
             Const::String(s) => {
                 let s = self.alloc_str(s);
                 self.alloc(Const::String(s))
@@ -608,6 +610,10 @@ pub enum Const<'a> {
     Float(f64),
     String(&'a str),
     Bytes(&'a [u8]),
+    /// Time as nanoseconds since Unix epoch.
+    Time(i64),
+    /// Duration as nanoseconds.
+    Duration(i64),
     List(&'a [&'a Const<'a>]),
     Map {
         keys: &'a [&'a Const<'a>],
@@ -630,6 +636,8 @@ impl std::fmt::Display for Const<'_> {
             Const::Float(v) => write!(f, "{v}"),
             Const::String(v) => write!(f, "{v}"),
             Const::Bytes(v) => write!(f, "{v:?}"),
+            Const::Time(v) => write!(f, "t#{v}"),
+            Const::Duration(v) => write!(f, "d#{v}"),
             Const::List(v) => {
                 write!(
                     f,

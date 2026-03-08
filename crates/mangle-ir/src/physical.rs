@@ -147,4 +147,6 @@ pub enum Constant {
     Float(f64),
     String(StringId),
     Name(NameId),
+    Time(i64),
+    Duration(i64),
 }
