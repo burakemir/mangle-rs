@@ -2,7 +2,45 @@
 
 All notable changes in mangle/rust will be documented in this file.
 
-## upcoming - [0.4.0]
+## [0.5.0] - 2026-03-09
+
+### 🚀 Features
+
+- **Temporal facts**: Support for facts with validity intervals `@[start, end]`,
+  implemented via synthetic columns approach matching the Go reference implementation.
+  Includes interval coalescing after fixpoint convergence.
+- **Float support**: IEEE 754 floating-point values across IR, interpreter, codegen, and server.
+- **Comparison operators**: Support for `<`, `<=` in planner with cross-type numeric ordering
+  (Duration/Number, Time/Number comparisons).
+- **Built-in functions and predicates**: `fn:time:sub`, duration/time comparisons,
+  and other built-in operations.
+- **Time and duration types**: Full time/duration support with Go-compatible formatting
+  (compound duration forms, RFC3339 timestamps, Howard Hinnant's civil date algorithm).
+- **Negative number literals**: Parser and IR support for negative numeric constants.
+- **mangle-wasm crate**: Browser-targeted interpreter compiled to WebAssembly.
+- **Externref-based WASM value passing**: All Mangle values represented as `externref`
+  in WASM with host-maintained value slab, string and compound type support.
+
+### ⏱️ Performance
+
+- Interpreter-in-WASM benchmark suite for three-way comparison
+  (native, wasmtime, browser).
+
+### 🐛 Bug Fixes
+
+- Fix stratification to handle TemporalAtom variant in dependency graph.
+- Fix cross-type Duration/Number and Time/Number comparison ordering.
+- Fix coalescing to run after fixpoint convergence (not during semi-naive loop).
+- Fix EDB/IDB classification for temporal atom predicates.
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump wasmtime dependency to v41.
+- Add configuration file support (`config.mg`) and durable EDB writes.
+- Comprehensive test coverage for temporal facts (25 new tests across parser,
+  interpreter, and driver).
+
+## [0.4.0]
 
 ### 🚀 Features
 
