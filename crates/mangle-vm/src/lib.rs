@@ -505,9 +505,11 @@ impl Host for DummyHost {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mangle_analysis::LoweringContext;
+    use fxhash::FxHashSet;
+    use mangle_analysis::{rewrite_unit, LoweringContext, Program};
     use mangle_ast as ast;
     use mangle_codegen::{Codegen, WasmImportsBackend};
+    use mangle_parse::Parser;
     use std::collections::HashMap;
 
     #[test]
@@ -1022,8 +1024,39 @@ mod tests {
     /// Helper: compile Mangle source to WASM and execute with a MemHost.
     fn run_wasm_program(source: &str) -> Result<MemHost> {
         let arena = ast::Arena::new_with_global_interner();
-        let (mut ir, stratified) = mangle_driver::compile(source, &arena)?;
-        let compiled = mangle_driver::compile_to_wasm(&mut ir, &stratified);
+        let mut parser = Parser::new(&arena, source.as_bytes(), arena.alloc_str("test"));
+        parser.next_token().map_err(|e| anyhow::anyhow!(e))?;
+        let unit = parser.parse_unit()?;
+        let unit = rewrite_unit(&arena, &unit);
+
+        let mut program = Program::new(&arena);
+        let mut all_preds = FxHashSet::default();
+        let mut idb_preds = FxHashSet::default();
+        for clause in unit.clauses {
+            program.add_clause(&arena, clause);
+            idb_preds.insert(clause.head.sym);
+            all_preds.insert(clause.head.sym);
+            for premise in clause.premises {
+                match premise {
+                    ast::Term::Atom(atom) => { all_preds.insert(atom.sym); }
+                    ast::Term::NegAtom(atom) => { all_preds.insert(atom.sym); }
+                    ast::Term::TemporalAtom(atom, _) => { all_preds.insert(atom.sym); }
+                    _ => {}
+                }
+            }
+        }
+        for pred in all_preds {
+            if !idb_preds.contains(&pred) {
+                program.ext_preds.push(pred);
+            }
+        }
+        let stratified = program.stratify().map_err(|e| anyhow::anyhow!(e))?;
+
+        let ctx = LoweringContext::new(&arena);
+        let mut ir = ctx.lower_unit(&unit);
+
+        let mut codegen = Codegen::new_with_stratified(&mut ir, &stratified, WasmImportsBackend);
+        let compiled = codegen.generate();
         let host = MemHost::new(compiled.strings.clone(), compiled.names.clone());
         run_host_wasm(&compiled, host)
     }

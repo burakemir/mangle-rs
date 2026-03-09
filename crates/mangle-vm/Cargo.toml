@@ -20,7 +20,8 @@ mangle-codegen.workspace = true
 mangle-analysis.workspace = true
 mangle-ast.workspace = true
 mangle-ir.workspace = true
-mangle-driver.workspace = true
+mangle-parse.workspace = true
+fxhash.workspace = true
 tempfile.workspace = true
 mangle-simplecolumn.workspace = true
 
