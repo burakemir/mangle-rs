@@ -193,6 +193,7 @@ impl<'a> Renamer<'a> {
             descr: decl.descr, // Descriptions usually don't contain predicates to rename?
             bounds,
             constraints: decl.constraints,
+            is_temporal: decl.is_temporal,
         }))
     }
 
@@ -207,12 +208,16 @@ impl<'a> Renamer<'a> {
                 ast::Term::NegAtom(a) => {
                     premises.push(&*self.arena.alloc(ast::Term::NegAtom(self.rewrite_atom(a)?)));
                 }
+                ast::Term::TemporalAtom(a, interval) => {
+                    premises.push(&*self.arena.alloc(ast::Term::TemporalAtom(self.rewrite_atom(a)?, *interval)));
+                }
                 _ => premises.push(premise),
             }
         }
 
         Some(self.arena.alloc(ast::Clause {
             head,
+            head_time: clause.head_time,
             premises: self.arena.alloc_slice_copy(&premises),
             transform: clause.transform,
         }))
@@ -245,6 +250,7 @@ mod tests {
             descr: arena.alloc_slice_copy(&[arena.atom(name_sym, &[pkg_name])]),
             bounds: None,
             constraints: None,
+            is_temporal: false,
         });
 
         let foo_sym = arena.predicate_sym("foo", Some(1));
@@ -254,6 +260,7 @@ mod tests {
 
         let clause1 = arena.alloc(ast::Clause {
             head: arena.atom(foo_sym, &[var_x]),
+            head_time: None,
             premises: arena
                 .alloc_slice_copy(&[arena.alloc(ast::Term::Atom(arena.atom(bar_sym, &[var_x])))]),
             transform: &[],
@@ -261,6 +268,7 @@ mod tests {
 
         let clause2 = arena.alloc(ast::Clause {
             head: arena.atom(bar_sym, &[const_1]),
+            head_time: None,
             premises: &[],
             transform: &[],
         });
@@ -314,6 +322,7 @@ mod tests {
             descr: arena.alloc_slice_copy(&[arena.atom(name_sym, &[pkg_name])]),
             bounds: None,
             constraints: None,
+            is_temporal: false,
         });
 
         let other_name = arena.alloc(ast::BaseTerm::Const(ast::Const::String("other")));
@@ -322,6 +331,7 @@ mod tests {
             descr: arena.alloc_slice_copy(&[arena.atom(name_sym, &[other_name])]),
             bounds: None,
             constraints: None,
+            is_temporal: false,
         });
 
         let foo_sym = arena.predicate_sym("foo", Some(1));
@@ -330,6 +340,7 @@ mod tests {
 
         let clause1 = arena.alloc(ast::Clause {
             head: arena.atom(foo_sym, &[var_x]),
+            head_time: None,
             premises: arena.alloc_slice_copy(&[
                 arena.alloc(ast::Term::Atom(arena.atom(other_bar_sym, &[var_x])))
             ]),
@@ -370,6 +381,7 @@ mod tests {
             descr: arena.alloc_slice_copy(&[arena.atom(name_sym, &[pkg_name])]),
             bounds: None,
             constraints: None,
+            is_temporal: false,
         })
     }
 
@@ -379,6 +391,7 @@ mod tests {
         let arena = ast::Arena::new_with_global_interner();
         let clause = arena.alloc(ast::Clause {
             head: arena.atom(arena.predicate_sym("clause_defined_here", None), &[]),
+            head_time: None,
             premises: arena.alloc_slice_copy(&[arena.alloc(ast::Term::Atom(
                 arena.atom(arena.predicate_sym("other_clause", None), &[]),
             ))]),
@@ -408,6 +421,7 @@ mod tests {
         // (other_clause is NOT defined locally)
         let clause = arena.alloc(ast::Clause {
             head: arena.atom(arena.predicate_sym("clause_defined_here", None), &[]),
+            head_time: None,
             premises: arena.alloc_slice_copy(&[arena.alloc(ast::Term::Atom(
                 arena.atom(arena.predicate_sym("other_clause", None), &[]),
             ))]),
@@ -443,6 +457,7 @@ mod tests {
         // other_clause().
         let clause1 = arena.alloc(ast::Clause {
             head: arena.atom(other_sym, &[]),
+            head_time: None,
             premises: &[],
             transform: &[],
         });
@@ -450,6 +465,7 @@ mod tests {
         // clause_defined_here() :- other_clause().
         let clause2 = arena.alloc(ast::Clause {
             head: arena.atom(defined_sym, &[]),
+            head_time: None,
             premises: arena
                 .alloc_slice_copy(&[arena.alloc(ast::Term::Atom(arena.atom(other_sym, &[])))]),
             transform: &[],
@@ -488,6 +504,7 @@ mod tests {
         // other_clause(). (Needs to be defined to trigger renaming)
         let clause1 = arena.alloc(ast::Clause {
             head: arena.atom(other_sym, &[]),
+            head_time: None,
             premises: &[],
             transform: &[],
         });
@@ -495,6 +512,7 @@ mod tests {
         // clause_defined_here() :- !other_clause().
         let clause2 = arena.alloc(ast::Clause {
             head: arena.atom(defined_sym, &[]),
+            head_time: None,
             premises: arena
                 .alloc_slice_copy(&[arena.alloc(ast::Term::NegAtom(arena.atom(other_sym, &[])))]),
             transform: &[],
@@ -529,11 +547,13 @@ mod tests {
             descr: &[],
             bounds: None,
             constraints: None,
+            is_temporal: false,
         });
 
         // clause() :- from_decl().
         let clause = arena.alloc(ast::Clause {
             head: arena.atom(clause_sym, &[]),
+            head_time: None,
             premises: arena
                 .alloc_slice_copy(&[arena.alloc(ast::Term::Atom(arena.atom(decl_sym, &[])))]),
             transform: &[],

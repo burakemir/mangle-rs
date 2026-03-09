@@ -399,6 +399,7 @@ fn test_reachability_arity1() -> Result<()> {
     // Rule 1: reachable(Y) :- edge(1, Y).
     let rule1 = ast::Clause {
         head: arena.atom(reachable, &[y]),
+        head_time: None,
         premises: arena
             .alloc_slice_copy(&[arena.alloc(ast::Term::Atom(arena.atom(edge, &[c1, y])))]),
         transform: &[],
@@ -407,6 +408,7 @@ fn test_reachability_arity1() -> Result<()> {
     // Rule 2: reachable(Z) :- reachable(Y), edge(Y, Z).
     let rule2 = ast::Clause {
         head: arena.atom(reachable, &[z]),
+        head_time: None,
         premises: arena.alloc_slice_copy(&[
             arena.alloc(ast::Term::Atom(arena.atom(reachable, &[y]))),
             arena.alloc(ast::Term::Atom(arena.atom(edge, &[y, z]))),

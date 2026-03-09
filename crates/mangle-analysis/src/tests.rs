@@ -36,6 +36,7 @@ fn test_lowering_and_type_check_basic() {
         descr: &[],
         bounds: Some(arena.alloc_slice_copy(&[bound_ref])),
         constraints: None,
+        is_temporal: false,
     };
 
     // foo(42).
@@ -43,6 +44,7 @@ fn test_lowering_and_type_check_basic() {
     let atom_foo_42 = arena.atom(foo_sym, &[const_42]);
     let clause = ast::Clause {
         head: atom_foo_42,
+        head_time: None,
         premises: &[],
         transform: &[],
     };
@@ -89,6 +91,7 @@ fn test_type_check_arity_ismatch() {
         descr: &[],
         bounds: Some(arena.alloc_slice_copy(&[bound_ref])),
         constraints: None,
+        is_temporal: false,
     };
 
     // foo(42, 43). -> Arity mismatch (defined as 1, used as 2)
@@ -97,6 +100,7 @@ fn test_type_check_arity_ismatch() {
     let atom_foo_bad = arena.atom(foo_sym, &[const_42, const_43]); // AST allows this construction
     let clause = ast::Clause {
         head: atom_foo_bad,
+        head_time: None,
         premises: &[],
         transform: &[],
     };
@@ -136,6 +140,7 @@ fn test_type_check_type_mismatch() {
         descr: &[],
         bounds: Some(arena.alloc_slice_copy(&[bound_ref])),
         constraints: None,
+        is_temporal: false,
     };
 
     // foo("string"). -> Type mismatch
@@ -143,6 +148,7 @@ fn test_type_check_type_mismatch() {
     let atom_foo_bad = arena.atom(foo_sym, &[const_string]);
     let clause = ast::Clause {
         head: atom_foo_bad,
+        head_time: None,
         premises: &[],
         transform: &[],
     };
@@ -175,6 +181,7 @@ fn test_planner_basic() {
 
     let clause = ast::Clause {
         head,
+        head_time: None,
         premises: arena.alloc_slice_copy(&[arena.alloc(ast::Term::Atom(premise))]),
         transform: &[],
     };

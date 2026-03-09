@@ -212,6 +212,15 @@ fn make_dep_graph<'p>(program: &Program<'p>) -> DepGraph {
                             dep.add_edge(*s, atom_pred.sym, true);
                         }
                     }
+                    ast::Term::TemporalAtom(atom_pred, _) => {
+                        if !program.extensional_preds().contains(&atom_pred.sym) {
+                            if clause.transform.is_empty() || clause.transform[0].var.is_some() {
+                                dep.add_edge(*s, atom_pred.sym, false);
+                            } else {
+                                dep.add_edge(*s, atom_pred.sym, true);
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }

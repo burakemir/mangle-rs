@@ -180,6 +180,9 @@ impl<'a> fmt::Display for Pretty<'a, Term<'a>> {
             Term::Ineq(l, r) => {
                 write!(f, "{} != {}", l.pretty(self.arena), r.pretty(self.arena))
             }
+            Term::TemporalAtom(a, interval) => {
+                write!(f, "{}@[{}, {}]", a.pretty(self.arena), interval.start, interval.end)
+            }
         }
     }
 }
@@ -196,6 +199,9 @@ impl<'a> fmt::Display for Pretty<'a, TransformStmt<'a>> {
 impl<'a> fmt::Display for Pretty<'a, Clause<'a>> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.inner.head.pretty(self.arena))?;
+        if let Some(interval) = &self.inner.head_time {
+            write!(f, "@[{}, {}]", interval.start, interval.end)?;
+        }
         if !self.inner.premises.is_empty() || !self.inner.transform.is_empty() {
             write!(f, " :- ")?;
             let mut first = true;
@@ -259,6 +265,9 @@ impl<'a> fmt::Display for Pretty<'a, BoundDecl<'a>> {
 impl<'a> fmt::Display for Pretty<'a, Decl<'a>> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.inner.atom.pretty(self.arena))?;
+        if self.inner.is_temporal {
+            write!(f, " temporal")?;
+        }
         if !self.inner.descr.is_empty() {
             write!(f, " [")?;
             for (i, d) in self.inner.descr.iter().enumerate() {

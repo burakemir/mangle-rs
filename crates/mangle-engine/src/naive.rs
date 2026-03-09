@@ -99,6 +99,38 @@ impl<'e> Engine<'e> for Naive {
                                 let right = right.apply_subst(&arena, &subst.borrow());
                                 left != right
                             }
+                            Term::TemporalAtom(query, _interval) => {
+                                // Treat like Atom for now; temporal filtering is TODO.
+                                let query = query.apply_subst(&arena, &subst.borrow());
+                                let found = std::cell::RefCell::new(false);
+                                let _ = store.get(query.sym, query.args, &|atom: &'_ Atom<'_>| {
+                                    let mut mismatch = false;
+                                    for (i, arg) in query.args.iter().enumerate() {
+                                        match arg {
+                                            BaseTerm::Variable(v) => {
+                                                let own_atom_ref = arena
+                                                    .copy_base_term(store.arena(), atom.args[i]);
+                                                subst.borrow_mut().insert(v.0, own_atom_ref);
+                                            }
+                                            c @ BaseTerm::Const(_) => {
+                                                if *c == atom.args[i] {
+                                                    continue;
+                                                }
+                                                mismatch = true;
+                                                break;
+                                            }
+                                            _ => {
+                                                return Err(anyhow!(format!(
+                                                    "Unsupported term: {arg}"
+                                                )));
+                                            }
+                                        }
+                                    }
+                                    *found.borrow_mut() = !mismatch;
+                                    Ok(())
+                                });
+                                !*found.borrow()
+                            }
                         };
                         if !ok {
                             all_ok = false;
@@ -183,6 +215,7 @@ mod test {
             &arena,
             arena.alloc(ast::Clause {
                 head,
+                head_time: None,
                 premises: arena.alloc_slice_copy(&[arena.alloc(ast::Term::Atom(
                     arena.atom(edge, &[arena.variable("X"), arena.variable("Y")]),
                 ))]),
@@ -193,6 +226,7 @@ mod test {
             &arena,
             arena.alloc(ast::Clause {
                 head: arena.atom(reachable, &[arena.variable("X"), arena.variable("Z")]),
+                head_time: None,
                 premises: arena.alloc_slice_copy(&[
                     arena.alloc(ast::Term::Atom(
                         arena.atom(edge, &[arena.variable("X"), arena.variable("Y")]),

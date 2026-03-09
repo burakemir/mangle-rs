@@ -45,6 +45,17 @@ impl<'a> LoweringContext<'a> {
     fn lower_decl(&mut self, decl: &ast::Decl) -> InstId {
         self.vars.clear();
 
+        // Track temporal predicates from declarations
+        if decl.is_temporal {
+            let pred_name = self
+                .arena
+                .predicate_name(decl.atom.sym)
+                .unwrap_or("unknown_pred")
+                .to_string();
+            let name_id = self.ir.intern_name(pred_name);
+            self.ir.temporal_predicates.insert(name_id);
+        }
+
         let atom = self.lower_atom(decl.atom);
         let descr: Vec<InstId> = decl.descr.iter().map(|a| self.lower_atom(a)).collect();
         let bounds: Vec<InstId> = if let Some(bs) = decl.bounds {
@@ -65,7 +76,12 @@ impl<'a> LoweringContext<'a> {
     fn lower_clause(&mut self, clause: &ast::Clause) -> InstId {
         self.vars.clear();
 
-        let head = self.lower_atom(clause.head);
+        let head = if let Some(interval) = &clause.head_time {
+            // Temporal head: append synthetic interval columns
+            self.lower_temporal_atom(clause.head, interval)
+        } else {
+            self.lower_atom(clause.head)
+        };
         let premises: Vec<InstId> = clause.premises.iter().map(|t| self.lower_term(t)).collect();
         let transform: Vec<InstId> = clause
             .transform
@@ -78,6 +94,26 @@ impl<'a> LoweringContext<'a> {
             premises,
             transform,
         })
+    }
+
+    /// Lower an atom with temporal interval as 2 extra columns.
+    fn lower_temporal_atom(&mut self, atom: &ast::Atom, interval: &ast::Interval) -> InstId {
+        let predicate_name = self
+            .arena
+            .predicate_name(atom.sym)
+            .unwrap_or("unknown_pred")
+            .to_string();
+        let predicate = self.ir.intern_name(predicate_name);
+        // Track this predicate as temporal
+        self.ir.temporal_predicates.insert(predicate);
+        let mut args: Vec<InstId> = atom
+            .args
+            .iter()
+            .map(|arg| self.lower_base_term(arg))
+            .collect();
+        args.push(self.lower_temporal_bound(&interval.start));
+        args.push(self.lower_temporal_bound(&interval.end));
+        self.ir.add_inst(Inst::Atom { predicate, args })
     }
 
     fn lower_atom(&mut self, atom: &ast::Atom) -> InstId {
@@ -112,6 +148,7 @@ impl<'a> LoweringContext<'a> {
                 let right = self.lower_base_term(r);
                 self.ir.add_inst(Inst::Ineq(left, right))
             }
+            ast::Term::TemporalAtom(a, interval) => self.lower_temporal_atom(a, interval),
         }
     }
 
@@ -190,6 +227,31 @@ impl<'a> LoweringContext<'a> {
                 let values = values.iter().map(|c| self.lower_const(c)).collect();
                 self.ir.add_inst(Inst::Struct { fields, values })
             }
+        }
+    }
+
+    fn lower_temporal_bound(&mut self, bound: &ast::TemporalBound) -> InstId {
+        match bound {
+            ast::TemporalBound::Timestamp(nanos) => self.ir.add_inst(Inst::Time(*nanos)),
+            ast::TemporalBound::Variable(var_idx) => {
+                if let Some(id) = self.vars.get(var_idx) {
+                    *id
+                } else {
+                    let name_str = self
+                        .arena
+                        .lookup_name(var_idx.0)
+                        .unwrap_or("unknown_var")
+                        .to_string();
+                    let name = self.ir.intern_name(name_str);
+                    let id = self.ir.add_inst(Inst::Var(name));
+                    if var_idx.0 != 0 {
+                        self.vars.insert(*var_idx, id);
+                    }
+                    id
+                }
+            }
+            ast::TemporalBound::NegInf => self.ir.add_inst(Inst::Time(i64::MIN)),
+            ast::TemporalBound::PosInf => self.ir.add_inst(Inst::Time(i64::MAX)),
         }
     }
 

@@ -145,6 +145,10 @@ pub struct Ir {
     pub insts: Vec<Inst>,
     pub name_store: Store<NameId>,
     pub string_store: Store<StringId>,
+    /// Predicates declared or inferred as temporal.
+    /// Temporal predicates have 2 synthetic columns (start_time, end_time)
+    /// appended to their regular arguments.
+    pub temporal_predicates: std::collections::HashSet<NameId>,
 }
 
 impl Ir {

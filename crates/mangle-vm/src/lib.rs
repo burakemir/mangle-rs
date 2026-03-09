@@ -519,6 +519,7 @@ mod tests {
 
         let clause = ast::Clause {
             head: arena.atom(foo, &[x]),
+            head_time: None,
             premises: arena
                 .alloc_slice_copy(&[arena.alloc(ast::Term::Atom(arena.atom(bar, &[x])))]),
             transform: &[],
@@ -552,6 +553,7 @@ mod tests {
         let head_arg = arena.apply_fn(plus, &[c1, c2]);
         let clause = ast::Clause {
             head: arena.atom(foo, &[head_arg]),
+            head_time: None,
             premises: &[],
             transform: &[],
         };
@@ -1035,6 +1037,7 @@ mod tests {
 
         let clause = ast::Clause {
             head: arena.atom(p, &[x]),
+            head_time: None,
             premises: arena.alloc_slice_copy(&[arena.alloc(ast::Term::Atom(arena.atom(q, &[x])))]),
             transform: &[],
         };

@@ -420,6 +420,7 @@ impl<'arena> Arena {
     ) -> &'arena Clause<'arena> {
         let Clause {
             head,
+            head_time,
             premises,
             transform,
         } = src_clause;
@@ -430,6 +431,7 @@ impl<'arena> Arena {
             .collect();
         self.alloc(Clause {
             head: self.copy_atom(src, head),
+            head_time: *head_time,
             premises: self.alloc_slice_copy(&premises),
             transform: self.alloc_slice_copy(&transform),
         })
@@ -459,6 +461,10 @@ impl<'arena> Arena {
                 let right = self.copy_base_term(src, right);
                 self.alloc(Term::Ineq(left, right))
             }
+            Term::TemporalAtom(atom, interval) => {
+                let atom = self.copy_atom(src, atom);
+                self.alloc(Term::TemporalAtom(atom, *interval))
+            }
         }
     }
 }
@@ -479,6 +485,33 @@ pub struct Unit<'a> {
     pub clauses: &'a [&'a Clause<'a>],
 }
 
+// ---------------------------------------------------------------------------
+// Temporal annotations
+// ---------------------------------------------------------------------------
+
+/// A bound in a temporal interval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TemporalBound {
+    /// A concrete timestamp (nanoseconds since Unix epoch).
+    Timestamp(i64),
+    /// A variable to be bound during evaluation.
+    Variable(VariableIndex),
+    /// Negative infinity (written as `_` in start position).
+    NegInf,
+    /// Positive infinity (written as `_` in end position).
+    PosInf,
+}
+
+/// A temporal interval `@[start, end]`, inclusive on both endpoints.
+/// A point interval `@[T]` is represented as `start == end`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Interval {
+    pub start: TemporalBound,
+    pub end: TemporalBound,
+}
+
+// ---------------------------------------------------------------------------
+
 // Predicate, package and use declarations.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Decl<'a> {
@@ -486,6 +519,7 @@ pub struct Decl<'a> {
     pub descr: &'a [&'a Atom<'a>],
     pub bounds: Option<&'a [&'a BoundDecl<'a>]>,
     pub constraints: Option<&'a Constraints<'a>>,
+    pub is_temporal: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -505,6 +539,8 @@ pub struct Constraints<'a> {
 #[derive(Debug)]
 pub struct Clause<'a> {
     pub head: &'a Atom<'a>,
+    /// Optional temporal annotation on the head: `head(X)@[S, E] :- ...`
+    pub head_time: Option<Interval>,
     pub premises: &'a [&'a Term<'a>],
     pub transform: &'a [&'a TransformStmt<'a>],
 }
@@ -522,6 +558,8 @@ pub enum Term<'a> {
     NegAtom(&'a Atom<'a>),
     Eq(&'a BaseTerm<'a>, &'a BaseTerm<'a>),
     Ineq(&'a BaseTerm<'a>, &'a BaseTerm<'a>),
+    /// Atom with temporal annotation: `p(X)@[S, E]`
+    TemporalAtom(&'a Atom<'a>, Interval),
 }
 
 impl std::fmt::Display for Term<'_> {
@@ -531,6 +569,17 @@ impl std::fmt::Display for Term<'_> {
             Term::NegAtom(atom) => write!(f, "!{atom}"),
             Term::Eq(left, right) => write!(f, "{left} = {right}"),
             Term::Ineq(left, right) => write!(f, "{left} != {right}"),
+            Term::TemporalAtom(atom, interval) => write!(f, "{atom}@[{}, {}]", interval.start, interval.end),
+        }
+    }
+}
+
+impl std::fmt::Display for TemporalBound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TemporalBound::Timestamp(nanos) => write!(f, "t#{nanos}"),
+            TemporalBound::Variable(v) => write!(f, "{v}"),
+            TemporalBound::NegInf | TemporalBound::PosInf => write!(f, "_"),
         }
     }
 }
@@ -552,6 +601,9 @@ impl<'a> Term<'a> {
                 left.apply_subst(arena, subst),
                 right.apply_subst(arena, subst),
             ),
+            Term::TemporalAtom(atom, interval) => {
+                Term::TemporalAtom(atom.apply_subst(arena, subst), *interval)
+            }
         })
     }
 }
@@ -858,6 +910,7 @@ mod tests {
 
         let clause = Clause {
             head,
+            head_time: None,
             premises: arena.alloc_slice_copy(&[premise_ref]),
             transform: &[],
         };

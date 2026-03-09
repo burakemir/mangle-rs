@@ -112,6 +112,12 @@ impl Ord for Value {
             (Value::String(a), Value::String(b)) => a.cmp(b),
             (Value::Time(a), Value::Time(b)) => a.cmp(b),
             (Value::Duration(a), Value::Duration(b)) => a.cmp(b),
+            // Cross-type: Duration vs Number compare as i64 nanoseconds
+            (Value::Duration(a), Value::Number(b)) => a.cmp(b),
+            (Value::Number(a), Value::Duration(b)) => a.cmp(b),
+            // Cross-type: Time vs Time already handled; Time vs Number
+            (Value::Time(a), Value::Number(b)) => a.cmp(b),
+            (Value::Number(a), Value::Time(b)) => a.cmp(b),
             (Value::Compound(ka, a), Value::Compound(kb, b)) => ka.cmp(kb).then_with(|| a.cmp(b)),
             (Value::Null, Value::Null) => std::cmp::Ordering::Equal,
             // Cross-variant ordering: Number/Float < String < Time < Duration < Compound < Null
@@ -344,6 +350,12 @@ pub trait Store {
 
     /// Returns the names of all relations in the store.
     fn relation_names(&self) -> Vec<String>;
+
+    /// Coalesce temporal intervals for a relation.
+    /// Groups facts by their non-temporal columns (all except the last 2),
+    /// sorts intervals by start time, and merges overlapping/adjacent intervals.
+    /// Default implementation is a no-op.
+    fn coalesce_temporal(&mut self, _relation: &str) {}
 }
 
 /// Opaque handle to a value in the host's value store.

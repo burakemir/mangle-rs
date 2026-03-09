@@ -55,6 +55,7 @@ pub enum Token {
     Pipe,                // |
     PipeGt,              // |>
     Dot,                 // .
+    At,                  // @
     LongLeftDoubleArrow, // ⟸ unicode \u27F8
 }
 
@@ -111,6 +112,7 @@ impl std::fmt::Display for Token {
             Token::Gt => token_text![">"],
             Token::Ge => token_text!["<="],
             Token::Dot => token_text!["."],
+            Token::At => token_text!["@"],
             Token::LongLeftDoubleArrow => token_text!["⟸"],
         }
     }

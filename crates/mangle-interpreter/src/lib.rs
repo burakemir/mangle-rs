@@ -211,6 +211,84 @@ impl MemStore {
         }
         all
     }
+
+    /// Coalesce temporal intervals for a relation.
+    /// Groups facts by their non-temporal columns (all except the last 2),
+    /// sorts intervals by start time, and merges overlapping/adjacent intervals.
+    /// This prevents interval explosion in recursive temporal rules.
+    pub fn coalesce_temporal(&mut self, relation: &str) {
+        let n_cols = match self.arity.get(relation) {
+            Some(&n) if n >= 2 => n,
+            _ => return,
+        };
+        let key_cols = n_cols - 2; // non-temporal columns
+
+        // Collect all facts (stable + delta) as Value tuples
+        let mut all_facts: Vec<Vec<Value>> = Vec::new();
+        if let Some(table) = self.stable.get(relation) {
+            for cells in table {
+                all_facts.push(unflatten_tuple(cells, n_cols));
+            }
+        }
+        if let Some(table) = self.delta.get(relation) {
+            for cells in table {
+                all_facts.push(unflatten_tuple(cells, n_cols));
+            }
+        }
+
+        if all_facts.is_empty() {
+            return;
+        }
+
+        // Group by non-temporal key columns
+        let mut groups: HashMap<Vec<Value>, Vec<(i64, i64)>> = HashMap::new();
+        for fact in &all_facts {
+            let key: Vec<Value> = fact[..key_cols].to_vec();
+            let start = match &fact[key_cols] {
+                Value::Time(t) => *t,
+                Value::Number(n) => *n,
+                _ => continue,
+            };
+            let end = match &fact[key_cols + 1] {
+                Value::Time(t) => *t,
+                Value::Number(n) => *n,
+                _ => continue,
+            };
+            groups.entry(key).or_default().push((start, end));
+        }
+
+        // Coalesce intervals within each group
+        let mut coalesced_facts: Vec<Vec<Value>> = Vec::new();
+        for (key, mut intervals) in groups {
+            intervals.sort_by_key(|&(s, _)| s);
+            let mut merged: Vec<(i64, i64)> = vec![intervals[0]];
+            for &(s, e) in &intervals[1..] {
+                let last = merged.last_mut().unwrap();
+                // Merge if overlapping or adjacent (within 1 nanosecond)
+                if s <= last.1.saturating_add(1) {
+                    last.1 = last.1.max(e);
+                } else {
+                    merged.push((s, e));
+                }
+            }
+            for (start, end) in merged {
+                let mut fact = key.clone();
+                fact.push(Value::Time(start));
+                fact.push(Value::Time(end));
+                coalesced_facts.push(fact);
+            }
+        }
+
+        // Replace stable with coalesced facts, clear delta
+        let coalesced_cells: Vec<Vec<Cell>> = coalesced_facts
+            .iter()
+            .map(|fact| flatten_tuple(fact))
+            .collect();
+        self.stable.insert(relation.to_string(), coalesced_cells);
+        self.delta.remove(relation);
+        self.next_delta.remove(relation);
+        self.rebuild_indexes_for(relation);
+    }
 }
 
 /// Index a flattened tuple's logical columns.
@@ -458,6 +536,10 @@ impl Store for MemStore {
             }
         }
         names
+    }
+
+    fn coalesce_temporal(&mut self, relation: &str) {
+        MemStore::coalesce_temporal(self, relation);
     }
 }
 
@@ -2122,5 +2204,139 @@ mod tests {
             eval_function("fn:name:to_string", &[Value::String("/role/admin".into())]).unwrap(),
             Value::String("/role/admin".to_string())
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Temporal coalescing tests (ported from Go factstore/temporal_test.go)
+    // -----------------------------------------------------------------------
+
+    // Helper: create a time value in nanoseconds for a date
+    fn date_nanos(year: i64, month: u32, day: u32) -> i64 {
+        // Howard Hinnant's algorithm (matching the parser)
+        let m = month;
+        let y = if m <= 2 { year - 1 } else { year };
+        let era = (if y >= 0 { y } else { y - 399 }) / 400;
+        let yoe = (y - era * 400) as u32;
+        let m_adj = if m > 2 { m - 3 } else { m + 9 };
+        let doy = (153 * m_adj + 2) / 5 + day - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        let days = era * 146097 + doe as i64 - 719468;
+        days * 86400 * 1_000_000_000
+    }
+
+    fn datetime_nanos(year: i64, month: u32, day: u32, h: u32, m: u32, s: u32, ns: i64) -> i64 {
+        date_nanos(year, month, day) + (h as i64) * 3_600_000_000_000
+            + (m as i64) * 60_000_000_000 + (s as i64) * 1_000_000_000 + ns
+    }
+
+    /// Go: TestTemporalStore_Coalesce - overlapping intervals merge into one
+    #[test]
+    fn test_coalesce_overlapping() {
+        let mut store = MemStore::new();
+        let jan1 = date_nanos(2024, 1, 1);
+        let jan15 = date_nanos(2024, 1, 15);
+        let jan10 = date_nanos(2024, 1, 10);
+        let jan25 = date_nanos(2024, 1, 25);
+        let jan20 = date_nanos(2024, 1, 20);
+        let jan31 = date_nanos(2024, 1, 31);
+
+        store.add_fact("active", vec![Value::String("/service".into()), Value::Time(jan1), Value::Time(jan15)]);
+        store.add_fact("active", vec![Value::String("/service".into()), Value::Time(jan10), Value::Time(jan25)]);
+        store.add_fact("active", vec![Value::String("/service".into()), Value::Time(jan20), Value::Time(jan31)]);
+
+        assert_eq!(store.get_facts("active").len(), 3);
+
+        store.coalesce_temporal("active");
+
+        let facts = store.get_facts("active");
+        assert_eq!(facts.len(), 1, "after coalesce: expected 1, got {:?}", facts);
+        assert_eq!(facts[0][1], Value::Time(jan1), "start should be Jan 1");
+        assert_eq!(facts[0][2], Value::Time(jan31), "end should be Jan 31");
+    }
+
+    /// Go: TestTemporalStore_CoalesceAdjacent - adjacent intervals (1ns gap) coalesce
+    #[test]
+    fn test_coalesce_adjacent() {
+        let mut store = MemStore::new();
+        let shift1_start = datetime_nanos(2024, 1, 1, 8, 0, 0, 0);
+        let shift1_end = datetime_nanos(2024, 1, 1, 16, 0, 0, 0);
+        let shift2_start = datetime_nanos(2024, 1, 1, 16, 0, 0, 1); // 1ns after
+        let shift2_end = date_nanos(2024, 1, 2);
+
+        store.add_fact("shift", vec![Value::String("/worker".into()), Value::Time(shift1_start), Value::Time(shift1_end)]);
+        store.add_fact("shift", vec![Value::String("/worker".into()), Value::Time(shift2_start), Value::Time(shift2_end)]);
+
+        store.coalesce_temporal("shift");
+
+        let facts = store.get_facts("shift");
+        assert_eq!(facts.len(), 1, "adjacent intervals should coalesce");
+        assert_eq!(facts[0][1], Value::Time(shift1_start));
+        assert_eq!(facts[0][2], Value::Time(shift2_end));
+    }
+
+    /// Go: TestTemporalStore_CoalesceNonOverlapping - non-overlapping intervals stay separate
+    #[test]
+    fn test_coalesce_non_overlapping() {
+        let mut store = MemStore::new();
+        let jan1 = date_nanos(2024, 1, 1);
+        let jan7 = date_nanos(2024, 1, 7);
+        let jun1 = date_nanos(2024, 6, 1);
+        let jun14 = date_nanos(2024, 6, 14);
+
+        store.add_fact("vacation", vec![Value::String("/alice".into()), Value::Time(jan1), Value::Time(jan7)]);
+        store.add_fact("vacation", vec![Value::String("/alice".into()), Value::Time(jun1), Value::Time(jun14)]);
+
+        store.coalesce_temporal("vacation");
+
+        let facts = store.get_facts("vacation");
+        assert_eq!(facts.len(), 2, "non-overlapping intervals should stay separate");
+    }
+
+    /// Go: TestTemporalStore_CoalesceMixedGranularity - sub-second precision
+    #[test]
+    fn test_coalesce_mixed_granularity() {
+        let mut store = MemStore::new();
+        // Second-level: 10:00:00 to 10:00:05
+        let t1_start = datetime_nanos(2024, 1, 1, 10, 0, 0, 0);
+        let t1_end = datetime_nanos(2024, 1, 1, 10, 0, 5, 0);
+        // Overlapping millisecond-level: 10:00:04.5 to 10:00:06
+        let t2_start = datetime_nanos(2024, 1, 1, 10, 0, 4, 500_000_000);
+        let t2_end = datetime_nanos(2024, 1, 1, 10, 0, 6, 0);
+        // Adjacent nanosecond-level: 10:00:06.000000001 to 10:00:07
+        let t3_start = datetime_nanos(2024, 1, 1, 10, 0, 6, 1);
+        let t3_end = datetime_nanos(2024, 1, 1, 10, 0, 7, 0);
+
+        store.add_fact("event", vec![Value::String("/sensor".into()), Value::Time(t1_start), Value::Time(t1_end)]);
+        store.add_fact("event", vec![Value::String("/sensor".into()), Value::Time(t2_start), Value::Time(t2_end)]);
+        store.add_fact("event", vec![Value::String("/sensor".into()), Value::Time(t3_start), Value::Time(t3_end)]);
+
+        store.coalesce_temporal("event");
+
+        let facts = store.get_facts("event");
+        assert_eq!(facts.len(), 1, "mixed granularity should coalesce to 1");
+        assert_eq!(facts[0][1], Value::Time(t1_start), "start: 10:00:00");
+        assert_eq!(facts[0][2], Value::Time(t3_end), "end: 10:00:07");
+    }
+
+    /// Test coalescing with multiple keys: same relation, different key columns
+    #[test]
+    fn test_coalesce_multiple_keys() {
+        let mut store = MemStore::new();
+        let jan1 = date_nanos(2024, 1, 1);
+        let jan10 = date_nanos(2024, 1, 10);
+        let jan5 = date_nanos(2024, 1, 5);
+        let jan15 = date_nanos(2024, 1, 15);
+
+        // Alice: two overlapping intervals
+        store.add_fact("employed", vec![Value::String("/alice".into()), Value::Time(jan1), Value::Time(jan10)]);
+        store.add_fact("employed", vec![Value::String("/alice".into()), Value::Time(jan5), Value::Time(jan15)]);
+        // Bob: one interval
+        store.add_fact("employed", vec![Value::String("/bob".into()), Value::Time(jan1), Value::Time(jan15)]);
+
+        store.coalesce_temporal("employed");
+
+        let facts = store.get_facts("employed");
+        // Alice's 2 intervals merge to 1; Bob stays as 1
+        assert_eq!(facts.len(), 2, "expected 2 facts after coalesce, got {:?}", facts);
     }
 }

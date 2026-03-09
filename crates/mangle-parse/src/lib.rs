@@ -89,6 +89,7 @@ fn empty_package_decl(arena: &Arena) -> ast::Decl<'_> {
             sym: package_sym(arena),
             args: &[],
         }),
+        is_temporal: false,
         descr: arena.alloc_slice_copy(&[arena.alloc(ast::Atom {
             sym: name_sym(arena),
             args: arena
@@ -214,7 +215,8 @@ where
                 atom: package_atom,
                 bounds: None,
                 descr,
-                constraints: None
+                constraints: None,
+                is_temporal: false,
             }
         );
         Ok(decl)
@@ -256,7 +258,8 @@ where
                 atom: use_atom,
                 descr: descr_atoms,
                 bounds: None,
-                constraints: None
+                constraints: None,
+                is_temporal: false,
             }
         ))
     }
@@ -264,6 +267,14 @@ where
     fn parse_decl(&mut self) -> Result<&'arena ast::Decl<'arena>> {
         self.expect(Token::Decl)?;
         let atom = self.parse_atom()?;
+        // Check for `temporal` keyword
+        let is_temporal = match &self.token {
+            Token::Ident { name } if name == "temporal" => {
+                self.next_token()?;
+                true
+            }
+            _ => false,
+        };
         let mut descr_atoms = vec![];
         if Token::Descr == self.token {
             self.next_token()?;
@@ -293,7 +304,8 @@ where
                 atom,
                 descr: alloc_slice!(self, &descr_atoms),
                 bounds,
-                constraints
+                constraints,
+                is_temporal,
             }
         ))
     }
@@ -326,6 +338,7 @@ where
 
     pub fn parse_clause(&mut self) -> Result<&'arena ast::Clause<'arena>> {
         let head = self.parse_atom()?;
+        let head_time = self.try_parse_interval()?;
         let mut premises = vec![];
         let mut transform = vec![];
         match self.token {
@@ -346,8 +359,9 @@ where
             self,
             ast::Clause {
                 head,
+                head_time,
                 premises,
-                transform
+                transform,
             }
         ))
     }
@@ -410,7 +424,11 @@ where
             }
             Token::Ident { .. } => {
                 let atom = self.parse_atom()?;
-                Ok(alloc!(self, ast::Term::Atom(atom)))
+                if let Some(interval) = self.try_parse_interval()? {
+                    Ok(alloc!(self, ast::Term::TemporalAtom(atom, interval)))
+                } else {
+                    Ok(alloc!(self, ast::Term::Atom(atom)))
+                }
             }
             _ => bail!("parse_term: unexpected token {:?}", self.token),
         }
@@ -535,6 +553,56 @@ where
         }
         Ok(())
     }
+
+    // -----------------------------------------------------------------------
+    // Temporal interval parsing: @[bound] or @[bound, bound]
+    // -----------------------------------------------------------------------
+
+    /// Try to parse `@[...]` if the current token is `@`. Returns None otherwise.
+    fn try_parse_interval(&mut self) -> Result<Option<ast::Interval>> {
+        if self.token != Token::At {
+            return Ok(None);
+        }
+        self.next_token()?; // consume @
+        self.expect(Token::LBracket)?;
+        let start = self.parse_temporal_bound(true)?;
+        let end = if self.token == Token::Comma {
+            self.next_token()?;
+            self.parse_temporal_bound(false)?
+        } else {
+            // Point interval: @[T] means @[T, T]
+            start
+        };
+        self.expect(Token::RBracket)?;
+        Ok(Some(ast::Interval { start, end }))
+    }
+
+    /// Parse a single temporal bound: timestamp, variable, or `_` (infinity).
+    fn parse_temporal_bound(&mut self, is_start: bool) -> Result<ast::TemporalBound> {
+        match &self.token {
+            Token::Timestamp { nanos } => {
+                let nanos = *nanos;
+                self.next_token()?;
+                Ok(ast::TemporalBound::Timestamp(nanos))
+            }
+            Token::Ident { name } if name == "_" => {
+                self.next_token()?;
+                if is_start {
+                    Ok(ast::TemporalBound::NegInf)
+                } else {
+                    Ok(ast::TemporalBound::PosInf)
+                }
+            }
+            Token::Ident { name } if is_variable(name) => {
+                let var_idx = self.arena.variable_sym(name);
+                self.next_token()?;
+                Ok(ast::TemporalBound::Variable(var_idx))
+            }
+            _ => bail!("parse_temporal_bound: expected timestamp, variable, or '_', got {:?}", self.token),
+        }
+    }
+
+    // -----------------------------------------------------------------------
 
     // base_term ::= var
     //             | fun`(`[base_term {',' base_term}`)`
@@ -1064,6 +1132,7 @@ mod test {
                     },
                 premises: &[],
                 transform: &[],
+                ..
             } => {
                 assert_eq!(*x_sym, arena.variable_sym("X"));
                 assert_eq!(clause.head.sym, arena.predicate_sym("foo", None));
@@ -1087,6 +1156,7 @@ mod test {
                         }),
                     ],
                 transform: &[],
+                ..
             } => {
                 assert_eq!(foo_sym, arena.predicate_sym("foo", None));
                 assert_eq!(bar_sym, arena.predicate_sym("bar", None));
@@ -1114,6 +1184,7 @@ mod test {
                             app: ast::BaseTerm::ApplyFn(second_sym, _),
                         },
                     ],
+                ..
             } => {
                 assert_eq!(clause.head.sym, arena.predicate_sym("foo", None));
                 assert_eq!(clause.transform.len(), 2);
@@ -1209,6 +1280,167 @@ mod test {
             }
             _ => panic!("expected NegAtom, got {:?}", clause.premises[1]),
         }
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Temporal parsing tests (ported from Go temporal_integration_test.go)
+    // -----------------------------------------------------------------------
+
+    /// Go: TestIntegration_TemporalFactParsing - simple temporal fact
+    #[test]
+    fn test_temporal_fact_with_interval() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let mut p = make_parser(&arena, "foo(/bar)@[2024-01-15, 2024-06-30].");
+        let clause = p.parse_clause()?;
+        assert!(clause.head_time.is_some(), "expected temporal annotation");
+        let interval = clause.head_time.unwrap();
+        match interval.start {
+            ast::TemporalBound::Timestamp(_) => {}
+            _ => panic!("expected Timestamp start, got {:?}", interval.start),
+        }
+        match interval.end {
+            ast::TemporalBound::Timestamp(_) => {}
+            _ => panic!("expected Timestamp end, got {:?}", interval.end),
+        }
+        Ok(())
+    }
+
+    /// Go: TestIntegration_TemporalFactParsing - point interval fact
+    #[test]
+    fn test_temporal_fact_point_interval() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let mut p = make_parser(&arena, "event(/login)@[2024-03-15].");
+        let clause = p.parse_clause()?;
+        assert!(clause.head_time.is_some(), "expected temporal annotation");
+        let interval = clause.head_time.unwrap();
+        // Point interval: start == end
+        assert_eq!(interval.start, interval.end);
+        Ok(())
+    }
+
+    /// Go: TestIntegration_TemporalFactParsing - non-temporal fact
+    #[test]
+    fn test_non_temporal_fact() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let mut p = make_parser(&arena, "regular(/fact).");
+        let clause = p.parse_clause()?;
+        assert!(clause.head_time.is_none(), "non-temporal fact should have no annotation");
+        Ok(())
+    }
+
+    /// Go: TestIntegration_TemporalDeclarations - temporal predicate declaration
+    #[test]
+    fn test_temporal_declaration() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let mut p = make_parser(&arena, "Decl employee(X) temporal bound [/name].");
+        let unit = p.parse_unit()?;
+        // decls[0] is the implicit empty Package decl
+        assert_eq!(unit.decls.len(), 2);
+        assert!(unit.decls[1].is_temporal, "expected temporal declaration");
+        Ok(())
+    }
+
+    /// Go: TestIntegration_TemporalDeclarations - non-temporal predicate declaration
+    #[test]
+    fn test_non_temporal_declaration() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let mut p = make_parser(&arena, "Decl config(X) bound [/string].");
+        let unit = p.parse_unit()?;
+        assert_eq!(unit.decls.len(), 2);
+        assert!(!unit.decls[1].is_temporal, "expected non-temporal declaration");
+        Ok(())
+    }
+
+    /// Go: TestIntegration_TemporalDeclarations - temporal with documentation
+    #[test]
+    fn test_temporal_declaration_with_descr() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let input = r#"Decl status(X, Y) temporal
+            descr [doc("Employee status over time")]
+            bound [/name, /string]."#;
+        let mut p = make_parser(&arena, input);
+        let unit = p.parse_unit()?;
+        assert_eq!(unit.decls.len(), 2);
+        assert!(unit.decls[1].is_temporal, "expected temporal declaration");
+        Ok(())
+    }
+
+    /// Go: TestIntegration_BackwardCompatibility - non-temporal programs still work
+    #[test]
+    fn test_backward_compat_no_temporal() -> Result<()> {
+        // Each program must be a valid unit. Test that no clauses get temporal annotations.
+        let programs = [
+            "edge(/a, /b). path(X, Y) :- edge(X, Y).",
+            "all(/a). excluded(/a). included(X) :- all(X), !excluded(X).",
+            "age(/alice, 30). adult(Name) :- age(Name, Age), Age >= 18 .",
+        ];
+        for prog in &programs {
+            let arena = Arena::new_with_global_interner();
+            let mut p = make_parser(&arena, prog);
+            let unit = p.parse_unit()?;
+            for clause in unit.clauses {
+                assert!(clause.head_time.is_none(), "clause should not have temporal annotation in: {prog}");
+            }
+        }
+        Ok(())
+    }
+
+    /// Temporal rule with variable interval in head and body
+    #[test]
+    fn test_temporal_rule_with_variable_interval() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let mut p = make_parser(&arena, "reachable(X, Y)@[T] :- link(X, Y)@[T].");
+        let clause = p.parse_clause()?;
+        // Head has temporal annotation
+        assert!(clause.head_time.is_some());
+        let interval = clause.head_time.unwrap();
+        match interval.start {
+            ast::TemporalBound::Variable(_) => {}
+            _ => panic!("expected Variable start, got {:?}", interval.start),
+        }
+        // Point interval: start == end
+        assert_eq!(interval.start, interval.end);
+        // Body premise is a TemporalAtom
+        assert_eq!(clause.premises.len(), 1);
+        match clause.premises[0] {
+            ast::Term::TemporalAtom(_, _) => {}
+            _ => panic!("expected TemporalAtom, got {:?}", clause.premises[0]),
+        }
+        Ok(())
+    }
+
+    /// Temporal rule with interval range [S, E] variables
+    #[test]
+    fn test_temporal_rule_with_interval_range() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let mut p = make_parser(&arena, "reachable(X, Y)@[S, E] :- link(X, Y)@[S, E].");
+        let clause = p.parse_clause()?;
+        let interval = clause.head_time.unwrap();
+        match interval.start {
+            ast::TemporalBound::Variable(v) => {
+                assert_eq!(arena.lookup_name(v.0).unwrap(), "S");
+            }
+            _ => panic!("expected Variable start"),
+        }
+        match interval.end {
+            ast::TemporalBound::Variable(v) => {
+                assert_eq!(arena.lookup_name(v.0).unwrap(), "E");
+            }
+            _ => panic!("expected Variable end"),
+        }
+        Ok(())
+    }
+
+    /// Wildcard bounds: @[_, _] means eternal interval
+    #[test]
+    fn test_temporal_wildcard_bounds() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let mut p = make_parser(&arena, "always(/true)@[_, _].");
+        let clause = p.parse_clause()?;
+        let interval = clause.head_time.unwrap();
+        assert_eq!(interval.start, ast::TemporalBound::NegInf);
+        assert_eq!(interval.end, ast::TemporalBound::PosInf);
         Ok(())
     }
 }

@@ -132,6 +132,7 @@ where
                 _ => Ok(Token::Dot),
             },
             Some('/') => self.name(),
+            Some('@') => Ok(Token::At),
             Some('⟸') => Ok(Token::LongLeftDoubleArrow),
             Some(delim @ '\'') => self.string(delim, false),
             Some(delim @ '"') => self.string(delim, false),

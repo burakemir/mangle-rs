@@ -121,10 +121,11 @@ pub fn compile_units<'a>(sources: &[&str], arena: &'a Arena) -> Result<(Ir, Stra
         idb_preds.insert(clause.head.sym);
         all_preds.insert(clause.head.sym);
         for premise in clause.premises {
-            if let ast::Term::Atom(atom) = premise {
-                all_preds.insert(atom.sym);
-            } else if let ast::Term::NegAtom(atom) = premise {
-                all_preds.insert(atom.sym);
+            match premise {
+                ast::Term::Atom(atom) => { all_preds.insert(atom.sym); }
+                ast::Term::NegAtom(atom) => { all_preds.insert(atom.sym); }
+                ast::Term::TemporalAtom(atom, _) => { all_preds.insert(atom.sym); }
+                _ => {}
             }
         }
     }
@@ -263,6 +264,13 @@ pub fn execute<'a>(
         }
     }
 
+    // Collect temporal predicate names for coalescing
+    let temporal_pred_names: Vec<String> = ir
+        .temporal_predicates
+        .iter()
+        .map(|name_id| ir.resolve_name(*name_id).to_string())
+        .collect();
+
     // 2. Now execute using the interpreter
     let mut interpreter = Interpreter::new(ir, store);
 
@@ -299,10 +307,17 @@ pub fn execute<'a>(
                     }
                     interpreter.store_mut().merge_deltas();
                 }
+                // Coalesce temporal intervals after fixpoint converges
+                for name in &temporal_pred_names {
+                    interpreter.store_mut().coalesce_temporal(name);
+                }
             }
             None => {}
         }
         interpreter.store_mut().merge_deltas();
+        for name in &temporal_pred_names {
+            interpreter.store_mut().coalesce_temporal(name);
+        }
     }
 
     Ok(interpreter)
@@ -1716,6 +1731,486 @@ mod tests {
             .collect();
         keys.sort();
         assert_eq!(keys, vec!["a", "b"]);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Temporal facts tests
+    // -----------------------------------------------------------------------
+
+    /// Non-recursive: temporal facts with point annotations.
+    #[test]
+    fn test_temporal_point_facts() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            Decl link(X, Y) temporal bound [/name, /name].
+            link(/a, /b)@[2024-01-01].
+            link(/a, /c)@[2024-01-02].
+        "#;
+
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        // link is temporal so each fact has 4 columns: X, Y, start, end
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("link")
+            .expect("relation link not found")
+            .collect();
+        assert_eq!(facts.len(), 2, "expected 2 temporal link facts, got {:?}", facts);
+
+        // Each fact should have 4 columns (2 regular + 2 temporal)
+        for fact in &facts {
+            assert_eq!(fact.len(), 4, "temporal fact should have 4 columns, got {:?}", fact);
+        }
+
+        Ok(())
+    }
+
+    /// Non-recursive: simple temporal rule copying facts.
+    #[test]
+    fn test_temporal_simple_rule() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            Decl link(X, Y) temporal bound [/name, /name].
+            Decl reachable(X, Y) temporal bound [/name, /name].
+            link(/a, /b)@[2024-01-01].
+            reachable(X, Y)@[T] :- link(X, Y)@[T].
+        "#;
+
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("reachable")
+            .expect("relation reachable not found")
+            .collect();
+        assert_eq!(facts.len(), 1, "expected 1 reachable fact, got {:?}", facts);
+        assert_eq!(facts[0].len(), 4); // X, Y, start, end
+        assert_eq!(facts[0][0], Value::String("/a".to_string()));
+        assert_eq!(facts[0][1], Value::String("/b".to_string()));
+
+        Ok(())
+    }
+
+    /// Recursive temporal graph reachability with point-in-time intervals.
+    /// Based on mangle-go/examples/temporal_graph_points.mg
+    #[test]
+    fn test_temporal_graph_points() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            Decl link(X, Y) temporal bound [/name, /name].
+            Decl reachable(X, Y) temporal bound [/name, /name].
+
+            link(/a, /b)@[2024-01-01].
+            link(/b, /c)@[2024-01-01].
+
+            link(/a, /c)@[2024-01-02].
+            link(/c, /d)@[2024-01-02].
+
+            reachable(X, Y)@[T] :- link(X, Y)@[T].
+            reachable(X, Z)@[T] :- reachable(X, Y)@[T], link(Y, Z)@[T].
+        "#;
+
+        let (mut ir, stratified) = compile(source, &arena)?;
+
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("reachable")
+            .expect("relation reachable not found")
+            .collect();
+
+        let t1: i64 = 1704067200_000_000_000; // 2024-01-01 UTC
+        let t2: i64 = 1704153600_000_000_000; // 2024-01-02 UTC
+
+        // Collect as (from, to, time) tuples for easier comparison
+        let mut results: Vec<(String, String, i64)> = facts
+            .iter()
+            .map(|f| {
+                let from = match &f[0] {
+                    Value::String(n) => n.clone(),
+                    v => panic!("expected name, got {v:?}"),
+                };
+                let to = match &f[1] {
+                    Value::String(n) => n.clone(),
+                    v => panic!("expected name, got {v:?}"),
+                };
+                let time = match &f[2] {
+                    Value::Time(t) => *t,
+                    v => panic!("expected time, got {v:?}"),
+                };
+                (from, to, time)
+            })
+            .collect();
+        results.sort();
+
+        // Expected:
+        // T1: a->b, b->c, a->c (derived)
+        // T2: a->c, c->d, a->d (derived)
+        let expected = vec![
+            ("/a".to_string(), "/b".to_string(), t1),
+            ("/a".to_string(), "/c".to_string(), t1),
+            ("/a".to_string(), "/c".to_string(), t2),
+            ("/a".to_string(), "/d".to_string(), t2),
+            ("/b".to_string(), "/c".to_string(), t1),
+            ("/c".to_string(), "/d".to_string(), t2),
+        ];
+        assert_eq!(results, expected, "temporal graph reachability mismatch");
+
+        Ok(())
+    }
+
+    /// Test temporal interval coalescing: overlapping intervals merge.
+    #[test]
+    fn test_temporal_coalescing() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        // Two overlapping intervals for the same fact should be coalesced
+        let source = r#"
+            Decl link(X, Y) temporal bound [/name, /name].
+            Decl reach(X, Y) temporal bound [/name, /name].
+            link(/a, /b)@[2024-01-01, 2024-01-05].
+            link(/a, /b)@[2024-01-03, 2024-01-10].
+            reach(X, Y)@[S, E] :- link(X, Y)@[S, E].
+        "#;
+
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("reach")
+            .expect("relation reach not found")
+            .collect();
+
+        // After coalescing, the two overlapping intervals [Jan 1-5] and [Jan 3-10]
+        // should merge into a single [Jan 1, Jan 10] interval.
+        assert_eq!(facts.len(), 1, "expected 1 coalesced fact, got {:?}", facts);
+        assert_eq!(facts[0][0], Value::String("/a".to_string()));
+        assert_eq!(facts[0][1], Value::String("/b".to_string()));
+
+        // Verify the merged interval spans Jan 1 to Jan 10
+        let start = match &facts[0][2] {
+            Value::Time(t) => *t,
+            v => panic!("expected time, got {v:?}"),
+        };
+        let end = match &facts[0][3] {
+            Value::Time(t) => *t,
+            v => panic!("expected time, got {v:?}"),
+        };
+        let jan1: i64 = 1704067200_000_000_000;
+        let jan10: i64 = 1704844800_000_000_000;
+        assert_eq!(start, jan1, "start should be Jan 1");
+        assert_eq!(end, jan10, "end should be Jan 10");
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Ported from Go: temporal_integration_test.go
+    // -----------------------------------------------------------------------
+
+    /// Go: TestIntegration_TemporalCoalesce - three overlapping intervals coalesce to one
+    #[test]
+    fn test_temporal_coalesce_three_overlapping() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            Decl status(X) temporal bound [/name].
+            status(/active)@[2024-01-01, 2024-01-15].
+            status(/active)@[2024-01-10, 2024-01-25].
+            status(/active)@[2024-01-20, 2024-01-31].
+        "#;
+
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("status")
+            .expect("relation status not found")
+            .collect();
+        // After coalescing, should be 1 fact spanning Jan 1 to Jan 31
+        assert_eq!(facts.len(), 1, "expected 1 coalesced fact, got {:?}", facts);
+        assert_eq!(facts[0][0], Value::String("/active".to_string()));
+
+        Ok(())
+    }
+
+    /// Go: TestIntegration_DurationBoundScenarios - temporal recursion reachability
+    /// (more complex variant with 3 link facts, some at different timestamps)
+    #[test]
+    fn test_temporal_reachability_mixed_timestamps() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            Decl link(X, Y) temporal bound [/name, /name].
+            Decl reachable(X, Y) temporal bound [/name, /name].
+
+            link(/a, /b)@[2024-01-01].
+            link(/b, /c)@[2024-01-01].
+            link(/c, /d)@[2024-01-02].
+
+            reachable(X, Y)@[T] :- link(X, Y)@[T].
+            reachable(X, Z)@[T] :- reachable(X, Y)@[T], link(Y, Z)@[T].
+        "#;
+
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("reachable")
+            .expect("relation reachable not found")
+            .collect();
+
+        // Collect as (from, to) ignoring time for uniqueness check
+        let mut pairs: Vec<(String, String)> = facts
+            .iter()
+            .map(|f| {
+                let from = match &f[0] { Value::String(s) => s.clone(), v => panic!("{v:?}") };
+                let to = match &f[1] { Value::String(s) => s.clone(), v => panic!("{v:?}") };
+                (from, to)
+            })
+            .collect();
+        pairs.sort();
+        pairs.dedup();
+
+        // Expected unique pairs (same as Go test):
+        // a->b, b->c, a->c (all at t1), c->d (at t2)
+        // a->c is derived transitively at t1
+        // No a->d because c->d is at t2 but a->c is at t1
+        let expected = vec![
+            ("/a".to_string(), "/b".to_string()),
+            ("/a".to_string(), "/c".to_string()),
+            ("/b".to_string(), "/c".to_string()),
+            ("/c".to_string(), "/d".to_string()),
+        ];
+        assert_eq!(pairs, expected, "temporal reachability mismatch");
+
+        Ok(())
+    }
+
+    /// Go example: temporal_graph_intervals.mg
+    /// Tests interval intersection with 4 cases for deriving reachability.
+    #[test]
+    fn test_temporal_graph_intervals() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            Decl link(X, Y) temporal bound [/name, /name].
+            Decl reachable(X, Y) temporal bound [/name, /name].
+
+            link(/a, /b)@[2024-01-01, 2024-01-10].
+            link(/b, /c)@[2024-01-05, 2024-01-15].
+            link(/c, /d)@[2024-01-12, 2024-01-20].
+
+            reachable(X, Y)@[S, E] :- link(X, Y)@[S, E].
+
+            reachable(X, Z)@[S1, E1] :-
+                reachable(X, Y)@[S1, E1], link(Y, Z)@[S2, E2],
+                :time:ge(S1, S2), :time:le(E1, E2), :time:le(S1, E1).
+
+            reachable(X, Z)@[S1, E2] :-
+                reachable(X, Y)@[S1, E1], link(Y, Z)@[S2, E2],
+                :time:ge(S1, S2), :time:lt(E2, E1), :time:le(S1, E2).
+
+            reachable(X, Z)@[S2, E1] :-
+                reachable(X, Y)@[S1, E1], link(Y, Z)@[S2, E2],
+                :time:gt(S2, S1), :time:le(E1, E2), :time:le(S2, E1).
+
+            reachable(X, Z)@[S2, E2] :-
+                reachable(X, Y)@[S1, E1], link(Y, Z)@[S2, E2],
+                :time:gt(S2, S1), :time:lt(E2, E1), :time:le(S2, E2).
+        "#;
+
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("reachable")
+            .expect("relation reachable not found")
+            .collect();
+
+        // Collect unique (from, to) pairs
+        let mut pairs: Vec<(String, String)> = facts
+            .iter()
+            .map(|f| {
+                let from = match &f[0] { Value::String(s) => s.clone(), v => panic!("{v:?}") };
+                let to = match &f[1] { Value::String(s) => s.clone(), v => panic!("{v:?}") };
+                (from, to)
+            })
+            .collect();
+        pairs.sort();
+        pairs.dedup();
+
+        // Expected (from the Go example comments):
+        // a->b, b->c, c->d (direct)
+        // a->c (intersection of [Jan1-10] and [Jan5-15] = [Jan5-10])
+        // b->d (intersection of [Jan5-15] and [Jan12-20] = [Jan12-15])
+        // a->d NOT derived (a->c is [Jan5-10], c->d is [Jan12-20] — no overlap)
+        let expected = vec![
+            ("/a".to_string(), "/b".to_string()),
+            ("/a".to_string(), "/c".to_string()),
+            ("/b".to_string(), "/c".to_string()),
+            ("/b".to_string(), "/d".to_string()),
+            ("/c".to_string(), "/d".to_string()),
+        ];
+        assert_eq!(pairs, expected, "interval intersection reachability mismatch");
+
+        // Verify specific intervals for derived facts
+        for f in &facts {
+            let from = match &f[0] { Value::String(s) => s.as_str(), _ => "" };
+            let to = match &f[1] { Value::String(s) => s.as_str(), _ => "" };
+            let start = match &f[2] { Value::Time(t) => *t, _ => 0 };
+            let end = match &f[3] { Value::Time(t) => *t, _ => 0 };
+
+            if from == "/a" && to == "/c" {
+                // Intersection of [Jan1,Jan10] and [Jan5,Jan15] = [Jan5,Jan10]
+                let jan5: i64 = 1704412800_000_000_000;
+                let jan10: i64 = 1704844800_000_000_000;
+                assert_eq!(start, jan5, "a->c start should be Jan 5");
+                assert_eq!(end, jan10, "a->c end should be Jan 10");
+            }
+            if from == "/b" && to == "/d" {
+                // Intersection of [Jan5,Jan15] and [Jan12,Jan20] = [Jan12,Jan15]
+                let jan12: i64 = 1705017600_000_000_000;
+                let jan15: i64 = 1705276800_000_000_000;
+                assert_eq!(start, jan12, "b->d start should be Jan 12");
+                assert_eq!(end, jan15, "b->d end should be Jan 15");
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Go example: temporal_sequence.mg (adapted for mangle-rs syntax)
+    /// Event sequence detection: A followed by B within 10 minutes.
+    /// Uses fn:time:sub to compute duration and :duration:le for comparison.
+    /// Split into two rules since mangle-rs doesn't support inline assignments in body.
+    #[test]
+    fn test_temporal_sequence_detection() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        // Strategy: compute the time difference via transform, then filter.
+        // Rule 1: compute (U, Diff) pairs where B happens after A
+        // Rule 2: filter where Diff <= 10 minutes (600 seconds = 600_000_000_000 ns)
+        let source = r#"
+            Decl event_a(Name) temporal bound [/name].
+            Decl event_b(Name) temporal bound [/name].
+
+            event_a(/u1)@[2024-01-01T10:00:00Z].
+            event_b(/u1)@[2024-01-01T10:05:00Z].
+
+            event_a(/u2)@[2024-01-01T10:00:00Z].
+            event_b(/u2)@[2024-01-01T10:15:00Z].
+
+            seq_pair(U, Diff) :-
+                event_b(U)@[Tb],
+                event_a(U)@[Ta],
+                :time:lt(Ta, Tb)
+                |> let Diff = fn:time:sub(Tb, Ta).
+
+            match_seq(U) :-
+                seq_pair(U, Diff),
+                :duration:le(Diff, 600000000000).
+        "#;
+
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("match_seq")
+            .expect("relation match_seq not found")
+            .collect();
+
+        // Only /u1 should match (5 min gap = 300s), /u2 has 15 min gap = 900s
+        assert_eq!(facts.len(), 1, "expected 1 match, got {:?}", facts);
+        assert_eq!(facts[0][0], Value::String("/u1".to_string()));
+
+        Ok(())
+    }
+
+    /// Test: non-temporal programs are unaffected by temporal machinery
+    #[test]
+    fn test_temporal_backward_compat_reachability() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            edge(/a, /b).
+            edge(/b, /c).
+            edge(/c, /d).
+            path(X, Y) :- edge(X, Y).
+            path(X, Z) :- edge(X, Y), path(Y, Z).
+        "#;
+
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("path")
+            .expect("relation path not found")
+            .collect();
+
+        let mut pairs: Vec<(String, String)> = facts
+            .iter()
+            .map(|f| {
+                let from = match &f[0] { Value::String(s) => s.clone(), v => panic!("{v:?}") };
+                let to = match &f[1] { Value::String(s) => s.clone(), v => panic!("{v:?}") };
+                (from, to)
+            })
+            .collect();
+        pairs.sort();
+
+        let expected = vec![
+            ("/a".to_string(), "/b".to_string()),
+            ("/a".to_string(), "/c".to_string()),
+            ("/a".to_string(), "/d".to_string()),
+            ("/b".to_string(), "/c".to_string()),
+            ("/b".to_string(), "/d".to_string()),
+            ("/c".to_string(), "/d".to_string()),
+        ];
+        assert_eq!(pairs, expected);
+
+        Ok(())
+    }
+
+    /// Test: negation with temporal still works
+    #[test]
+    fn test_temporal_backward_compat_negation() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            all(/a). all(/b). all(/c).
+            excluded(/a).
+            included(X) :- all(X), !excluded(X).
+        "#;
+
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("included")
+            .expect("relation included not found")
+            .collect();
+
+        let mut values: Vec<String> = facts
+            .iter()
+            .map(|f| match &f[0] { Value::String(s) => s.clone(), v => panic!("{v:?}") })
+            .collect();
+        values.sort();
+        assert_eq!(values, vec!["/b", "/c"]);
+
         Ok(())
     }
 }
