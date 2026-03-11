@@ -751,14 +751,37 @@ where
         ))
     }
 
-    /// paren_langle_terms ::=  `<` [base_terms] `>`
+    /// langle_members ::= `<` [member { `,` member } [`,`]] `>`
+    /// member        ::= base_term [`:` base_term]
+    ///
+    /// When a member contains a colon, both base_terms are pushed (flattened).
+    /// This makes `.Struct</x : /number>` parse identically to `fn:Struct(/x, /number)`.
     fn parse_langle_base_terms(
         &mut self,
         base_terms: &mut Vec<&'arena ast::BaseTerm<'arena>>,
     ) -> Result<()> {
         self.expect(Token::Lt)?;
-        if Token::Gt != self.token {
-            self.parse_base_terms(base_terms)?;
+        if Token::Gt == self.token {
+            self.next_token()?;
+            return Ok(());
+        }
+        // Parse first member.
+        base_terms.push(self.parse_base_term()?);
+        if Token::Colon == self.token {
+            self.next_token()?;
+            base_terms.push(self.parse_base_term()?);
+        }
+        // Parse remaining members.
+        while Token::Comma == self.token {
+            self.next_token()?;
+            if !base_term_start(&self.token) {
+                break; // trailing comma
+            }
+            base_terms.push(self.parse_base_term()?);
+            if Token::Colon == self.token {
+                self.next_token()?;
+                base_terms.push(self.parse_base_term()?);
+            }
         }
         self.expect(Token::Gt)?;
         Ok(())
@@ -1442,5 +1465,113 @@ mod test {
         assert_eq!(interval.start, ast::TemporalBound::NegInf);
         assert_eq!(interval.end, ast::TemporalBound::PosInf);
         Ok(())
+    }
+
+    /// Colon syntax in angle brackets: `.Struct</x : /number, /y : /string>`
+    /// should parse to `ApplyFn("fn:Struct", [/x, /number, /y, /string])`.
+    #[gtest]
+    fn test_colon_syntax_in_angle_brackets() -> googletest::Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let input = ".Struct</x : /number, /y : /string>";
+        let mut p = make_parser(&arena, input);
+        let got = p.parse_base_term().unwrap();
+
+        // DotIdent `.Struct` produces PascalCase `fn:Struct` (type constructor).
+        let struct_type_sym = arena.function_sym("fn:Struct", None);
+        let expected = arena.apply_fn(
+            struct_type_sym,
+            &[
+                arena.const_(arena.name("/x")),
+                arena.const_(arena.name("/number")),
+                arena.const_(arena.name("/y")),
+                arena.const_(arena.name("/string")),
+            ],
+        );
+        verify_that!(got, eq(expected))
+    }
+
+    /// Colon syntax for TaggedUnion.
+    #[gtest]
+    fn test_tagged_union_colon_syntax() -> googletest::Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let input = ".TaggedUnion</kind, /move : .Struct</x : /number>, /quit : .Struct<>>";
+        let mut p = make_parser(&arena, input);
+        let got = p.parse_base_term().unwrap();
+
+        let tu_sym = arena.function_sym("fn:TaggedUnion", None);
+        let struct_sym = arena.function_sym("fn:Struct", None);
+        let expected = arena.apply_fn(
+            tu_sym,
+            &[
+                arena.const_(arena.name("/kind")),
+                arena.const_(arena.name("/move")),
+                arena.apply_fn(
+                    struct_sym,
+                    &[
+                        arena.const_(arena.name("/x")),
+                        arena.const_(arena.name("/number")),
+                    ],
+                ),
+                arena.const_(arena.name("/quit")),
+                arena.apply_fn(struct_sym, &[]),
+            ],
+        );
+        verify_that!(got, eq(expected))
+    }
+
+    /// Mixed: some members with colon, some without.
+    #[gtest]
+    fn test_mixed_colon_syntax() -> googletest::Result<()> {
+        let arena = Arena::new_with_global_interner();
+        // `.List</number>` — no colons.
+        let input = ".List</number>";
+        let mut p = make_parser(&arena, input);
+        let got = p.parse_base_term().unwrap();
+
+        let list_sym = arena.function_sym("fn:List", None);
+        let expected = arena.apply_fn(list_sym, &[arena.const_(arena.name("/number"))]);
+        verify_that!(got, eq(expected))
+    }
+
+    /// Paren syntax `fn:Struct(...)` still works unchanged.
+    /// Note: `fn:Struct` via `fn:` prefix (Ident) produces the same symbol
+    /// as `.Struct` via DotIdent — both become `fn:Struct`.
+    #[gtest]
+    fn test_paren_syntax_unchanged() -> googletest::Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let input = "fn:Struct(/x, /number, /y, /string)";
+        let mut p = make_parser(&arena, input);
+        let got = p.parse_base_term().unwrap();
+
+        let struct_type_sym = arena.function_sym("fn:Struct", None);
+        let expected = arena.apply_fn(
+            struct_type_sym,
+            &[
+                arena.const_(arena.name("/x")),
+                arena.const_(arena.name("/number")),
+                arena.const_(arena.name("/y")),
+                arena.const_(arena.name("/string")),
+            ],
+        );
+        verify_that!(got, eq(expected))
+    }
+
+    /// Trailing comma in colon syntax.
+    #[gtest]
+    fn test_colon_syntax_trailing_comma() -> googletest::Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let input = ".Struct</x : /number,>";
+        let mut p = make_parser(&arena, input);
+        let got = p.parse_base_term().unwrap();
+
+        let struct_type_sym = arena.function_sym("fn:Struct", None);
+        let expected = arena.apply_fn(
+            struct_type_sym,
+            &[
+                arena.const_(arena.name("/x")),
+                arena.const_(arena.name("/number")),
+            ],
+        );
+        verify_that!(got, eq(expected))
     }
 }

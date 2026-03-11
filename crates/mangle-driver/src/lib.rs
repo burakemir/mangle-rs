@@ -60,7 +60,7 @@
 use anyhow::{Result, anyhow};
 use ast::Arena;
 use fxhash::FxHashSet;
-use mangle_analysis::{LoweringContext, Planner, Program, StratifiedProgram, rewrite_unit};
+use mangle_analysis::{BoundsChecker, LoweringContext, Planner, Program, StratifiedProgram, rewrite_unit};
 use mangle_ast as ast;
 use mangle_codegen::{Codegen, WasmImportsBackend};
 use mangle_interpreter::{Interpreter, Store};
@@ -139,7 +139,11 @@ pub fn compile_units<'a>(sources: &[&str], arena: &'a Arena) -> Result<(Ir, Stra
     let stratified = program.stratify().map_err(|e| anyhow!(e))?;
 
     let ctx = LoweringContext::new(arena);
-    let ir = ctx.lower_unit(unit);
+    let mut ir = ctx.lower_unit(unit);
+
+    // Bounds checking: validate facts and rules against declared type bounds.
+    let mut bounds_checker = BoundsChecker::new(&mut ir);
+    bounds_checker.check()?;
 
     Ok((ir, stratified))
 }

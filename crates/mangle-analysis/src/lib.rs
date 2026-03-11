@@ -30,7 +30,7 @@
 //!     Intermediate Representation (IR). See [`LoweringContext`].
 //!
 //! 4.  **Type Checking**: The IR is checked for type consistency and safety.
-//!     See [`TypeChecker`].
+//!     See [`BoundsChecker`].
 //!
 //! 5.  **Planning**: The Logical IR rules are transformed into Physical Operations
 //!     (like nested-loop joins) ready for execution or codegen.
@@ -39,8 +39,13 @@
 use mangle_ast as ast;
 
 mod type_check;
-
 pub use type_check::TypeChecker;
+
+pub mod type_expr;
+pub mod name_trie;
+
+mod bounds_check;
+pub use bounds_check::BoundsChecker;
 
 #[cfg(test)]
 mod tests;
