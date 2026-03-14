@@ -74,7 +74,7 @@ fn query_single_string(config_source: &str, query: &str) -> Result<Option<String
     let results = eval_source_multi(&[CONFIG_SCHEMA, config_source], Some(query))?;
     match results.first() {
         Some(row) => match row.first() {
-            Some(Value::String(s)) => Ok(Some(s.clone())),
+            Some(Value::String(s) | Value::Name(s)) => Ok(Some(s.clone())),
             Some(other) => Err(anyhow!("expected string for {}, got {:?}", query, other)),
             None => Ok(None),
         },
@@ -98,7 +98,7 @@ fn query_all_strings(config_source: &str, query: &str) -> Result<HashSet<String>
     let results = eval_source_multi(&[CONFIG_SCHEMA, config_source], Some(query))?;
     let mut set = HashSet::new();
     for row in results {
-        if let Some(Value::String(s)) = row.first() {
+        if let Some(Value::String(s) | Value::Name(s)) = row.first() {
             set.insert(s.clone());
         }
     }

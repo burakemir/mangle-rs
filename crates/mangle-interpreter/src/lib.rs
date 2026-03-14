@@ -1013,10 +1013,10 @@ impl<'a> Interpreter<'a> {
                 _ => Err(anyhow!(":string:contains: expected string arguments")),
             },
             ":match_prefix" => match (&vals[0], &vals[1]) {
-                (Value::String(name), Value::String(prefix)) => {
+                (Value::Name(name), Value::Name(prefix)) => {
                     Ok(name.starts_with(prefix.as_str()) && name.len() > prefix.len())
                 }
-                _ => Err(anyhow!(":match_prefix: expected string arguments")),
+                _ => Err(anyhow!(":match_prefix: expected name arguments")),
             },
             _ => Err(anyhow!("Unknown built-in predicate: {name}")),
         }
@@ -1049,7 +1049,7 @@ impl<'a> Interpreter<'a> {
                 Constant::String(sid) => {
                     Ok(Value::String(self.ir.resolve_string(*sid).to_string()))
                 }
-                Constant::Name(nid) => Ok(Value::String(self.ir.resolve_name(*nid).to_string())),
+                Constant::Name(nid) => Ok(Value::Name(self.ir.resolve_name(*nid).to_string())),
                 Constant::Time(t) => Ok(Value::Time(*t)),
                 Constant::Duration(d) => Ok(Value::Duration(*d)),
             },
@@ -1072,6 +1072,7 @@ fn value_to_string(v: &Value) -> String {
         Value::Number(n) => n.to_string(),
         Value::Float(f) => format!("{f}"),
         Value::String(s) => s.clone(),
+        Value::Name(s) => s.clone(),
         Value::Time(t) => format!("{}", Value::Time(*t)),
         Value::Duration(d) => format!("{}", Value::Duration(*d)),
         Value::Compound(kind, elems) => format!("{}", Value::Compound(*kind, elems.clone())),
@@ -1271,8 +1272,7 @@ pub fn eval_function(fn_name: &str, vals: &[Value]) -> Result<Value> {
                 return Err(anyhow!("fn:name:to_string: requires 1 argument"));
             }
             match &vals[0] {
-                // Names are stored as String in the Rust Value representation
-                Value::String(s) => Ok(Value::String(s.clone())),
+                Value::Name(s) => Ok(Value::String(s.clone())),
                 v => Err(anyhow!("fn:name:to_string: expected name, got {v}")),
             }
         }
@@ -1355,7 +1355,7 @@ pub fn eval_function(fn_name: &str, vals: &[Value]) -> Result<Value> {
                 v => return Err(anyhow!("fn:time:trunc: first arg must be time, got {v}")),
             };
             let unit_name = match &vals[1] {
-                Value::String(s) => s.as_str(),
+                Value::Name(s) => s.as_str(),
                 v => return Err(anyhow!("fn:time:trunc: second arg must be name, got {v}")),
             };
             let d: i64 = match unit_name {
@@ -2201,7 +2201,7 @@ mod tests {
             Value::String("3.14".to_string())
         );
         assert_eq!(
-            eval_function("fn:name:to_string", &[Value::String("/role/admin".into())]).unwrap(),
+            eval_function("fn:name:to_string", &[Value::Name("/role/admin".into())]).unwrap(),
             Value::String("/role/admin".to_string())
         );
     }

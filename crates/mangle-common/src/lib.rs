@@ -43,6 +43,9 @@ pub enum Value {
     Number(i64),
     Float(f64),
     String(String),
+    /// A Mangle name constant like `/foo/bar`. Distinct from `String` at runtime
+    /// so that `/any`-typed columns can distinguish names from string values.
+    Name(String),
     /// Time as nanoseconds since Unix epoch (consistent with Go implementation).
     Time(i64),
     /// Duration as nanoseconds (consistent with Go implementation).
@@ -62,6 +65,7 @@ impl PartialEq for Value {
             (Value::Number(a), Value::Number(b)) => a == b,
             (Value::Float(a), Value::Float(b)) => a.to_bits() == b.to_bits(),
             (Value::String(a), Value::String(b)) => a == b,
+            (Value::Name(a), Value::Name(b)) => a == b,
             (Value::Time(a), Value::Time(b)) => a == b,
             (Value::Duration(a), Value::Duration(b)) => a == b,
             (Value::Compound(ka, a), Value::Compound(kb, b)) => ka == kb && a == b,
@@ -82,6 +86,7 @@ impl std::hash::Hash for Value {
             Value::Number(n) => n.hash(state),
             Value::Float(f) => f.to_bits().hash(state),
             Value::String(s) => s.hash(state),
+            Value::Name(s) => s.hash(state),
             Value::Time(t) => t.hash(state),
             Value::Duration(d) => d.hash(state),
             Value::Compound(k, v) => {
@@ -110,6 +115,7 @@ impl Ord for Value {
             (Value::Number(a), Value::Float(b)) => (*a as f64).total_cmp(b),
             (Value::Float(a), Value::Number(b)) => a.total_cmp(&(*b as f64)),
             (Value::String(a), Value::String(b)) => a.cmp(b),
+            (Value::Name(a), Value::Name(b)) => a.cmp(b),
             (Value::Time(a), Value::Time(b)) => a.cmp(b),
             (Value::Duration(a), Value::Duration(b)) => a.cmp(b),
             // Cross-type: Duration vs Number compare as i64 nanoseconds
@@ -120,11 +126,13 @@ impl Ord for Value {
             (Value::Number(a), Value::Time(b)) => a.cmp(b),
             (Value::Compound(ka, a), Value::Compound(kb, b)) => ka.cmp(kb).then_with(|| a.cmp(b)),
             (Value::Null, Value::Null) => std::cmp::Ordering::Equal,
-            // Cross-variant ordering: Number/Float < String < Time < Duration < Compound < Null
+            // Cross-variant ordering: Number/Float < String < Name < Time < Duration < Compound < Null
             (Value::Number(_) | Value::Float(_), _) => std::cmp::Ordering::Less,
             (_, Value::Number(_) | Value::Float(_)) => std::cmp::Ordering::Greater,
             (Value::String(_), _) => std::cmp::Ordering::Less,
             (_, Value::String(_)) => std::cmp::Ordering::Greater,
+            (Value::Name(_), _) => std::cmp::Ordering::Less,
+            (_, Value::Name(_)) => std::cmp::Ordering::Greater,
             (Value::Time(_), _) => std::cmp::Ordering::Less,
             (_, Value::Time(_)) => std::cmp::Ordering::Greater,
             (Value::Duration(_), _) => std::cmp::Ordering::Less,
@@ -142,6 +150,7 @@ impl std::fmt::Display for Value {
             Value::Number(n) => write!(f, "{n}"),
             Value::Float(v) => write!(f, "{v}"),
             Value::String(s) => write!(f, "{s:?}"),
+            Value::Name(s) => write!(f, "{s}"),
             Value::Time(nanos) => write!(f, "{}", format_time_nanos(*nanos)),
             Value::Duration(nanos) => write!(f, "{}", format_duration_nanos(*nanos)),
             Value::Compound(kind, elems) => match kind {
@@ -232,7 +241,6 @@ fn format_duration_nanos(nanos: i64) -> String {
         nanos as u64
     };
 
-    const NANOS_PER_NS: u64 = 1;
     const NANOS_PER_US: u64 = 1_000;
     const NANOS_PER_MS: u64 = 1_000_000;
     const NANOS_PER_S: u64 = 1_000_000_000;

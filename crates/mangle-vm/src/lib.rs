@@ -583,6 +583,7 @@ mod tests {
         Number(i64),
         Float(f64),
         String(String),
+        Name(String),
         Time(i64),
         Duration(i64),
         /// Compound: (kind, elements). kind: 0=List, 1=Pair, 2=Map, 3=Struct.
@@ -646,6 +647,7 @@ mod tests {
                 Val::Number(n) => n.to_string(),
                 Val::Float(f) => f.to_string(),
                 Val::String(s) => s.clone(),
+                Val::Name(s) => s.clone(),
                 Val::Time(t) => format!("time({})", t),
                 Val::Duration(d) => format!("duration({})", d),
                 Val::Compound(kind, _) => format!("compound(kind={})", kind),
@@ -774,7 +776,7 @@ mod tests {
         }
         fn const_name(&mut self, id: i32) -> HostVal {
             let s = self.names.get((id - 1) as usize).cloned().unwrap_or_default();
-            self.alloc(Val::String(s))
+            self.alloc(Val::Name(s))
         }
         fn const_time(&mut self, nanos: i64) -> HostVal { self.alloc(Val::Time(nanos)) }
         fn const_duration(&mut self, nanos: i64) -> HostVal { self.alloc(Val::Duration(nanos)) }

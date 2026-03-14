@@ -32,7 +32,26 @@ fn serialize_tuple(tuple: &[Value]) -> Vec<u8> {
             .iter()
             .map(|v| match v {
                 Value::Number(n) => serde_json::Value::Number((*n).into()),
+                Value::Float(f) => serde_json::Number::from_f64(*f)
+                    .map(serde_json::Value::Number)
+                    .unwrap_or(serde_json::Value::Null),
                 Value::String(s) => serde_json::Value::String(s.clone()),
+                Value::Name(s) => {
+                    let mut m = serde_json::Map::new();
+                    m.insert("__name__".into(), serde_json::Value::String(s.clone()));
+                    serde_json::Value::Object(m)
+                }
+                Value::Time(t) => {
+                    let mut m = serde_json::Map::new();
+                    m.insert("__time__".into(), serde_json::Value::Number((*t).into()));
+                    serde_json::Value::Object(m)
+                }
+                Value::Duration(d) => {
+                    let mut m = serde_json::Map::new();
+                    m.insert("__duration__".into(), serde_json::Value::Number((*d).into()));
+                    serde_json::Value::Object(m)
+                }
+                Value::Compound(_, _) => serde_json::Value::Null, // TODO: compound serialization
                 Value::Null => serde_json::Value::Null,
             })
             .collect::<Vec<_>>(),
@@ -45,8 +64,27 @@ fn deserialize_tuple(data: &[u8]) -> Result<Vec<Value>> {
     Ok(arr
         .into_iter()
         .map(|v| match v {
-            serde_json::Value::Number(n) => Value::Number(n.as_i64().unwrap_or(0)),
+            serde_json::Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    Value::Number(i)
+                } else if let Some(f) = n.as_f64() {
+                    Value::Float(f)
+                } else {
+                    Value::Null
+                }
+            }
             serde_json::Value::String(s) => Value::String(s),
+            serde_json::Value::Object(m) => {
+                if let Some(serde_json::Value::String(s)) = m.get("__name__") {
+                    Value::Name(s.clone())
+                } else if let Some(serde_json::Value::Number(t)) = m.get("__time__") {
+                    Value::Time(t.as_i64().unwrap_or(0))
+                } else if let Some(serde_json::Value::Number(d)) = m.get("__duration__") {
+                    Value::Duration(d.as_i64().unwrap_or(0))
+                } else {
+                    Value::Null
+                }
+            }
             serde_json::Value::Null => Value::Null,
             _ => Value::Null,
         })

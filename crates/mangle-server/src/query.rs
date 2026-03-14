@@ -68,7 +68,7 @@ pub fn filter_tuples(tuples: Vec<Vec<Value>>, query: &ParsedQuery) -> Vec<Vec<Va
                         }
                     }
                     QueryArg::NameConst(s) => {
-                        if val != &Value::String(s.clone()) {
+                        if val != &Value::Name(s.clone()) {
                             return false;
                         }
                     }

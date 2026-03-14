@@ -569,8 +569,8 @@ mod tests {
         let mut names: Vec<String> = facts
             .iter()
             .map(|t| match &t[0] {
-                Value::String(s) => s.clone(),
-                _ => panic!("expected string"),
+                Value::Name(s) => s.clone(),
+                _ => panic!("expected name"),
             })
             .collect();
         names.sort();
@@ -1157,10 +1157,10 @@ mod tests {
     fn test_match_prefix() -> Result<()> {
         let arena = Arena::new_with_global_interner();
         let source = r#"
-            name("/role/admin").
-            name("/role").
-            name("/other").
-            under_role(N) :- name(N), :match_prefix(N, "/role").
+            name(/role/admin).
+            name(/role).
+            name(/other).
+            under_role(N) :- name(N), :match_prefix(N, /role).
         "#;
 
         let (mut ir, stratified) = compile(source, &arena)?;
@@ -1174,7 +1174,7 @@ mod tests {
             .collect();
         // "/role" itself should NOT match (must be strictly longer)
         assert_eq!(facts.len(), 1, "under_role: {:?}", facts);
-        assert_eq!(facts[0][0], Value::String("/role/admin".to_string()));
+        assert_eq!(facts[0][0], Value::Name("/role/admin".to_string()));
 
         Ok(())
     }
@@ -1537,9 +1537,9 @@ mod tests {
             Value::Compound(_, elems) => {
                 // Interleaved: ["/name", "alice", "/age", 30]
                 assert_eq!(elems.len(), 4);
-                assert_eq!(elems[0], Value::String("/name".to_string()));
+                assert_eq!(elems[0], Value::Name("/name".to_string()));
                 assert_eq!(elems[1], Value::String("alice".to_string()));
-                assert_eq!(elems[2], Value::String("/age".to_string()));
+                assert_eq!(elems[2], Value::Name("/age".to_string()));
                 assert_eq!(elems[3], Value::Number(30));
             }
             v => panic!("expected Compound, got {v:?}"),
@@ -1794,8 +1794,8 @@ mod tests {
             .collect();
         assert_eq!(facts.len(), 1, "expected 1 reachable fact, got {:?}", facts);
         assert_eq!(facts[0].len(), 4); // X, Y, start, end
-        assert_eq!(facts[0][0], Value::String("/a".to_string()));
-        assert_eq!(facts[0][1], Value::String("/b".to_string()));
+        assert_eq!(facts[0][0], Value::Name("/a".to_string()));
+        assert_eq!(facts[0][1], Value::Name("/b".to_string()));
 
         Ok(())
     }
@@ -1838,11 +1838,11 @@ mod tests {
             .iter()
             .map(|f| {
                 let from = match &f[0] {
-                    Value::String(n) => n.clone(),
+                    Value::Name(n) => n.clone(),
                     v => panic!("expected name, got {v:?}"),
                 };
                 let to = match &f[1] {
-                    Value::String(n) => n.clone(),
+                    Value::Name(n) => n.clone(),
                     v => panic!("expected name, got {v:?}"),
                 };
                 let time = match &f[2] {
@@ -1896,8 +1896,8 @@ mod tests {
         // After coalescing, the two overlapping intervals [Jan 1-5] and [Jan 3-10]
         // should merge into a single [Jan 1, Jan 10] interval.
         assert_eq!(facts.len(), 1, "expected 1 coalesced fact, got {:?}", facts);
-        assert_eq!(facts[0][0], Value::String("/a".to_string()));
-        assert_eq!(facts[0][1], Value::String("/b".to_string()));
+        assert_eq!(facts[0][0], Value::Name("/a".to_string()));
+        assert_eq!(facts[0][1], Value::Name("/b".to_string()));
 
         // Verify the merged interval spans Jan 1 to Jan 10
         let start = match &facts[0][2] {
@@ -1942,7 +1942,7 @@ mod tests {
             .collect();
         // After coalescing, should be 1 fact spanning Jan 1 to Jan 31
         assert_eq!(facts.len(), 1, "expected 1 coalesced fact, got {:?}", facts);
-        assert_eq!(facts[0][0], Value::String("/active".to_string()));
+        assert_eq!(facts[0][0], Value::Name("/active".to_string()));
 
         Ok(())
     }
@@ -1978,8 +1978,8 @@ mod tests {
         let mut pairs: Vec<(String, String)> = facts
             .iter()
             .map(|f| {
-                let from = match &f[0] { Value::String(s) => s.clone(), v => panic!("{v:?}") };
-                let to = match &f[1] { Value::String(s) => s.clone(), v => panic!("{v:?}") };
+                let from = match &f[0] { Value::Name(s) => s.clone(), v => panic!("{v:?}") };
+                let to = match &f[1] { Value::Name(s) => s.clone(), v => panic!("{v:?}") };
                 (from, to)
             })
             .collect();
@@ -2047,8 +2047,8 @@ mod tests {
         let mut pairs: Vec<(String, String)> = facts
             .iter()
             .map(|f| {
-                let from = match &f[0] { Value::String(s) => s.clone(), v => panic!("{v:?}") };
-                let to = match &f[1] { Value::String(s) => s.clone(), v => panic!("{v:?}") };
+                let from = match &f[0] { Value::Name(s) => s.clone(), v => panic!("{v:?}") };
+                let to = match &f[1] { Value::Name(s) => s.clone(), v => panic!("{v:?}") };
                 (from, to)
             })
             .collect();
@@ -2071,8 +2071,8 @@ mod tests {
 
         // Verify specific intervals for derived facts
         for f in &facts {
-            let from = match &f[0] { Value::String(s) => s.as_str(), _ => "" };
-            let to = match &f[1] { Value::String(s) => s.as_str(), _ => "" };
+            let from = match &f[0] { Value::Name(s) => s.as_str(), _ => "" };
+            let to = match &f[1] { Value::Name(s) => s.as_str(), _ => "" };
             let start = match &f[2] { Value::Time(t) => *t, _ => 0 };
             let end = match &f[3] { Value::Time(t) => *t, _ => 0 };
 
@@ -2138,7 +2138,7 @@ mod tests {
 
         // Only /u1 should match (5 min gap = 300s), /u2 has 15 min gap = 900s
         assert_eq!(facts.len(), 1, "expected 1 match, got {:?}", facts);
-        assert_eq!(facts[0][0], Value::String("/u1".to_string()));
+        assert_eq!(facts[0][0], Value::Name("/u1".to_string()));
 
         Ok(())
     }
@@ -2168,8 +2168,8 @@ mod tests {
         let mut pairs: Vec<(String, String)> = facts
             .iter()
             .map(|f| {
-                let from = match &f[0] { Value::String(s) => s.clone(), v => panic!("{v:?}") };
-                let to = match &f[1] { Value::String(s) => s.clone(), v => panic!("{v:?}") };
+                let from = match &f[0] { Value::Name(s) => s.clone(), v => panic!("{v:?}") };
+                let to = match &f[1] { Value::Name(s) => s.clone(), v => panic!("{v:?}") };
                 (from, to)
             })
             .collect();
@@ -2210,7 +2210,7 @@ mod tests {
 
         let mut values: Vec<String> = facts
             .iter()
-            .map(|f| match &f[0] { Value::String(s) => s.clone(), v => panic!("{v:?}") })
+            .map(|f| match &f[0] { Value::Name(s) => s.clone(), v => panic!("{v:?}") })
             .collect();
         values.sort();
         assert_eq!(values, vec!["/b", "/c"]);

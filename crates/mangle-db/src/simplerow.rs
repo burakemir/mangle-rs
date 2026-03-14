@@ -127,8 +127,7 @@ fn term_to_value(term: &ast::BaseTerm) -> Value {
         ast::BaseTerm::Const(ast::Const::Number(n)) => Value::Number(*n),
         ast::BaseTerm::Const(ast::Const::String(s)) => Value::String(s.to_string()),
         ast::BaseTerm::Const(ast::Const::Name(n)) => {
-            // Name constants become strings
-            Value::String(format!("{n:?}"))
+            Value::Name(format!("{n:?}"))
         }
         _ => Value::String(format!("{term:?}")),
     }
