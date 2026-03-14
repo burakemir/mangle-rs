@@ -2,6 +2,20 @@
 
 All notable changes in mangle/rust will be documented in this file.
 
+## [0.6.0] - 2026-03-14
+
+### ⚠️ Breaking Changes
+
+- **`Value::Name` variant**: The `Value` enum now has a dedicated `Name(String)`
+  variant for Mangle name constants (e.g. `/foo/bar`). Previously names were
+  collapsed into `Value::String` at runtime. Any code matching on `Value` will
+  need to handle the new variant. Built-in predicates (`:match_prefix`) and
+  functions (`fn:time:trunc`, `fn:name:to_string`) now expect `Value::Name`
+  instead of `Value::String` for name arguments.
+- **Disk storage format**: `disk_store` serialization changed — names are now
+  encoded as `{"__name__": "..."}` JSON objects. Existing databases created with
+  0.5.0 will deserialize name values as `Value::String` instead of `Value::Name`.
+
 ## [0.5.0] - 2026-03-09
 
 ### 🚀 Features
