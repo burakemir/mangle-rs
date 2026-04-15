@@ -102,7 +102,7 @@ for i in "${!CRATES[@]}"; do
     fi
 
     echo "[$step/$total] cargo publish -p $crate ${flags[*]-}"
-    if ! cargo publish -p "$crate" "${flags[@]}"; then
+    if ! cargo publish -p "$crate" ${flags[@]+"${flags[@]}"}; then
         if [[ "$mode" == "dry-run" ]]; then
             # Expected for any crate that depends on a workspace sibling at
             # the new version: cargo can't resolve it until that sibling is
