@@ -451,6 +451,53 @@ impl Vm {
             },
         )?;
 
+        // 38: hash_join_begin(i32) -> ()
+        linker.func_wrap(
+            "env",
+            "hash_join_begin",
+            |mut caller: wasmtime::Caller<'_, HostWrapper<H>>, join_id: i32| {
+                caller.data_mut().host.hash_join_begin(join_id);
+            },
+        )?;
+
+        // 39: hash_join_push(externref) -> ()
+        linker.func_wrap(
+            "env",
+            "hash_join_push",
+            |mut caller: wasmtime::Caller<'_, HostWrapper<H>>,
+             v: Option<Rooted<ExternRef>>| {
+                let hv = extract_hv(&v, &caller);
+                caller.data_mut().host.hash_join_push(hv);
+            },
+        )?;
+
+        // 40: hash_join_commit_build(i32, i32) -> ()
+        linker.func_wrap(
+            "env",
+            "hash_join_commit_build",
+            |mut caller: wasmtime::Caller<'_, HostWrapper<H>>, join_id: i32, n_keys: i32| {
+                caller.data_mut().host.hash_join_commit_build(join_id, n_keys);
+            },
+        )?;
+
+        // 41: hash_join_probe(i32) -> i32
+        linker.func_wrap(
+            "env",
+            "hash_join_probe",
+            |mut caller: wasmtime::Caller<'_, HostWrapper<H>>, join_id: i32| -> i32 {
+                caller.data_mut().host.hash_join_probe(join_id)
+            },
+        )?;
+
+        // 42: hash_join_end(i32) -> ()
+        linker.func_wrap(
+            "env",
+            "hash_join_end",
+            |mut caller: wasmtime::Caller<'_, HostWrapper<H>>, join_id: i32| {
+                caller.data_mut().host.hash_join_end(join_id);
+            },
+        )?;
+
         let instance = linker.instantiate(&mut store, &module)?;
         let run = instance.get_typed_func::<(), ()>(&mut store, "run")?;
         run.call(&mut store, ())?;

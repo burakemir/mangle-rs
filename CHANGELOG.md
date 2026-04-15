@@ -2,6 +2,61 @@
 
 All notable changes in mangle/rust will be documented in this file.
 
+## [0.7.0] - 2026-04-15
+
+### 🚀 Features
+
+- **Persistent secondary indexes in `mangle-db`**: Every argument position of
+  every relation is indexed transactionally. `Store::scan_index` /
+  `scan_delta_index` now range-scan redb index tables instead of doing linear
+  scans. Enables sub-linear point lookups on disk-backed datasets.
+- **`Op::HashJoin` physical operator**: new two-way hash-join op for joins
+  whose shared variable is unbound on both sides. Executed directly by the
+  interpreter via an in-memory hash table keyed by the `join_keys`
+  projection.
+- **HashJoin planner fast path**: `Planner::with_hash_join(true)` (seeded
+  from `MANGLE_HASHJOIN=1`) makes `plan_join_sequence` emit `Op::HashJoin`
+  for eligible 2-premise joins. Off by default — falls through to the
+  existing nested-Iterate + IndexLookup path.
+- **HashJoin WASM codegen**: five new host imports (`hash_join_begin`,
+  `hash_join_push`, `hash_join_commit_build`, `hash_join_probe`,
+  `hash_join_end`) and corresponding `Backend` / `Host` trait methods.
+  `Codegen::with_hash_join(true)` threads the flag through the internal
+  planner. Match iteration reuses the existing `scan_next` + `get_col`
+  imports.
+
+### ⚠️ Breaking Changes
+
+- **`mangle-db` on-disk format**: tuples are now serialized with
+  [postcard] instead of JSON, and the per-database `__format__` redb table
+  carries a format version. Opening a database created by 0.6.0 fails with a
+  clear error — **recreate the database** after upgrading. The switch
+  shrinks on-disk size substantially (a compact variant-tagged encoding,
+  no string field names) and fixes `Value::Compound` persistence, which
+  previously serialized as `null`. `Value::Float` NaN bit patterns now
+  round-trip exactly.
+- **`mangle-common::Host` trait**: five new methods for the HashJoin
+  protocol (`hash_join_begin`, `hash_join_push`, `hash_join_commit_build`,
+  `hash_join_probe`, `hash_join_end`). Default impls `unimplemented!()`, so
+  existing implementations compile unchanged; they only trip if a program
+  compiled with HashJoin enabled is run against a Host that hasn't opted
+  in.
+- **Index-backed dedup in `DiskStore::insert`**: replaces the previous
+  full-tier scan. Insert throughput on non-trivially-sized relations
+  improves, but behavior on zero-arity relations now falls back to the
+  scan path.
+
+### ⚙️ Miscellaneous Tasks
+
+- New `postcard` dependency in `mangle-db`.
+- In-RAM `stable_indexes` / `delta_indexes` HashMaps removed from
+  `DiskStore` — all index state lives in redb.
+- 19 new mangle-db tests (8 index, 11 roundtrip / open-time validation),
+  7 interpreter HashJoin tests, 2 planner emission tests, 1 end-to-end
+  WASM round-trip test.
+
+[postcard]: https://github.com/jamesmunns/postcard
+
 ## [0.6.0] - 2026-03-14
 
 ### ⚠️ Breaking Changes

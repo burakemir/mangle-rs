@@ -69,7 +69,20 @@ const IMP_COMPOUND_GET: u32 = 34; // (externref, externref) -> externref
 const IMP_COMPOUND_LEN: u32 = 35; // (externref) -> externref
 const IMP_PAIR_FIRST: u32 = 36; // (externref) -> externref
 const IMP_PAIR_SECOND: u32 = 37; // (externref) -> externref
-const NUM_IMPORTS: u32 = 38;
+// --- HashJoin protocol ---
+// Build phase: `hash_join_begin(join_id)`, then for each build row, emit a
+// sequence of `hash_join_push(val)` for the full row (keys first, non-keys
+// after), followed by `hash_join_commit_build(join_id, n_keys)`.
+// Probe phase: for each probe tuple, push the join-key values with
+// `hash_join_push`, then `hash_join_probe(join_id)` returns an iter_id that
+// can be fed to the existing `scan_next` + `get_col` to consume matching
+// build-side rows. `hash_join_end(join_id)` tears down the table.
+const IMP_HASH_JOIN_BEGIN: u32 = 38; //  (i32) -> ()
+const IMP_HASH_JOIN_PUSH: u32 = 39; //  (externref) -> ()
+const IMP_HASH_JOIN_COMMIT_BUILD: u32 = 40; //  (i32, i32) -> ()
+const IMP_HASH_JOIN_PROBE: u32 = 41; //  (i32) -> i32
+const IMP_HASH_JOIN_END: u32 = 42; //  (i32) -> ()
+const NUM_IMPORTS: u32 = 43;
 
 // --- Type indices (for the WASM type section) ---
 const TY_VOID: u32 = 0; //  () -> ()
@@ -87,6 +100,7 @@ const TY_UNOP: u32 = 11; // (externref) -> externref
 const TY_CMP: u32 = 12; // (externref, externref) -> i32
 const TY_QUADOP: u32 = 13; // (externref, externref, externref, externref) -> externref
 const TY_VOID_EXTERNREF: u32 = 14; // () -> externref
+const TY_I32_I32_VOID: u32 = 15; // (i32, i32) -> ()
 
 /// The compiled output of the code generator.
 pub struct CompiledModule {
@@ -133,6 +147,25 @@ pub trait Backend {
 
     /// Emits code to log a value (externref in local).
     fn emit_debuglog(&self, func: &mut Function, val_local: u32);
+
+    /// Emits `hash_join_begin(join_id)` — initialize the host-side hash
+    /// table for this join.
+    fn emit_hash_join_begin(&self, func: &mut Function, join_id: u32);
+
+    /// Emits `hash_join_push(val)` — push one cell (externref already on
+    /// the stack) into the current build-row or probe-key buffer.
+    fn emit_hash_join_push(&self, func: &mut Function);
+
+    /// Emits `hash_join_commit_build(join_id, n_keys)` — finalize the
+    /// pushed values as a build row; first `n_keys` of them form the key.
+    fn emit_hash_join_commit_build(&self, func: &mut Function, join_id: u32, n_keys: u32);
+
+    /// Emits `hash_join_probe(join_id)` — finalize pushed values as a
+    /// probe key and leave an iter_id (i32) on the stack.
+    fn emit_hash_join_probe(&self, func: &mut Function, join_id: u32);
+
+    /// Emits `hash_join_end(join_id)` — drop the host-side table.
+    fn emit_hash_join_end(&self, func: &mut Function, join_id: u32);
 }
 
 fn djb2_hash(name: &str) -> u32 {
@@ -205,12 +238,42 @@ impl Backend for WasmImportsBackend {
         func.instruction(&Instruction::LocalGet(val_local));
         func.instruction(&Instruction::Call(IMP_DEBUGLOG));
     }
+
+    fn emit_hash_join_begin(&self, func: &mut Function, join_id: u32) {
+        func.instruction(&Instruction::I32Const(join_id as i32));
+        func.instruction(&Instruction::Call(IMP_HASH_JOIN_BEGIN));
+    }
+
+    fn emit_hash_join_push(&self, func: &mut Function) {
+        // externref already on stack
+        func.instruction(&Instruction::Call(IMP_HASH_JOIN_PUSH));
+    }
+
+    fn emit_hash_join_commit_build(&self, func: &mut Function, join_id: u32, n_keys: u32) {
+        func.instruction(&Instruction::I32Const(join_id as i32));
+        func.instruction(&Instruction::I32Const(n_keys as i32));
+        func.instruction(&Instruction::Call(IMP_HASH_JOIN_COMMIT_BUILD));
+    }
+
+    fn emit_hash_join_probe(&self, func: &mut Function, join_id: u32) {
+        func.instruction(&Instruction::I32Const(join_id as i32));
+        func.instruction(&Instruction::Call(IMP_HASH_JOIN_PROBE));
+    }
+
+    fn emit_hash_join_end(&self, func: &mut Function, join_id: u32) {
+        func.instruction(&Instruction::I32Const(join_id as i32));
+        func.instruction(&Instruction::Call(IMP_HASH_JOIN_END));
+    }
 }
 
 pub struct Codegen<'a, B: Backend> {
     ir: &'a mut Ir,
     stratified: Option<&'a StratifiedProgram<'a>>,
     backend: B,
+    /// Forwarded to `Planner::with_hash_join` for every rule in this module.
+    /// Off by default; turn on via `with_hash_join(true)` in tests and
+    /// ahead of benchmarks.
+    hash_join: bool,
 }
 
 struct FuncContext {
@@ -218,6 +281,10 @@ struct FuncContext {
     next_local: u32,
     iter_base: u32,
     iter_offset: u32,
+    /// Monotonic counter used to assign each `Op::HashJoin` a unique `join_id`
+    /// so host-side tables don't collide when multiple joins appear in the
+    /// same run() function.
+    next_join_id: u32,
 }
 
 impl<'a, B: Backend> Codegen<'a, B> {
@@ -226,6 +293,7 @@ impl<'a, B: Backend> Codegen<'a, B> {
             ir,
             stratified: None,
             backend,
+            hash_join: false,
         }
     }
 
@@ -238,7 +306,15 @@ impl<'a, B: Backend> Codegen<'a, B> {
             ir,
             stratified: Some(stratified),
             backend,
+            hash_join: false,
         }
+    }
+
+    /// Enable `Op::HashJoin` emission from the internal planner for every
+    /// rule in this module. Off by default; propagates to `Planner::with_hash_join`.
+    pub fn with_hash_join(mut self, enabled: bool) -> Self {
+        self.hash_join = enabled;
+        self
     }
 
     pub fn generate(&mut self) -> CompiledModule {
@@ -308,6 +384,8 @@ impl<'a, B: Backend> Codegen<'a, B> {
         types
             .ty()
             .function(vec![], vec![ValType::EXTERNREF]);
+        // T15: (i32, i32) -> () — hash_join_commit_build signature
+        types.ty().function(vec![ValType::I32, ValType::I32], vec![]);
         module.section(&types);
 
         // 2. Imports
@@ -415,6 +493,31 @@ impl<'a, B: Backend> Codegen<'a, B> {
             );
             imports.import("env", "pair_first", EntityType::Function(TY_UNOP));
             imports.import("env", "pair_second", EntityType::Function(TY_UNOP));
+            imports.import(
+                "env",
+                "hash_join_begin",
+                EntityType::Function(TY_I32_VOID),
+            );
+            imports.import(
+                "env",
+                "hash_join_push",
+                EntityType::Function(TY_EXTERNREF_VOID),
+            );
+            imports.import(
+                "env",
+                "hash_join_commit_build",
+                EntityType::Function(TY_I32_I32_VOID),
+            );
+            imports.import(
+                "env",
+                "hash_join_probe",
+                EntityType::Function(TY_I32_I32),
+            );
+            imports.import(
+                "env",
+                "hash_join_end",
+                EntityType::Function(TY_I32_VOID),
+            );
         }
         module.section(&imports);
 
@@ -493,7 +596,7 @@ impl<'a, B: Backend> Codegen<'a, B> {
 
                 if !is_recursive {
                     for rule_id in rule_ids {
-                        let planner = Planner::new(self.ir);
+                        let planner = Planner::new(self.ir).with_hash_join(self.hash_join);
                         if let Ok(op) = planner.plan_rule(rule_id) {
                             ops.push(op);
                         }
@@ -501,7 +604,7 @@ impl<'a, B: Backend> Codegen<'a, B> {
                 } else {
                     // Recursive stratum: initial step + loop
                     for &rule_id in &rule_ids {
-                        let planner = Planner::new(self.ir);
+                        let planner = Planner::new(self.ir).with_hash_join(self.hash_join);
                         if let Ok(op) = planner.plan_rule(rule_id) {
                             ops.push(op);
                         }
@@ -525,7 +628,9 @@ impl<'a, B: Backend> Codegen<'a, B> {
                                 };
 
                             if stratum_pred_names.contains(pred_name.as_str()) {
-                                let planner = Planner::new(self.ir).with_delta(predicate);
+                                let planner = Planner::new(self.ir)
+                                    .with_delta(predicate)
+                                    .with_hash_join(self.hash_join);
                                 if let Ok(op) = planner.plan_rule(rule_id) {
                                     ops.push(op);
                                 }
@@ -553,7 +658,7 @@ impl<'a, B: Backend> Codegen<'a, B> {
                 .collect();
 
             for rule_id in &rule_ids {
-                let planner = Planner::new(self.ir);
+                let planner = Planner::new(self.ir).with_hash_join(self.hash_join);
                 if let Ok(op) = planner.plan_rule(*rule_id) {
                     ops.push(op);
                 }
@@ -571,6 +676,7 @@ impl<'a, B: Backend> Codegen<'a, B> {
             next_local: 2,
             iter_base: 0,
             iter_offset: 0,
+            next_join_id: 0,
         };
 
         // Pass 1: Collect vars and count iterators
@@ -691,6 +797,29 @@ impl<'a, B: Backend> Codegen<'a, B> {
                 }
                 count += Self::collect_vars(body, ctx);
             }
+            Op::HashJoin {
+                build_source,
+                probe_source,
+                body,
+                ..
+            } => {
+                // 3 iterators: build scan, probe scan, probe-match iter.
+                count += 3;
+                for src in [build_source, probe_source] {
+                    let vars = match src {
+                        DataSource::Scan { vars, .. }
+                        | DataSource::ScanDelta { vars, .. }
+                        | DataSource::IndexLookup { vars, .. } => vars,
+                    };
+                    for v in vars {
+                        if !ctx.var_map.contains_key(v) {
+                            ctx.var_map.insert(*v, ctx.next_local);
+                            ctx.next_local += 1;
+                        }
+                    }
+                }
+                count += Self::collect_vars(body, ctx);
+            }
             _ => {}
         }
         count
@@ -805,8 +934,164 @@ impl<'a, B: Backend> Codegen<'a, B> {
                     self.emit_op(func, o, ctx);
                 }
             }
+            Op::HashJoin {
+                build_source,
+                probe_source,
+                join_keys,
+                body,
+            } => self.emit_hash_join(func, build_source, probe_source, join_keys, body, ctx),
             _ => {}
         }
+    }
+
+    /// Emit WASM for a two-way hash join. See the `Op::HashJoin` doc in
+    /// `mangle-ir/physical.rs` for semantics and the `IMP_HASH_JOIN_*` block
+    /// above for the host-side protocol.
+    ///
+    /// v1 restriction: both `build_source` and `probe_source` must be
+    /// `DataSource::Scan` (the planner's fast path only emits this shape).
+    /// Other DataSource variants fall back to a no-op to keep generated
+    /// code valid; the interpreter path is unaffected.
+    fn emit_hash_join(
+        &self,
+        func: &mut Function,
+        build_source: &DataSource,
+        probe_source: &DataSource,
+        join_keys: &[NameId],
+        body: &Op,
+        ctx: &mut FuncContext,
+    ) {
+        let (build_rel, build_vars) = match build_source {
+            DataSource::Scan { relation, vars } => (*relation, vars.clone()),
+            _ => return,
+        };
+        let (probe_rel, probe_vars) = match probe_source {
+            DataSource::Scan { relation, vars } => (*relation, vars.clone()),
+            _ => return,
+        };
+
+        let join_id = ctx.next_join_id;
+        ctx.next_join_id += 1;
+        let n_keys = join_keys.len() as u32;
+
+        // Build-row layout pushed to the host: keys first, then the rest of
+        // `build_vars`. The same layout is read back via `get_col` after
+        // `hash_join_probe`, so we remember the variable at each position.
+        let non_key_build_vars: Vec<NameId> = build_vars
+            .iter()
+            .copied()
+            .filter(|v| !join_keys.contains(v))
+            .collect();
+        let build_order: Vec<NameId> = join_keys
+            .iter()
+            .copied()
+            .chain(non_key_build_vars.iter().copied())
+            .collect();
+
+        let build_rel_name = self.ir.resolve_name(build_rel).to_string();
+        let probe_rel_name = self.ir.resolve_name(probe_rel).to_string();
+
+        // --- Begin table ---
+        self.backend.emit_hash_join_begin(func, join_id);
+
+        // --- Build phase: scan build_rel, bind build_vars, push in build_order ---
+        let iter_build = ctx.iter_base + ctx.iter_offset;
+        ctx.iter_offset += 1;
+        self.backend.emit_scan_start(func, &build_rel_name);
+        func.instruction(&Instruction::LocalSet(iter_build));
+
+        func.instruction(&Instruction::Block(wasm_encoder::BlockType::Empty));
+        func.instruction(&Instruction::Loop(wasm_encoder::BlockType::Empty));
+        self.backend.emit_scan_next(func, iter_build);
+        func.instruction(&Instruction::LocalTee(1));
+        func.instruction(&Instruction::I32Eqz);
+        func.instruction(&Instruction::BrIf(1));
+
+        // Bind build_vars from tuple columns.
+        for (i, var) in build_vars.iter().enumerate() {
+            if let Some(&local_idx) = ctx.var_map.get(var) {
+                self.backend.emit_get_col(func, 1, i as u32);
+                func.instruction(&Instruction::LocalSet(local_idx));
+            }
+        }
+        // Push in key-first order.
+        for var in &build_order {
+            if let Some(&local_idx) = ctx.var_map.get(var) {
+                func.instruction(&Instruction::LocalGet(local_idx));
+                self.backend.emit_hash_join_push(func);
+            }
+        }
+        self.backend
+            .emit_hash_join_commit_build(func, join_id, n_keys);
+
+        func.instruction(&Instruction::Br(0));
+        func.instruction(&Instruction::End); // end loop
+        func.instruction(&Instruction::End); // end block
+
+        // --- Probe phase ---
+        let iter_probe = ctx.iter_base + ctx.iter_offset;
+        ctx.iter_offset += 1;
+        let iter_match = ctx.iter_base + ctx.iter_offset;
+        ctx.iter_offset += 1;
+
+        self.backend.emit_scan_start(func, &probe_rel_name);
+        func.instruction(&Instruction::LocalSet(iter_probe));
+
+        func.instruction(&Instruction::Block(wasm_encoder::BlockType::Empty));
+        func.instruction(&Instruction::Loop(wasm_encoder::BlockType::Empty));
+        self.backend.emit_scan_next(func, iter_probe);
+        func.instruction(&Instruction::LocalTee(1));
+        func.instruction(&Instruction::I32Eqz);
+        func.instruction(&Instruction::BrIf(1));
+
+        // Bind probe_vars from tuple.
+        for (i, var) in probe_vars.iter().enumerate() {
+            if let Some(&local_idx) = ctx.var_map.get(var) {
+                self.backend.emit_get_col(func, 1, i as u32);
+                func.instruction(&Instruction::LocalSet(local_idx));
+            }
+        }
+        // Push join-key values in `join_keys` order — must match build-side
+        // key order.
+        for var in join_keys {
+            if let Some(&local_idx) = ctx.var_map.get(var) {
+                func.instruction(&Instruction::LocalGet(local_idx));
+                self.backend.emit_hash_join_push(func);
+            }
+        }
+        // Probe → iter_id on stack → save to iter_match.
+        self.backend.emit_hash_join_probe(func, join_id);
+        func.instruction(&Instruction::LocalSet(iter_match));
+
+        // Inner loop over matches.
+        func.instruction(&Instruction::Block(wasm_encoder::BlockType::Empty));
+        func.instruction(&Instruction::Loop(wasm_encoder::BlockType::Empty));
+        self.backend.emit_scan_next(func, iter_match);
+        func.instruction(&Instruction::LocalTee(1));
+        func.instruction(&Instruction::I32Eqz);
+        func.instruction(&Instruction::BrIf(1));
+
+        // Rebind build-side vars from the match row (column order =
+        // build_order, since that's how we pushed them).
+        for (i, var) in build_order.iter().enumerate() {
+            if let Some(&local_idx) = ctx.var_map.get(var) {
+                self.backend.emit_get_col(func, 1, i as u32);
+                func.instruction(&Instruction::LocalSet(local_idx));
+            }
+        }
+
+        self.emit_op(func, body, ctx);
+
+        func.instruction(&Instruction::Br(0));
+        func.instruction(&Instruction::End); // end inner loop
+        func.instruction(&Instruction::End); // end inner block
+
+        func.instruction(&Instruction::Br(0));
+        func.instruction(&Instruction::End); // end probe loop
+        func.instruction(&Instruction::End); // end probe block
+
+        // --- Tear down table ---
+        self.backend.emit_hash_join_end(func, join_id);
     }
 
     fn emit_condition(&self, func: &mut Function, cond: &Condition, ctx: &FuncContext) {

@@ -21,6 +21,38 @@ pub struct Planner<'a> {
     ir: &'a mut Ir,
     delta_pred: Option<NameId>,
     fresh_counter: usize,
+    /// When true, emit `Op::HashJoin` for eligible two-premise joins. Off by
+    /// default. Defaults to the value of `MANGLE_HASHJOIN=1` at construction
+    /// time; tests and callers can override with `.with_hash_join(...)`.
+    hash_join: bool,
+}
+
+/// Read the `MANGLE_HASHJOIN` env var once. Used to seed `Planner::hash_join`
+/// so the flag can be set from the shell without code changes. Overridable
+/// per-planner via `with_hash_join`.
+fn hash_join_env_default() -> bool {
+    std::env::var("MANGLE_HASHJOIN")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Replace the placeholder `Op::Nop` body inside a freshly-built `Op::HashJoin`
+/// with the real body planned after the join.
+fn splice_hash_join_body(op: Op, body: Op) -> Op {
+    match op {
+        Op::HashJoin {
+            build_source,
+            probe_source,
+            join_keys,
+            ..
+        } => Op::HashJoin {
+            build_source,
+            probe_source,
+            join_keys,
+            body: Box::new(body),
+        },
+        other => other,
+    }
 }
 
 impl<'a> Planner<'a> {
@@ -29,11 +61,20 @@ impl<'a> Planner<'a> {
             ir,
             delta_pred: None,
             fresh_counter: 0,
+            hash_join: hash_join_env_default(),
         }
     }
 
     pub fn with_delta(mut self, delta_pred: NameId) -> Self {
         self.delta_pred = Some(delta_pred);
+        self
+    }
+
+    /// Override the HashJoin emission flag (seeded from `MANGLE_HASHJOIN` env
+    /// var by default). Primarily for testing and for callers that want to
+    /// opt in or out explicitly.
+    pub fn with_hash_join(mut self, enabled: bool) -> Self {
+        self.hash_join = enabled;
         self
     }
 
@@ -244,6 +285,87 @@ impl<'a> Planner<'a> {
         self.ir.intern_name(name)
     }
 
+    /// If this premise and the next one are both Atoms of the shape
+    /// `p(V1, V2, ...)` — every arg a fresh, unbound, non-repeating variable
+    /// — and they share at least one variable, consume the next premise and
+    /// return a `HashJoin` op whose `body` is `Op::Nop` (spliced in by the
+    /// caller). Returns `None` if the pattern does not match.
+    fn try_plan_hash_join(
+        &self,
+        predicate: NameId,
+        args: &[InstId],
+        premises: &mut Vec<InstId>,
+        bound_vars: &mut FxHashSet<NameId>,
+    ) -> Result<Option<Op>> {
+        let Some(build_vars) = self.all_fresh_distinct_vars(args, bound_vars) else {
+            return Ok(None);
+        };
+        let next_id = *premises.first().unwrap();
+        let next_inst = self.ir.get(next_id).clone();
+        let Inst::Atom {
+            predicate: next_pred,
+            args: next_args,
+        } = next_inst
+        else {
+            return Ok(None);
+        };
+        if Some(next_pred) == self.delta_pred {
+            return Ok(None);
+        }
+        let Some(probe_vars) = self.all_fresh_distinct_vars(&next_args, bound_vars) else {
+            return Ok(None);
+        };
+        let join_keys: Vec<NameId> = build_vars
+            .iter()
+            .filter(|v| probe_vars.contains(v))
+            .copied()
+            .collect();
+        if join_keys.is_empty() {
+            return Ok(None);
+        }
+
+        // Commit: consume the next premise and mark both sides' vars as bound.
+        premises.remove(0);
+        for v in build_vars.iter().chain(probe_vars.iter()) {
+            bound_vars.insert(*v);
+        }
+
+        Ok(Some(Op::HashJoin {
+            build_source: DataSource::Scan {
+                relation: predicate,
+                vars: build_vars,
+            },
+            probe_source: DataSource::Scan {
+                relation: next_pred,
+                vars: probe_vars,
+            },
+            join_keys,
+            body: Box::new(Op::Nop),
+        }))
+    }
+
+    /// Return the list of variables an atom's args bind, or `None` if any
+    /// arg is already bound, not a `Var`, or repeats. Used to gate the
+    /// HashJoin fast path — the existing nested-Iterate path handles the
+    /// general case.
+    fn all_fresh_distinct_vars(
+        &self,
+        args: &[InstId],
+        bound_vars: &FxHashSet<NameId>,
+    ) -> Option<Vec<NameId>> {
+        let mut out: Vec<NameId> = Vec::with_capacity(args.len());
+        for arg in args {
+            let Inst::Var(v) = self.ir.get(*arg) else {
+                return None;
+            };
+            if bound_vars.contains(v) || out.contains(v) {
+                return None;
+            }
+            out.push(*v);
+        }
+        Some(out)
+    }
+
     fn plan_join_sequence<F>(
         &mut self,
         mut premises: Vec<InstId>,
@@ -321,6 +443,31 @@ impl<'a> Planner<'a> {
                 })
             }
             Inst::Atom { predicate, args } => {
+                // Fast path: emit HashJoin when the env var
+                // `MANGLE_HASHJOIN=1` is set, neither side is the delta
+                // predicate, and both this premise and the next one are
+                // simple Atoms whose args are all fresh (unbound, unique,
+                // non-constant) variables sharing at least one join key.
+                //
+                // The planner is otherwise conservative: falling through to
+                // the existing nested-Iterate + IndexLookup path is always
+                // safe, so this is purely an opt-in performance path for
+                // the use cases where hash join beats index-nested-loop.
+                if self.hash_join
+                    && self.delta_pred.is_none()
+                    && !premises.is_empty()
+                {
+                    if let Some(op) = self.try_plan_hash_join(
+                        predicate,
+                        &args,
+                        &mut premises,
+                        bound_vars,
+                    )? {
+                        let body_op = self.plan_join_sequence(premises, bound_vars, continuation)?;
+                        return Ok(splice_hash_join_body(op, body_op));
+                    }
+                }
+
                 let mut scan_vars = Vec::new();
                 let mut new_bindings = Vec::new();
 

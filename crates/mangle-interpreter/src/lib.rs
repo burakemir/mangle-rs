@@ -751,6 +751,12 @@ impl<'a> Interpreter<'a> {
                 env.vars.insert(*var, val);
                 self.exec_op(body, env)
             }
+            Op::HashJoin {
+                build_source,
+                probe_source,
+                join_keys,
+                body,
+            } => self.exec_hash_join(build_source, probe_source, join_keys, body, env),
             Op::GroupBy {
                 source,
                 vars,
@@ -811,6 +817,111 @@ impl<'a> Interpreter<'a> {
                 Ok(count)
             }
         }
+    }
+
+    /// Iterate a `DataSource` and return all tuples along with the var list
+    /// the tuples bind. Used by `HashJoin` to materialize the build side and
+    /// to stream the probe side.
+    fn collect_data_source(
+        &mut self,
+        source: &DataSource,
+        env: &mut Env,
+    ) -> Result<(Vec<Vec<Value>>, Vec<NameId>)> {
+        match source {
+            DataSource::Scan { relation, vars } => {
+                let rel_name = self.ir.resolve_name(*relation);
+                let tuples: Vec<_> = self.store.scan(rel_name)?.collect();
+                Ok((tuples, vars.clone()))
+            }
+            DataSource::ScanDelta { relation, vars } => {
+                let rel_name = self.ir.resolve_name(*relation);
+                let tuples: Vec<_> = self.store.scan_delta(rel_name)?.collect();
+                Ok((tuples, vars.clone()))
+            }
+            DataSource::IndexLookup {
+                relation,
+                col_idx,
+                key,
+                vars,
+            } => {
+                let rel_name = self.ir.resolve_name(*relation);
+                let key_val = self.eval_operand(key, env)?;
+                let tuples: Vec<_> =
+                    self.store.scan_index(rel_name, *col_idx, &key_val)?.collect();
+                Ok((tuples, vars.clone()))
+            }
+        }
+    }
+
+    fn exec_hash_join(
+        &mut self,
+        build_source: &DataSource,
+        probe_source: &DataSource,
+        join_keys: &[NameId],
+        body: &Op,
+        env: &mut Env,
+    ) -> Result<usize> {
+        let (build_tuples, build_vars) = self.collect_data_source(build_source, env)?;
+
+        // Position of each join-key variable inside build_vars. If any
+        // join_key is not in build_vars, the plan is malformed.
+        let build_key_positions: Vec<usize> = join_keys
+            .iter()
+            .map(|k| {
+                build_vars
+                    .iter()
+                    .position(|v| v == k)
+                    .ok_or_else(|| anyhow!("HashJoin: join key not in build_source vars"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let mut table: HashMap<Vec<Value>, Vec<Vec<Value>>> = HashMap::new();
+        for tuple in build_tuples {
+            if tuple.len() != build_vars.len() {
+                continue;
+            }
+            let key: Vec<Value> = build_key_positions
+                .iter()
+                .map(|&i| tuple[i].clone())
+                .collect();
+            table.entry(key).or_default().push(tuple);
+        }
+
+        let (probe_tuples, probe_vars) = self.collect_data_source(probe_source, env)?;
+        let probe_key_positions: Vec<usize> = join_keys
+            .iter()
+            .map(|k| {
+                probe_vars
+                    .iter()
+                    .position(|v| v == k)
+                    .ok_or_else(|| anyhow!("HashJoin: join key not in probe_source vars"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let mut count = 0;
+        for probe_tuple in probe_tuples {
+            if probe_tuple.len() != probe_vars.len() {
+                continue;
+            }
+            let key: Vec<Value> = probe_key_positions
+                .iter()
+                .map(|&i| probe_tuple[i].clone())
+                .collect();
+            let Some(matches) = table.get(&key) else {
+                continue;
+            };
+            // Bind probe-side vars once; build-side bindings cycle per match.
+            for (i, var) in probe_vars.iter().enumerate() {
+                env.vars.insert(*var, probe_tuple[i].clone());
+            }
+            for build_tuple in matches {
+                for (i, var) in build_vars.iter().enumerate() {
+                    env.vars.insert(*var, build_tuple[i].clone());
+                }
+                count += self.exec_op(body, env)?;
+            }
+        }
+        Ok(count)
     }
 
     fn eval_aggregate(
@@ -2338,5 +2449,297 @@ mod tests {
         let facts = store.get_facts("employed");
         // Alice's 2 intervals merge to 1; Bob stays as 1
         assert_eq!(facts.len(), 2, "expected 2 facts after coalesce, got {:?}", facts);
+    }
+
+    // --- HashJoin tests ---------------------------------------------------
+    //
+    // Each test hand-constructs an `Op::HashJoin` and compares its output to
+    // the equivalent nested-loop plan (`Op::Iterate { body: Op::Iterate {..}
+    // }` with an equality check). This isolates HashJoin correctness from
+    // planner emission, which lives in a separate gated path.
+
+    /// Build `result(X, Y) :- a(X, Z), b(Z, Y).` as nested-loop (join-key
+    /// check via Filter on Z) — the correctness baseline for HashJoin.
+    fn nested_loop_two_way(
+        ir: &mangle_ir::Ir,
+        a: NameId,
+        b: NameId,
+        result: NameId,
+        x: NameId,
+        z: NameId,
+        y: NameId,
+        z_right: NameId,
+    ) -> Op {
+        use mangle_ir::physical::{CmpOp, Condition, DataSource, Operand};
+        let _ = ir;
+        Op::Iterate {
+            source: DataSource::Scan {
+                relation: a,
+                vars: vec![x, z],
+            },
+            body: Box::new(Op::Iterate {
+                source: DataSource::Scan {
+                    relation: b,
+                    vars: vec![z_right, y],
+                },
+                body: Box::new(Op::Filter {
+                    cond: Condition::Cmp {
+                        op: CmpOp::Eq,
+                        left: Operand::Var(z),
+                        right: Operand::Var(z_right),
+                    },
+                    body: Box::new(Op::Insert {
+                        relation: result,
+                        args: vec![Operand::Var(x), Operand::Var(y)],
+                    }),
+                }),
+            }),
+        }
+    }
+
+    /// Same rule as `nested_loop_two_way` but with HashJoin.
+    fn hash_join_two_way(
+        a: NameId,
+        b: NameId,
+        result: NameId,
+        x: NameId,
+        z: NameId,
+        y: NameId,
+    ) -> Op {
+        use mangle_ir::physical::{DataSource, Operand};
+        Op::HashJoin {
+            build_source: DataSource::Scan {
+                relation: a,
+                vars: vec![x, z],
+            },
+            probe_source: DataSource::Scan {
+                relation: b,
+                vars: vec![z, y],
+            },
+            join_keys: vec![z],
+            body: Box::new(Op::Insert {
+                relation: result,
+                args: vec![Operand::Var(x), Operand::Var(y)],
+            }),
+        }
+    }
+
+    fn run_plan(ir: &mangle_ir::Ir, facts: &[(&str, Vec<Value>)], op: &Op) -> Vec<Vec<Value>> {
+        let mut store = Box::new(MemStore::new());
+        for (rel, t) in facts {
+            store.add_fact(rel, t.clone());
+        }
+        store.create_relation("result");
+        let mut interp = Interpreter::new(ir, store as Box<dyn Store>);
+        interp.execute(op).unwrap();
+        // Inserts land in next_delta; promote twice so `scan()` surfaces them.
+        let mut store = interp.into_store();
+        store.merge_deltas();
+        store.merge_deltas();
+        store.scan("result").unwrap().collect()
+    }
+
+    fn sorted(mut v: Vec<Vec<Value>>) -> Vec<Vec<Value>> {
+        v.sort();
+        v
+    }
+
+    /// Build an IR with the names needed for the two-way-join tests.
+    fn setup_two_way_ir()
+    -> (mangle_ir::Ir, NameId, NameId, NameId, NameId, NameId, NameId, NameId) {
+        let mut ir = mangle_ir::Ir::new();
+        let a = ir.intern_name("a");
+        let b = ir.intern_name("b");
+        let result = ir.intern_name("result");
+        let x = ir.intern_name("X");
+        let z = ir.intern_name("Z");
+        let y = ir.intern_name("Y");
+        // A separate NameId for the nested-loop baseline's Z on the right side
+        // — nested-loop needs a distinct var so the Filter can check equality.
+        let z_right = ir.intern_name("Z_right");
+        (ir, a, b, result, x, z, y, z_right)
+    }
+
+    #[test]
+    fn test_hashjoin_matches_nested_loop_basic() {
+        let (ir, a, b, result, x, z, y, z_right) = setup_two_way_ir();
+
+        let facts: Vec<(&str, Vec<Value>)> = vec![
+            ("a", vec![Value::Number(1), Value::Number(10)]),
+            ("a", vec![Value::Number(2), Value::Number(20)]),
+            ("a", vec![Value::Number(3), Value::Number(10)]),
+            ("b", vec![Value::Number(10), Value::Number(100)]),
+            ("b", vec![Value::Number(10), Value::Number(101)]),
+            ("b", vec![Value::Number(20), Value::Number(200)]),
+            ("b", vec![Value::Number(30), Value::Number(300)]),
+        ];
+
+        let baseline = run_plan(
+            &ir,
+            &facts,
+            &nested_loop_two_way(&ir, a, b, result, x, z, y, z_right),
+        );
+        let via_hash = run_plan(&ir, &facts, &hash_join_two_way(a, b, result, x, z, y));
+
+        assert_eq!(
+            sorted(baseline.clone()),
+            sorted(via_hash.clone()),
+            "HashJoin output must match nested-loop baseline"
+        );
+        // Sanity: we expect (1,100), (1,101), (2,200), (3,100), (3,101).
+        assert_eq!(sorted(via_hash).len(), 5);
+    }
+
+    #[test]
+    fn test_hashjoin_empty_build() {
+        let (ir, a, b, result, x, z, y, _z_right) = setup_two_way_ir();
+        let facts: Vec<(&str, Vec<Value>)> = vec![
+            ("b", vec![Value::Number(10), Value::Number(100)]),
+            ("b", vec![Value::Number(20), Value::Number(200)]),
+        ];
+        let out = run_plan(&ir, &facts, &hash_join_two_way(a, b, result, x, z, y));
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn test_hashjoin_empty_probe() {
+        let (ir, a, b, result, x, z, y, _z_right) = setup_two_way_ir();
+        let facts: Vec<(&str, Vec<Value>)> = vec![
+            ("a", vec![Value::Number(1), Value::Number(10)]),
+            ("a", vec![Value::Number(2), Value::Number(20)]),
+        ];
+        let out = run_plan(&ir, &facts, &hash_join_two_way(a, b, result, x, z, y));
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn test_hashjoin_no_matches() {
+        let (ir, a, b, result, x, z, y, _z_right) = setup_two_way_ir();
+        let facts: Vec<(&str, Vec<Value>)> = vec![
+            ("a", vec![Value::Number(1), Value::Number(10)]),
+            ("b", vec![Value::Number(99), Value::Number(200)]),
+        ];
+        let out = run_plan(&ir, &facts, &hash_join_two_way(a, b, result, x, z, y));
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn test_hashjoin_value_variants_as_key() {
+        // Use strings and names as join keys to exercise value hashing on
+        // non-integer variants. `r(X, Y) :- a(X, K), b(K, Y).`
+        let mut ir = mangle_ir::Ir::new();
+        let a = ir.intern_name("a");
+        let b = ir.intern_name("b");
+        let result = ir.intern_name("result");
+        let x = ir.intern_name("X");
+        let k = ir.intern_name("K");
+        let y = ir.intern_name("Y");
+
+        let facts: Vec<(&str, Vec<Value>)> = vec![
+            ("a", vec![Value::Number(1), Value::String("hello".into())]),
+            ("a", vec![Value::Number(2), Value::Name("/foo".into())]),
+            ("b", vec![Value::String("hello".into()), Value::Number(100)]),
+            ("b", vec![Value::Name("/foo".into()), Value::Number(200)]),
+            // An entry that must NOT match — Name vs String are distinct.
+            (
+                "b",
+                vec![Value::String("/foo".into()), Value::Number(999)],
+            ),
+        ];
+        let op = hash_join_two_way(a, b, result, x, k, y);
+        let out = sorted(run_plan(&ir, &facts, &op));
+        assert_eq!(
+            out,
+            sorted(vec![
+                vec![Value::Number(1), Value::Number(100)],
+                vec![Value::Number(2), Value::Number(200)],
+            ])
+        );
+    }
+
+    #[test]
+    fn test_hashjoin_multi_key() {
+        // `r(X, W) :- a(X, K1, K2), b(K1, K2, W).` — compound (two-variable)
+        // join key.
+        let mut ir = mangle_ir::Ir::new();
+        let a = ir.intern_name("a");
+        let b = ir.intern_name("b");
+        let result = ir.intern_name("result");
+        let x = ir.intern_name("X");
+        let k1 = ir.intern_name("K1");
+        let k2 = ir.intern_name("K2");
+        let w = ir.intern_name("W");
+
+        let op = Op::HashJoin {
+            build_source: DataSource::Scan {
+                relation: a,
+                vars: vec![x, k1, k2],
+            },
+            probe_source: DataSource::Scan {
+                relation: b,
+                vars: vec![k1, k2, w],
+            },
+            join_keys: vec![k1, k2],
+            body: Box::new(Op::Insert {
+                relation: result,
+                args: vec![Operand::Var(x), Operand::Var(w)],
+            }),
+        };
+
+        let facts: Vec<(&str, Vec<Value>)> = vec![
+            (
+                "a",
+                vec![Value::Number(1), Value::Number(10), Value::Number(100)],
+            ),
+            (
+                "a",
+                vec![Value::Number(2), Value::Number(10), Value::Number(200)],
+            ),
+            // Matching K1 but different K2 — must NOT join with (10, 100, ...).
+            (
+                "a",
+                vec![Value::Number(3), Value::Number(10), Value::Number(999)],
+            ),
+            (
+                "b",
+                vec![Value::Number(10), Value::Number(100), Value::Number(1000)],
+            ),
+            (
+                "b",
+                vec![Value::Number(10), Value::Number(200), Value::Number(2000)],
+            ),
+        ];
+
+        let out = sorted(run_plan(&ir, &facts, &op));
+        assert_eq!(
+            out,
+            sorted(vec![
+                vec![Value::Number(1), Value::Number(1000)],
+                vec![Value::Number(2), Value::Number(2000)],
+            ])
+        );
+    }
+
+    #[test]
+    fn test_hashjoin_duplicate_build_keys() {
+        // Multiple build rows with the same key must all be emitted (one
+        // probe tuple × N build matches = N results).
+        let (ir, a, b, result, x, z, y, _z_right) = setup_two_way_ir();
+        let facts: Vec<(&str, Vec<Value>)> = vec![
+            ("a", vec![Value::Number(1), Value::Number(10)]),
+            ("a", vec![Value::Number(2), Value::Number(10)]),
+            ("a", vec![Value::Number(3), Value::Number(10)]),
+            ("b", vec![Value::Number(10), Value::Number(99)]),
+        ];
+        let op = hash_join_two_way(a, b, result, x, z, y);
+        let out = sorted(run_plan(&ir, &facts, &op));
+        assert_eq!(
+            out,
+            sorted(vec![
+                vec![Value::Number(1), Value::Number(99)],
+                vec![Value::Number(2), Value::Number(99)],
+                vec![Value::Number(3), Value::Number(99)],
+            ])
+        );
     }
 }

@@ -438,6 +438,36 @@ pub trait Host {
 
     // --- Debug ---
     fn debuglog(&mut self, val: HostVal);
+
+    // --- HashJoin ---
+    //
+    // Protocol:
+    //   1. `hash_join_begin(id)` — initialize / reset the table for `id`.
+    //   2. For each build row: N calls to `hash_join_push(val)` followed by
+    //      `hash_join_commit_build(id, n_keys)`. The first `n_keys` of the
+    //      pushed values form the join key; the rest are the payload.
+    //   3. For each probe tuple: K calls to `hash_join_push(val)` with the
+    //      key values, followed by `hash_join_probe(id)`, which returns an
+    //      iter_id usable with the existing `scan_next` / `get_col`.
+    //   4. `hash_join_end(id)` — drop the table.
+    //
+    // Default impls panic so existing Host implementations compile until
+    // they opt into HashJoin support.
+    fn hash_join_begin(&mut self, _join_id: i32) {
+        unimplemented!("hash_join_begin");
+    }
+    fn hash_join_push(&mut self, _val: HostVal) {
+        unimplemented!("hash_join_push");
+    }
+    fn hash_join_commit_build(&mut self, _join_id: i32, _n_keys: i32) {
+        unimplemented!("hash_join_commit_build");
+    }
+    fn hash_join_probe(&mut self, _join_id: i32) -> i32 {
+        unimplemented!("hash_join_probe");
+    }
+    fn hash_join_end(&mut self, _join_id: i32) {
+        unimplemented!("hash_join_end");
+    }
 }
 
 // --- Legacy Interfaces ---

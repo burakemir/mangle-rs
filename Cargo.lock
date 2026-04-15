@@ -62,6 +62,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "atomic-polyfill"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8cf2bce30dfe09ef0bfaef228b9d414faaf7e563035494d7fe092dba54b300f4"
+dependencies = [
+ "critical-section",
+]
+
+[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -463,6 +472,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "critical-section"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
+
+[[package]]
 name = "crossbeam-deque"
 version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -819,6 +834,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "hash32"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0c35f58762feb77d74ebe43bdbc3210f09be9fe6742234d573bacc26ed92b67"
+dependencies = [
+ "byteorder",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -837,6 +861,20 @@ dependencies = [
  "foldhash 0.2.0",
  "serde",
  "serde_core",
+]
+
+[[package]]
+name = "heapless"
+version = "0.7.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cdc6457c0eb62c71aac4bc17216026d8410337c4126773b9c5daba343f17964f"
+dependencies = [
+ "atomic-polyfill",
+ "hash32",
+ "rustc_version",
+ "serde",
+ "spin",
+ "stable_deref_trait",
 ]
 
 [[package]]
@@ -1099,7 +1137,7 @@ dependencies = [
 
 [[package]]
 name = "mangle-analysis"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "fxhash",
@@ -1112,7 +1150,7 @@ dependencies = [
 
 [[package]]
 name = "mangle-ast"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "bumpalo",
  "fxhash",
@@ -1121,7 +1159,7 @@ dependencies = [
 
 [[package]]
 name = "mangle-codegen"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "fxhash",
@@ -1134,7 +1172,7 @@ dependencies = [
 
 [[package]]
 name = "mangle-common"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "fxhash",
@@ -1143,7 +1181,7 @@ dependencies = [
 
 [[package]]
 name = "mangle-db"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "fxhash",
@@ -1154,6 +1192,7 @@ dependencies = [
  "mangle-interpreter",
  "mangle-ir",
  "mangle-parse",
+ "postcard",
  "redb",
  "serde",
  "serde_json",
@@ -1163,7 +1202,7 @@ dependencies = [
 
 [[package]]
 name = "mangle-driver"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "criterion",
@@ -1180,7 +1219,7 @@ dependencies = [
 
 [[package]]
 name = "mangle-engine"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "fxhash",
@@ -1192,7 +1231,7 @@ dependencies = [
 
 [[package]]
 name = "mangle-interpreter"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "mangle-ast",
@@ -1202,11 +1241,11 @@ dependencies = [
 
 [[package]]
 name = "mangle-ir"
-version = "0.6.0"
+version = "0.7.0"
 
 [[package]]
 name = "mangle-parse"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "googletest",
@@ -1216,7 +1255,7 @@ dependencies = [
 
 [[package]]
 name = "mangle-server"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1234,7 +1273,7 @@ dependencies = [
 
 [[package]]
 name = "mangle-simplecolumn"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "mangle-ast",
@@ -1246,7 +1285,7 @@ dependencies = [
 
 [[package]]
 name = "mangle-vm"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "csv",
@@ -1264,7 +1303,7 @@ dependencies = [
 
 [[package]]
 name = "mangle-wasm"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "mangle-ast",
@@ -1441,6 +1480,7 @@ dependencies = [
  "cobs",
  "embedded-io 0.4.0",
  "embedded-io 0.6.1",
+ "heapless",
  "serde",
 ]
 
@@ -1609,6 +1649,15 @@ name = "rustc-hash"
 version = "2.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "357703d41365b4b27c590e3ed91eabb1b663f07c4c084095e60cbed4362dff0d"
+
+[[package]]
+name = "rustc_version"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cfcb3a22ef46e85b45de6ee7e79d063319ebb6594faafcf1c225ea92ab6e9b92"
+dependencies = [
+ "semver",
+]
 
 [[package]]
 name = "rustix"
@@ -1808,6 +1857,15 @@ checksum = "86f4aa3ad99f2088c990dfa82d367e19cb29268ed67c574d10d0a4bfe71f07e0"
 dependencies = [
  "libc",
  "windows-sys 0.60.2",
+]
+
+[[package]]
+name = "spin"
+version = "0.9.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
+dependencies = [
+ "lock_api",
 ]
 
 [[package]]

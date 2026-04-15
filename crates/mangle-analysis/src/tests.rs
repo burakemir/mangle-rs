@@ -218,3 +218,140 @@ fn test_planner_basic() {
         panic!("Expected outer Iterate");
     }
 }
+
+/// Setting `MANGLE_HASHJOIN=1` must cause the planner to emit `Op::HashJoin`
+/// for a two-premise rule whose shared variable is unbound on both sides.
+///
+/// This test is the counterpart to the hand-constructed HashJoin tests in
+/// mangle-interpreter: those prove execution is correct; this proves the
+/// planner wires it up.
+#[test]
+fn test_planner_emits_hash_join_under_env_var() {
+    // `result(X, Y) :- a(X, Z), b(Z, Y).`
+    let arena = ast::Arena::new_with_global_interner();
+    let result_pred = arena.predicate_sym("result", Some(2));
+    let a = arena.predicate_sym("a", Some(2));
+    let b = arena.predicate_sym("b", Some(2));
+    let var_x = arena.variable("X");
+    let var_y = arena.variable("Y");
+    let var_z = arena.variable("Z");
+
+    let head = arena.atom(result_pred, &[var_x, var_y]);
+    let prem_a = arena.atom(a, &[var_x, var_z]);
+    let prem_b = arena.atom(b, &[var_z, var_y]);
+
+    let clause = ast::Clause {
+        head,
+        head_time: None,
+        premises: arena.alloc_slice_copy(&[
+            arena.alloc(ast::Term::Atom(prem_a)),
+            arena.alloc(ast::Term::Atom(prem_b)),
+        ]),
+        transform: &[],
+    };
+    let unit = ast::Unit {
+        decls: &[],
+        clauses: arena.alloc_slice_copy(&[&clause]),
+    };
+
+    let ctx = LoweringContext::new(&arena);
+    let mut ir = ctx.lower_unit(&unit);
+    let rule_id = ir
+        .insts
+        .iter()
+        .position(|i| matches!(i, Inst::Rule { .. }))
+        .unwrap();
+    let rule_inst = mangle_ir::InstId::new(rule_id);
+
+    use crate::Planner;
+    use mangle_ir::physical::{DataSource, Op};
+
+    let op = Planner::new(&mut ir)
+        .with_hash_join(true)
+        .plan_rule(rule_inst)
+        .unwrap();
+
+    // Top-level op must be HashJoin; body must be Insert into `result`.
+    let Op::HashJoin {
+        build_source,
+        probe_source,
+        join_keys,
+        body,
+    } = op
+    else {
+        panic!("expected HashJoin at top level, got: {op:?}");
+    };
+
+    assert_eq!(join_keys.len(), 1, "expected single shared join key (Z)");
+    match build_source {
+        DataSource::Scan { relation, vars } => {
+            assert_eq!(ir.resolve_name(relation), "a");
+            assert_eq!(vars.len(), 2);
+        }
+        other => panic!("build_source: expected Scan(a), got {other:?}"),
+    }
+    match probe_source {
+        DataSource::Scan { relation, vars } => {
+            assert_eq!(ir.resolve_name(relation), "b");
+            assert_eq!(vars.len(), 2);
+        }
+        other => panic!("probe_source: expected Scan(b), got {other:?}"),
+    }
+    match *body {
+        Op::Insert { relation, .. } => assert_eq!(ir.resolve_name(relation), "result"),
+        other => panic!("body: expected Insert into result, got {other:?}"),
+    }
+}
+
+/// Without the env var, the planner must continue to emit the classic nested
+/// `Op::Iterate` structure — guarding against accidental HashJoin regressions
+/// for consumers (like the WASM codegen path) that don't support it yet.
+#[test]
+fn test_planner_no_hash_join_by_default() {
+    let arena = ast::Arena::new_with_global_interner();
+    let result_pred = arena.predicate_sym("result", Some(2));
+    let a = arena.predicate_sym("a", Some(2));
+    let b = arena.predicate_sym("b", Some(2));
+    let var_x = arena.variable("X");
+    let var_y = arena.variable("Y");
+    let var_z = arena.variable("Z");
+
+    let head = arena.atom(result_pred, &[var_x, var_y]);
+    let prem_a = arena.atom(a, &[var_x, var_z]);
+    let prem_b = arena.atom(b, &[var_z, var_y]);
+
+    let clause = ast::Clause {
+        head,
+        head_time: None,
+        premises: arena.alloc_slice_copy(&[
+            arena.alloc(ast::Term::Atom(prem_a)),
+            arena.alloc(ast::Term::Atom(prem_b)),
+        ]),
+        transform: &[],
+    };
+    let unit = ast::Unit {
+        decls: &[],
+        clauses: arena.alloc_slice_copy(&[&clause]),
+    };
+    let ctx = LoweringContext::new(&arena);
+    let mut ir = ctx.lower_unit(&unit);
+    let rule_id = ir
+        .insts
+        .iter()
+        .position(|i| matches!(i, Inst::Rule { .. }))
+        .unwrap();
+    let rule_inst = mangle_ir::InstId::new(rule_id);
+
+    use crate::Planner;
+    use mangle_ir::physical::Op;
+
+    // Explicitly disable to defeat any env-var leakage from another test.
+    let op = Planner::new(&mut ir)
+        .with_hash_join(false)
+        .plan_rule(rule_inst)
+        .unwrap();
+    assert!(
+        !matches!(op, Op::HashJoin { .. }),
+        "HashJoin must not be emitted when disabled"
+    );
+}

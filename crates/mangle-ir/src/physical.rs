@@ -62,6 +62,27 @@ pub enum Op {
         aggregates: Vec<Aggregate>,
         body: Box<Op>,
     },
+
+    /// Hash join of two data sources on a shared set of variables.
+    ///
+    /// Execution:
+    /// 1. Drain `build_source`. For each tuple, capture the values bound by
+    ///    `build_source`'s vars (including the join-key positions) into an
+    ///    in-memory hash table keyed by the `join_keys` projection.
+    /// 2. Stream `probe_source`. For each tuple, extract its join-key values
+    ///    and look up in the build hash table. For every matching build
+    ///    tuple, restore the build-side bindings alongside the probe-side
+    ///    bindings and execute `body`.
+    ///
+    /// `join_keys` must be variables that both `build_source.vars` and
+    /// `probe_source.vars` bind. The planner only emits this op for 2-way
+    /// joins where neither side has a useful IndexLookup.
+    HashJoin {
+        build_source: DataSource,
+        probe_source: DataSource,
+        join_keys: Vec<NameId>,
+        body: Box<Op>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

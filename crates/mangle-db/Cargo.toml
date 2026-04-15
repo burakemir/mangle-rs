@@ -20,6 +20,7 @@ anyhow.workspace = true
 fxhash.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
+postcard = { version = "1", features = ["use-std"] }
 sha2.workspace = true
 redb = { version = "2", optional = true }
 
