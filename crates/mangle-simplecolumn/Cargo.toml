@@ -16,8 +16,12 @@ mangle-ir.workspace = true
 mangle-parse.workspace = true
 mangle-common = { workspace = true }
 mangle-interpreter = { workspace = true, optional = true }
+flate2 = { workspace = true, optional = true }
+ruzstd = { workspace = true, optional = true }
 
 [features]
-default = []
+default = ["gzip", "zstd"]
 server = ["mangle-common/server"]
 edge = ["dep:mangle-interpreter", "mangle-common/edge"]
+gzip = ["dep:flate2"]
+zstd = ["dep:ruzstd"]

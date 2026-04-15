@@ -25,16 +25,49 @@ pub struct SimpleColumnData<'a> {
 }
 
 pub fn read_from_bytes<'a>(arena: &'a ast::Arena, data: &[u8]) -> Result<SimpleColumnData<'a>> {
-    let reader = BufReader::new(data);
+    let reader = sniff_decompress(BufReader::new(data))?;
     read_simple_column(arena, reader)
 }
 
-pub fn read_from_reader<'a, R: Read>(
+pub fn read_from_reader<'a, R: Read + 'static>(
     arena: &'a ast::Arena,
     reader: R,
 ) -> Result<SimpleColumnData<'a>> {
-    let reader = BufReader::new(reader);
+    let reader = sniff_decompress(BufReader::new(reader))?;
     read_simple_column(arena, reader)
+}
+
+/// Peek at the first four bytes of `reader`. If they match a known
+/// compression magic number, wrap the reader in the appropriate streaming
+/// decoder. Otherwise return the reader unchanged.
+///
+/// Supported formats (feature-gated):
+/// - gzip (`1F 8B ..`) — via `flate2`, feature `gzip` (default on).
+/// - zstd (`28 B5 2F FD`) — via `ruzstd`, feature `zstd` (default on).
+///
+/// When both features are disabled this is a pass-through.
+fn sniff_decompress<'r, R: BufRead + 'r>(mut reader: R) -> Result<Box<dyn BufRead + 'r>> {
+    let magic: [u8; 4] = {
+        let buf = reader.fill_buf()?;
+        let mut m = [0u8; 4];
+        let n = buf.len().min(4);
+        m[..n].copy_from_slice(&buf[..n]);
+        m
+    };
+    match magic {
+        #[cfg(feature = "gzip")]
+        [0x1f, 0x8b, _, _] => {
+            let dec = flate2::read::GzDecoder::new(reader);
+            Ok(Box::new(BufReader::new(dec)))
+        }
+        #[cfg(feature = "zstd")]
+        [0x28, 0xb5, 0x2f, 0xfd] => {
+            let dec = ruzstd::decoding::StreamingDecoder::new(reader)
+                .map_err(|e| anyhow!("zstd decoder init failed: {e}"))?;
+            Ok(Box::new(BufReader::new(dec)))
+        }
+        _ => Ok(Box::new(reader)),
+    }
 }
 
 fn read_simple_column<'a, R: BufRead>(
@@ -296,7 +329,8 @@ pub mod host {
 
         pub fn load_file(&mut self, _rel_name: &str, path: &Path) -> Result<()> {
             let file = File::open(path)?;
-            let sc_data = read_simple_column(&self.arena, std::io::BufReader::new(file))?;
+            let reader = super::sniff_decompress(std::io::BufReader::new(file))?;
+            let sc_data = read_simple_column(&self.arena, reader)?;
 
             for (pred, facts) in sc_data.tables {
                 let id = hash_name(&pred);
@@ -399,5 +433,69 @@ pub mod host {
         fn pair_first(&mut self, _compound: HostVal) -> HostVal { HostVal(0) }
         fn pair_second(&mut self, _compound: HostVal) -> HostVal { HostVal(0) }
         fn debuglog(&mut self, _val: HostVal) {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A tiny but complete SimpleColumn document: one predicate `r` of arity
+    /// 1 with a single fact.
+    const SAMPLE: &str = "1\nr 1 1\n42\n";
+
+    fn assert_sample(data: &SimpleColumnData) {
+        let rows = data.tables.get("r").expect("relation r missing");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].len(), 1);
+        match rows[0][0] {
+            ast::BaseTerm::Const(ast::Const::Number(42)) => {}
+            other => panic!("unexpected term: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reads_plain_bytes() {
+        let arena = ast::Arena::new_with_global_interner();
+        let data = read_from_bytes(&arena, SAMPLE.as_bytes()).unwrap();
+        assert_sample(&data);
+    }
+
+    #[cfg(feature = "gzip")]
+    #[test]
+    fn reads_gzip_compressed() {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        use std::io::Write;
+
+        let mut enc = GzEncoder::new(Vec::new(), Compression::default());
+        enc.write_all(SAMPLE.as_bytes()).unwrap();
+        let compressed = enc.finish().unwrap();
+        assert_eq!(
+            &compressed[..2],
+            &[0x1f, 0x8b],
+            "encoder must produce a gzip magic header"
+        );
+
+        let arena = ast::Arena::new_with_global_interner();
+        let data = read_from_bytes(&arena, &compressed).unwrap();
+        assert_sample(&data);
+    }
+
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn reads_zstd_compressed() {
+        use ruzstd::encoding::{CompressionLevel, compress_to_vec};
+
+        let compressed = compress_to_vec(SAMPLE.as_bytes(), CompressionLevel::Uncompressed);
+        assert_eq!(
+            &compressed[..4],
+            &[0x28, 0xb5, 0x2f, 0xfd],
+            "encoder must produce a zstd magic header"
+        );
+
+        let arena = ast::Arena::new_with_global_interner();
+        let data = read_from_bytes(&arena, &compressed).unwrap();
+        assert_sample(&data);
     }
 }

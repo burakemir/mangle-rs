@@ -24,6 +24,12 @@ All notable changes in mangle/rust will be documented in this file.
   `Codegen::with_hash_join(true)` threads the flag through the internal
   planner. Match iteration reuses the existing `scan_next` + `get_col`
   imports.
+- **Compressed SimpleColumn input**: `mangle-simplecolumn` now
+  transparently decompresses gzip (`1F 8B`) and zstd (`28 B5 2F FD`)
+  streams at read time via magic-byte sniffing. Gated behind optional
+  crate features `gzip` (pulls `flate2`) and `zstd` (pulls `ruzstd`),
+  both on by default. Pure-Rust implementations — no C toolchain
+  required.
 
 ### ⚠️ Breaking Changes
 
