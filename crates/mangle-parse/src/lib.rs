@@ -386,10 +386,24 @@ where
                 Ok(alloc!(self, ast::Term::NegAtom(atom)))
             }
             t if base_term_start(t) => {
+                let leading_var: Option<String> = match &self.token {
+                    Token::Ident { name } if is_variable(name) => Some(name.clone()),
+                    _ => None,
+                };
                 let left_base_term = self.parse_base_term()?;
                 let op = self.token.clone();
                 match op {
                     Token::Eq | Token::BangEq | Token::Lt | Token::Le | Token::Gt | Token::Ge => self.next_token()?,
+                    Token::LParen if leading_var.is_some() => {
+                        let name = leading_var.unwrap();
+                        bail!(
+                            "{}: `{}` starts with an uppercase letter and is therefore a variable; \
+                             predicate names must start with a lowercase letter. Did you mean `{}`?",
+                            self.sc.get_error_context(),
+                            name,
+                            lowercase_first(&name)
+                        );
+                    }
                     _ => bail!("parse_terms: expected comparison operator, got {}", self.token),
                 };
                 let right_base_term = self.parse_base_term()?;
@@ -462,7 +476,19 @@ where
     // qualified_name ::= ident { `.` ident }
     pub fn parse_atom(&mut self) -> Result<&'arena ast::Atom<'arena>> {
         let mut name_buf = match &self.token {
-            Token::Ident { name } => name.clone(),
+            Token::Ident { name } => {
+                if is_variable(name) {
+                    bail!(
+                        "{}: `{}` is not a valid predicate name: predicate names must start \
+                         with a lowercase letter (identifiers starting with an uppercase letter \
+                         are variables). Did you mean `{}`?",
+                        self.sc.get_error_context(),
+                        name,
+                        lowercase_first(name)
+                    );
+                }
+                name.clone()
+            }
             _ => bail!("parse_atom: expected identifer got {}", self.token),
         };
 
@@ -820,6 +846,14 @@ where
 
 fn is_variable(name: &str) -> bool {
     name.chars().next().unwrap().is_ascii_uppercase()
+}
+
+fn lowercase_first(name: &str) -> String {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) => c.to_ascii_lowercase().to_string() + chars.as_str(),
+        None => String::new(),
+    }
 }
 
 fn is_fn(name: &str) -> bool {
@@ -1304,6 +1338,30 @@ mod test {
             _ => panic!("expected NegAtom, got {:?}", clause.premises[1]),
         }
         Ok(())
+    }
+
+    #[test]
+    fn test_uppercase_predicate_name_rejected_at_head() {
+        let arena = Arena::new_with_global_interner();
+        let mut p = make_parser(&arena, "Foo(1, 2).");
+        let err = p.parse_clause().unwrap_err().to_string();
+        assert!(
+            err.contains("`Foo` is not a valid predicate name")
+                && err.contains("Did you mean `foo`?"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_uppercase_predicate_name_rejected_in_body() {
+        let arena = Arena::new_with_global_interner();
+        let mut p = make_parser(&arena, "bar(X) :- Foo(X, Y).");
+        let err = p.parse_clause().unwrap_err().to_string();
+        assert!(
+            err.contains("`Foo` starts with an uppercase letter")
+                && err.contains("Did you mean `foo`?"),
+            "unexpected error: {err}"
+        );
     }
 
     // -----------------------------------------------------------------------
