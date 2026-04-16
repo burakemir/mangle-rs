@@ -122,6 +122,9 @@ Supported value types:
 - **Integers**: `42`, `-1`
 - **Floats**: `3.14`
 - **Strings**: `"hello"`
+- **Names**: `{"@name": "/alice"}` — Mangle names (the `/foo/bar` syntax) are
+  encoded as a tagged object so they are distinguishable from plain strings
+  on both input and output.
 
 ### Output
 

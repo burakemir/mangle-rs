@@ -77,6 +77,12 @@ pub fn run_bundled(facts_json: &str) -> Result<String, JsError> {
     run_mangle(PROGRAM, facts_json)
 }
 
+/// Tag key used to distinguish `Value::Name` from `Value::String` in JSON.
+///
+/// A Mangle name like `/foo/bar` is encoded as `{"@name": "/foo/bar"}`.
+/// Anything else (plain string, number, …) is encoded as its natural JSON form.
+const NAME_TAG: &str = "@name";
+
 fn json_to_value(v: &serde_json::Value) -> Value {
     match v {
         serde_json::Value::Number(n) => {
@@ -89,6 +95,10 @@ fn json_to_value(v: &serde_json::Value) -> Value {
             }
         }
         serde_json::Value::String(s) => Value::String(s.clone()),
+        serde_json::Value::Object(m) => match m.get(NAME_TAG) {
+            Some(serde_json::Value::String(s)) => Value::Name(s.clone()),
+            _ => Value::Null,
+        },
         _ => Value::Null,
     }
 }
@@ -100,7 +110,11 @@ fn value_to_json(v: &Value) -> serde_json::Value {
             .map(serde_json::Value::Number)
             .unwrap_or(serde_json::Value::Null),
         Value::String(s) => serde_json::Value::String(s.clone()),
-        Value::Name(s) => serde_json::Value::String(s.clone()),
+        Value::Name(s) => {
+            let mut m = serde_json::Map::new();
+            m.insert(NAME_TAG.to_string(), serde_json::Value::String(s.clone()));
+            serde_json::Value::Object(m)
+        }
         Value::Time(t) => serde_json::Value::Number((*t).into()),
         Value::Duration(d) => serde_json::Value::Number((*d).into()),
         Value::Compound(_, elems) => {
@@ -254,6 +268,50 @@ mod tests {
         let q = parsed["q"].as_array().unwrap();
         assert_eq!(q.len(), 1);
         assert_eq!(q[0][0].as_str().unwrap(), "hello");
+    }
+
+    #[test]
+    fn test_name_values_are_tagged() {
+        // Names must be distinguishable from strings in the JSON output. A
+        // plain string becomes "alice"; a name becomes {"@name": "/alice"}.
+        let result = run(
+            r#"role(/admin). role(/user). greeting("hello")."#,
+            "{}",
+        )
+        .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+
+        let roles = parsed["role"].as_array().unwrap();
+        let mut name_strs: Vec<String> = roles
+            .iter()
+            .map(|t| t[0]["@name"].as_str().unwrap().to_string())
+            .collect();
+        name_strs.sort();
+        assert_eq!(name_strs, vec!["/admin", "/user"]);
+
+        // Strings stay as bare JSON strings (no tag object).
+        let greeting = &parsed["greeting"].as_array().unwrap()[0][0];
+        assert_eq!(greeting.as_str().unwrap(), "hello");
+    }
+
+    #[test]
+    fn test_name_input_roundtrip() {
+        // A name supplied on the input side via the {"@name": ...} shape must
+        // be accepted and come back out tagged the same way.
+        let result = run(
+            "q(X) :- p(X).",
+            r#"{"p": [[{"@name": "/alice"}], [{"@name": "/bob"}]]}"#,
+        )
+        .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let mut names: Vec<String> = parsed["q"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t[0]["@name"].as_str().unwrap().to_string())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["/alice", "/bob"]);
     }
 
     #[test]
