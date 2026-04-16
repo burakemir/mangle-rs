@@ -262,6 +262,15 @@ where
         }
 
         if is_float {
+            if self.text.ends_with('.') {
+                return Err(anyhow!(
+                    "{}: numeric literal `{}` has no digits after decimal point; \
+                     if you meant an integer followed by a rule terminator, \
+                     add a space before the `.`",
+                    self.get_error_context(),
+                    self.text
+                ));
+            }
             let num = self.text.parse::<f64>()?;
             return Ok(Token::Float { decoded: num });
         }
@@ -701,6 +710,20 @@ mod test {
         ];
         assert!(want == got, "want {:?} got {:?}", want, got);
         Ok(())
+    }
+
+    #[test]
+    fn test_float_without_fractional_digits_rejected() {
+        let err = scan_all("1.").unwrap_err().to_string();
+        assert!(
+            err.contains("no digits after decimal point"),
+            "unexpected error: {err}"
+        );
+        let err = scan_all("3.14 2.").unwrap_err().to_string();
+        assert!(
+            err.contains("no digits after decimal point"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
