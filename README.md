@@ -91,6 +91,17 @@ Both execution modes support:
 *   **Arithmetic**: `fn:plus`, `fn:minus`, `fn:mult`, `fn:div`, `fn:sqrt`
 *   **Comparisons**: `=`, `!=`, `<`, `<=`, `>`, `>=` (including cross-type numeric ordering)
 
+## Try it in a browser
+
+Build the interpreter to WebAssembly and open a small playground page:
+
+```bash
+scripts/playground.sh            # serves on http://localhost:8000
+```
+
+Requires [`wasm-pack`](https://rustwasm.github.io/wasm-pack/installer/) and
+`python3`. See `crates/mangle-wasm/README.md` for the underlying JS API.
+
 ## Usage
 
 ### Running Tests

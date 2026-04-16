@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Mangle Playground</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      max-width: 960px;
+      margin: 2rem auto;
+      padding: 0 1rem;
+      line-height: 1.4;
+    }
+    h1 { margin-bottom: 0.2rem; }
+    .sub { color: #888; margin-top: 0; }
+    label { display: block; margin-top: 1rem; font-weight: 600; }
+    textarea {
+      width: 100%;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 13px;
+      padding: 0.5rem;
+      box-sizing: border-box;
+      border: 1px solid #888;
+      border-radius: 4px;
+      background: canvas;
+      color: canvastext;
+    }
+    .controls { margin-top: 1rem; display: flex; gap: 0.5rem; align-items: center; }
+    button {
+      padding: 0.5rem 1rem;
+      font-size: 14px;
+      cursor: pointer;
+      border: 1px solid #888;
+      border-radius: 4px;
+      background: buttonface;
+      color: buttontext;
+    }
+    button:disabled { opacity: 0.5; cursor: wait; }
+    select { padding: 0.4rem; font-size: 14px; }
+    pre#output, details.help pre {
+      background: rgba(127, 127, 127, 0.1);
+      padding: 0.75rem;
+      border-radius: 4px;
+      overflow-x: auto;
+      white-space: pre-wrap;
+    }
+    pre#output { min-height: 3rem; }
+    details.help { margin-top: 0.25rem; font-size: 13px; }
+    details.help summary { cursor: pointer; color: #06c; }
+    details.help table { border-collapse: collapse; margin: 0.5rem 0; }
+    details.help td, details.help th {
+      border: 1px solid #888;
+      padding: 0.25rem 0.5rem;
+      text-align: left;
+    }
+    details.help code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .error { color: #c33; }
+    .meta { color: #888; font-size: 12px; margin-top: 0.5rem; }
+  </style>
+</head>
+<body>
+  <h1>Mangle Playground</h1>
+  <p class="sub">A Datalog-inspired deductive database language, running in your browser via WebAssembly.</p>
+
+  <label for="example">Examples</label>
+  <select id="example">
+    <option value="reachability">Graph reachability</option>
+    <option value="ancestors">Ancestors (family tree)</option>
+    <option value="external">External facts (JSON input)</option>
+    <option value="strings">String filter</option>
+    <option value="names">Names vs. strings</option>
+  </select>
+
+  <label for="source">Mangle program</label>
+  <textarea id="source" rows="10" spellcheck="false"></textarea>
+
+  <label for="facts">Initial facts (JSON, optional)</label>
+  <textarea id="facts" rows="4" spellcheck="false">{}</textarea>
+  <details class="help">
+    <summary>How is a relation represented in JSON?</summary>
+    <p>
+      An object whose keys are relation names and whose values are arrays of
+      tuples (each tuple is an array of column values):
+    </p>
+    <pre>{
+  "edge":   [[1, 2], [2, 3], [3, 4]],
+  "person": [["alice", 30], [{"@name": "/bob"}, 42]]
+}</pre>
+    <p>Column values use these JSON shapes:</p>
+    <table>
+      <tr><th>Mangle type</th><th>JSON</th><th>Example</th></tr>
+      <tr><td>integer</td><td>number</td><td><code>42</code></td></tr>
+      <tr><td>float</td><td>number</td><td><code>3.14</code></td></tr>
+      <tr><td>string</td><td>string</td><td><code>"hello"</code></td></tr>
+      <tr><td>name</td><td>tagged object</td><td><code>{"@name": "/alice"}</code></td></tr>
+    </table>
+    <p>
+      Names (Mangle's <code>/foo/bar</code> hierarchical identifiers) are
+      tagged so they round-trip distinct from plain strings.
+    </p>
+    <p>
+      <strong>Share links:</strong> the <em>Copy share link</em> button
+      encodes the current program and facts into the URL as
+      <code>?src=&amp;facts=</code> query parameters. Opening that URL
+      restores both fields.
+    </p>
+  </details>
+
+  <div class="controls">
+    <button id="run" disabled>Loading WASM…</button>
+    <button id="share" type="button" title="Copy a link that reproduces this program and facts">Copy share link</button>
+    <span id="status" class="meta"></span>
+  </div>
+
+  <label>Result
+    <span class="meta" style="font-weight: normal; margin-left: 0.5rem;">
+      <label><input type="radio" name="fmt" value="mangle" checked> Mangle</label>
+      <label><input type="radio" name="fmt" value="json"> JSON</label>
+    </span>
+  </label>
+  <pre id="output"></pre>
+
+  <script type="module">
+    import init, { run_mangle } from './pkg/mangle_wasm.js';
+
+    const examples = {
+      reachability: {
+        source: `edge(1, 2).
+edge(2, 3).
+edge(3, 4).
+edge(4, 5).
+
+reachable(Y) :- edge(1, Y).
+reachable(Z) :- reachable(Y), edge(Y, Z).`,
+        facts: '{}',
+      },
+      ancestors: {
+        source: `parent("alice", "bob").
+parent("bob", "carol").
+parent("carol", "dave").
+
+ancestor(X, Y) :- parent(X, Y).
+ancestor(X, Z) :- parent(X, Y), ancestor(Y, Z).`,
+        facts: '{}',
+      },
+      external: {
+        source: `reachable(Y) :- edge(1, Y).
+reachable(Z) :- reachable(Y), edge(Y, Z).`,
+        facts: JSON.stringify({ edge: [[1, 2], [2, 3], [3, 4], [4, 5]] }, null, 2),
+      },
+      strings: {
+        source: `greeting(X) :- word(X), X = "hello".`,
+        facts: JSON.stringify({ word: [["hello"], ["world"], ["hi"]] }, null, 2),
+      },
+      names: {
+        source: `role(/admin, "Admin").
+role(/user, "Regular user").
+
+% Names (/admin, /user) and strings ("Admin") look similar in JSON but
+% are distinct Mangle values. Toggle JSON / Mangle below to see the
+% difference — names round-trip as {"@name": "/..."}.
+name_of(N) :- role(N, _).
+label_of(L) :- role(_, L).`,
+        facts: '{}',
+      },
+    };
+
+    const sourceEl = document.getElementById('source');
+    const factsEl = document.getElementById('facts');
+    const outputEl = document.getElementById('output');
+    const runBtn = document.getElementById('run');
+    const statusEl = document.getElementById('status');
+    const exampleEl = document.getElementById('example');
+
+    function loadExample(key) {
+      const ex = examples[key];
+      sourceEl.value = ex.source;
+      factsEl.value = ex.facts;
+    }
+    exampleEl.addEventListener('change', () => loadExample(exampleEl.value));
+
+    // URL params override the default example. ?src= sets the program,
+    // ?facts= sets the initial facts JSON.
+    const params = new URLSearchParams(window.location.search);
+    if (params.has('src') || params.has('facts')) {
+      sourceEl.value = params.get('src') ?? '';
+      factsEl.value = params.get('facts') ?? '{}';
+    } else {
+      loadExample(exampleEl.value);
+    }
+
+    document.getElementById('share').addEventListener('click', async () => {
+      const q = new URLSearchParams();
+      q.set('src', sourceEl.value);
+      const facts = factsEl.value.trim();
+      if (facts && facts !== '{}') q.set('facts', facts);
+      const url = window.location.origin + window.location.pathname + '?' + q.toString();
+      try {
+        await navigator.clipboard.writeText(url);
+        statusEl.textContent = 'Link copied';
+      } catch {
+        // Clipboard may be blocked (e.g. insecure origin). Fall back to
+        // updating the address bar so the user can copy it manually.
+        window.history.replaceState(null, '', '?' + q.toString());
+        statusEl.textContent = 'Link in address bar';
+      }
+    });
+
+    let lastResult = null;
+
+    function currentFormat() {
+      return document.querySelector('input[name="fmt"]:checked').value;
+    }
+
+    // Render a value inside a tuple in Mangle fact syntax.
+    //   number  -> bare
+    //   string  -> JSON-quoted
+    //   {"@name": "/foo"} -> /foo (bare, Mangle name syntax)
+    //   array   -> [a, b, c] (compound: list/pair/struct/…)
+    function renderValue(v) {
+      if (v === null) return '/nil';
+      if (typeof v === 'number') return String(v);
+      if (typeof v === 'string') return JSON.stringify(v);
+      if (Array.isArray(v)) return '[' + v.map(renderValue).join(', ') + ']';
+      if (typeof v === 'object' && typeof v['@name'] === 'string') return v['@name'];
+      return JSON.stringify(v);
+    }
+
+    function renderMangle(result) {
+      const lines = [];
+      const relations = Object.keys(result).sort();
+      for (const rel of relations) {
+        const tuples = result[rel] || [];
+        if (tuples.length === 0) {
+          lines.push(`% ${rel}: (empty)`);
+          continue;
+        }
+        lines.push(`% ${rel}: ${tuples.length} fact${tuples.length === 1 ? '' : 's'}`);
+        for (const row of tuples) {
+          lines.push(`${rel}(${row.map(renderValue).join(', ')}).`);
+        }
+        lines.push('');
+      }
+      return lines.join('\n').trimEnd();
+    }
+
+    function renderOutput() {
+      if (lastResult === null) { outputEl.textContent = ''; return; }
+      if (currentFormat() === 'json') {
+        outputEl.textContent = JSON.stringify(lastResult, null, 2);
+      } else {
+        outputEl.textContent = renderMangle(lastResult);
+      }
+    }
+
+    function run() {
+      outputEl.classList.remove('error');
+      outputEl.textContent = '';
+      statusEl.textContent = 'Running…';
+      const t0 = performance.now();
+      try {
+        const result = run_mangle(sourceEl.value, factsEl.value || '{}');
+        const elapsed = (performance.now() - t0).toFixed(1);
+        lastResult = JSON.parse(result);
+        renderOutput();
+        statusEl.textContent = `Done in ${elapsed} ms`;
+      } catch (e) {
+        lastResult = null;
+        outputEl.classList.add('error');
+        outputEl.textContent = String(e.message || e);
+        statusEl.textContent = 'Error';
+      }
+    }
+
+    for (const r of document.querySelectorAll('input[name="fmt"]')) {
+      r.addEventListener('change', renderOutput);
+    }
+
+    runBtn.addEventListener('click', run);
+    sourceEl.addEventListener('keydown', (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') run();
+    });
+    factsEl.addEventListener('keydown', (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') run();
+    });
+
+    try {
+      await init();
+      runBtn.disabled = false;
+      runBtn.textContent = 'Run (⌘/Ctrl + Enter)';
+      statusEl.textContent = 'Ready';
+    } catch (e) {
+      runBtn.textContent = 'Failed to load';
+      outputEl.classList.add('error');
+      outputEl.textContent =
+        'Failed to load mangle_wasm.js. Did you run scripts/playground.sh to build the wasm package?\n\n' +
+        String(e);
+    }
+  </script>
+</body>
+</html>
