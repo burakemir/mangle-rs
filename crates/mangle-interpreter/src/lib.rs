@@ -1059,6 +1059,24 @@ impl<'a> Interpreter<'a> {
                     .map(Value::Float)
                     .ok_or_else(|| anyhow!("fn:float:min on empty group"))
             }
+            "fn:collect" | "fn:collect_distinct" => {
+                let arg = agg
+                    .args
+                    .first()
+                    .ok_or_else(|| anyhow!("{fn_name}: requires 1 argument"))?;
+                let mut out: Vec<Value> = Vec::with_capacity(group.len());
+                for tuple in group {
+                    for (i, var) in vars.iter().enumerate() {
+                        env.vars.insert(*var, tuple[i].clone());
+                    }
+                    let val = self.eval_operand(arg, env)?;
+                    if fn_name == "fn:collect_distinct" && out.contains(&val) {
+                        continue;
+                    }
+                    out.push(val);
+                }
+                Ok(Value::Compound(CompoundKind::List, out))
+            }
             _ => Err(anyhow!("Unknown aggregation function: {fn_name}")),
         }
     }
