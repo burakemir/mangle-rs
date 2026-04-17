@@ -72,6 +72,7 @@
     <option value="external">External facts (JSON input)</option>
     <option value="strings">String filter</option>
     <option value="names">Names vs. strings</option>
+    <option value="dataflow">Live-variable analysis</option>
   </select>
 
   <label for="source">Mangle program</label>
@@ -128,40 +129,81 @@
 
     const examples = {
       reachability: {
-        source: `edge(1, 2).
+        source: `# Transitive closure over a directed graph.
+# Facts below describe a 4-edge chain 1 → 2 → 3 → 4 → 5.
+edge(1, 2).
 edge(2, 3).
 edge(3, 4).
 edge(4, 5).
 
+# Base case: any direct neighbour of node 1 is reachable.
 reachable(Y) :- edge(1, Y).
+# Recursive case: anything reachable from a reachable node is also reachable.
 reachable(Z) :- reachable(Y), edge(Y, Z).`,
         facts: '{}',
       },
       ancestors: {
-        source: `parent("alice", "bob").
+        source: `# Classic recursive ancestor relation over a tiny family tree.
+parent("alice", "bob").
 parent("bob", "carol").
 parent("carol", "dave").
 
+# A parent is an ancestor.
 ancestor(X, Y) :- parent(X, Y).
+# An ancestor's parent is also an ancestor — recursion builds the closure.
 ancestor(X, Z) :- parent(X, Y), ancestor(Y, Z).`,
         facts: '{}',
       },
       external: {
-        source: `reachable(Y) :- edge(1, Y).
+        source: `# Same reachability rules as the first example, but the edge facts
+# come from the JSON "Initial facts" input below rather than being
+# written inline. This is how you'd feed data from your own app.
+reachable(Y) :- edge(1, Y).
 reachable(Z) :- reachable(Y), edge(Y, Z).`,
         facts: JSON.stringify({ edge: [[1, 2], [2, 3], [3, 4], [4, 5]] }, null, 2),
       },
       strings: {
-        source: `greeting(X) :- word(X), X = "hello".`,
+        source: `# Filter a relation of string-valued facts. Strings use double quotes;
+# the = operator here is pattern equality, not assignment.
+greeting(X) :- word(X), X = "hello".`,
         facts: JSON.stringify({ word: [["hello"], ["world"], ["hi"]] }, null, 2),
+      },
+      dataflow: {
+        source: `# Live-variable analysis — a classic dataflow problem from compiler theory.
+# A variable is "live" at a program point if its current value may be
+# used later. Adapted from mangle-go/examples/dataflow_liveness.mg.
+
+# Control flow graph. Each number is a program point.
+edge(1, 2). edge(2, 3). edge(3, 4). edge(4, 5).
+
+# The program being analysed (each line is one program point):
+#   1: let mut x = 1;       def x
+#   2: let y = &x;          def y, use x
+#   3: *x = 2;              def x
+#   4: print(y);            use y
+#   5: (exit)
+
+def(1, "x").
+def(2, "y"). use(2, "x").
+def(3, "x").
+use(4, "y").
+
+# A variable is live at a point if it is used there...
+live(Point, Var) :- use(Point, Var).
+
+# ...or if it is live at a successor and not overwritten here.
+# Negation (!def) expresses "not definitely assigned at this point".
+live(Point, Var) :-
+  edge(Point, Succ), live(Succ, Var), !def(Point, Var).`,
+        facts: '{}',
       },
       names: {
         source: `role(/admin, "Admin").
 role(/user, "Regular user").
 
-% Names (/admin, /user) and strings ("Admin") look similar in JSON but
-% are distinct Mangle values. Toggle JSON / Mangle below to see the
-% difference — names round-trip as {"@name": "/..."}.
+# Names (/admin, /user) and strings ("Admin") look similar in JSON but
+# are distinct Mangle values. Toggle JSON / Mangle below to see the
+# difference — names round-trip as {"@name": "/..."}.
 name_of(N) :- role(N, _).
 label_of(L) :- role(_, L).`,
         facts: '{}',
@@ -235,10 +277,10 @@ label_of(L) :- role(_, L).`,
       for (const rel of relations) {
         const tuples = result[rel] || [];
         if (tuples.length === 0) {
-          lines.push(`% ${rel}: (empty)`);
+          lines.push(`# ${rel}: (empty)`);
           continue;
         }
-        lines.push(`% ${rel}: ${tuples.length} fact${tuples.length === 1 ? '' : 's'}`);
+        lines.push(`# ${rel}: ${tuples.length} fact${tuples.length === 1 ? '' : 's'}`);
         for (const row of tuples) {
           lines.push(`${rel}(${row.map(renderValue).join(', ')}).`);
         }
