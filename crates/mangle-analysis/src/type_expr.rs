@@ -959,8 +959,8 @@ fn tagged_union_set_conforms_right(
 fn expanded_variant_conforms(
     ir: &Ir,
     ctx: &TypeContext,
-    _tag_field: InstId,
-    _tag: InstId,
+    tag_field: InstId,
+    tag: InstId,
     variant_struct: InstId,
     right: InstId,
 ) -> bool {
@@ -978,11 +978,26 @@ fn expanded_variant_conforms(
         // The variant struct + tag field must cover right's fields.
         return set_conforms(ir, ctx, variant_struct, right);
     }
+    // Both sides tagged unions: left's variant must match some right variant.
+    // A right variant matches when it uses the same tag field, the tag value
+    // is identical, and the variant struct on the right accepts ours.
+    if is_tagged_union_type(ir, right) {
+        if let Some((r_tags, r_structs)) = tagged_union_variants(ir, right) {
+            let r_tag_field = tagged_union_tag_field(ir, right).unwrap();
+            if !ir_eq(ir, tag_field, r_tag_field) {
+                return false;
+            }
+            return r_tags.iter().zip(r_structs.iter()).any(|(rt, rs)| {
+                ir_eq(ir, tag, *rt) && set_conforms(ir, ctx, variant_struct, *rs)
+            });
+        }
+        return false;
+    }
     // If right is a union, check that the expanded variant conforms to some alt.
     if let Some(alts) = union_type_args(ir, right) {
         let alts = alts.to_vec();
         return alts.iter().any(|alt| {
-            expanded_variant_conforms(ir, ctx, _tag_field, _tag, variant_struct, *alt)
+            expanded_variant_conforms(ir, ctx, tag_field, tag, variant_struct, *alt)
         });
     }
     false
@@ -1213,12 +1228,9 @@ pub fn has_type(ir: &Ir, type_expr: InstId, value: InstId) -> bool {
             if args.len() != 1 {
                 return false;
             }
-            match ir.get(value) {
-                Inst::List(elems) => {
-                    let elems = elems.clone();
-                    elems.iter().all(|e| has_type(ir, args[0], *e))
-                }
-                _ => false,
+            match list_value_elems(ir, value) {
+                Some(elems) => elems.iter().all(|e| has_type(ir, args[0], *e)),
+                None => false,
             }
         }
 
@@ -1226,14 +1238,12 @@ pub fn has_type(ir: &Ir, type_expr: InstId, value: InstId) -> bool {
             if args.len() != 2 {
                 return false;
             }
-            match ir.get(value) {
-                Inst::Map { keys, values } => {
-                    let keys = keys.clone();
-                    let values = values.clone();
+            match map_value_entries(ir, value) {
+                Some((keys, values)) => {
                     keys.iter().all(|k| has_type(ir, args[0], *k))
                         && values.iter().all(|v| has_type(ir, args[1], *v))
                 }
-                _ => false,
+                None => false,
             }
         }
 
@@ -1241,9 +1251,8 @@ pub fn has_type(ir: &Ir, type_expr: InstId, value: InstId) -> bool {
             if args.len() != 2 {
                 return false;
             }
-            match ir.get(value) {
-                Inst::List(elems) if elems.len() == 2 => {
-                    let elems = elems.clone();
+            match list_value_elems(ir, value) {
+                Some(elems) if elems.len() == 2 => {
                     has_type(ir, args[0], elems[0]) && has_type(ir, args[1], elems[1])
                 }
                 _ => false,
@@ -1269,14 +1278,80 @@ pub fn has_type(ir: &Ir, type_expr: InstId, value: InstId) -> bool {
     }
 }
 
+/// Extracts `(field_name_ids, field_value_ids)` from a struct value.
+///
+/// Struct values have two equivalent IR representations:
+/// 1. `Inst::Struct { fields, values }` — parallel vectors (brace syntax
+///    lowered as a compile-time constant).
+/// 2. `Inst::ApplyFn { function: "fn:struct", args: [n1, v1, n2, v2, ...] }`
+///    — interleaved (brace or paren syntax lowered through the generic
+///    ApplyFn path). The field names are `Inst::Name`.
+///
+/// Returns the element list for a list value in either representation:
+/// `Inst::List(..)` (from a `Const::List`) or `Inst::ApplyFn("fn:list", ..)`.
+fn list_value_elems(ir: &Ir, value: InstId) -> Option<Vec<InstId>> {
+    match ir.get(value) {
+        Inst::List(elems) => Some(elems.clone()),
+        Inst::ApplyFn { function, args } if ir.resolve_name(*function) == "fn:list" => {
+            Some(args.clone())
+        }
+        _ => None,
+    }
+}
+
+/// Returns `(keys, values)` for a map value in either representation:
+/// `Inst::Map { keys, values }` or `Inst::ApplyFn("fn:map", [k1, v1, k2, v2, ..])`.
+fn map_value_entries(ir: &Ir, value: InstId) -> Option<(Vec<InstId>, Vec<InstId>)> {
+    match ir.get(value) {
+        Inst::Map { keys, values } => Some((keys.clone(), values.clone())),
+        Inst::ApplyFn { function, args } if ir.resolve_name(*function) == "fn:map" => {
+            let args = args.clone();
+            if args.len() % 2 != 0 {
+                return None;
+            }
+            let mut keys = Vec::with_capacity(args.len() / 2);
+            let mut values = Vec::with_capacity(args.len() / 2);
+            for pair in args.chunks_exact(2) {
+                keys.push(pair[0]);
+                values.push(pair[1]);
+            }
+            Some((keys, values))
+        }
+        _ => None,
+    }
+}
+
+/// Returns `None` if the value is neither shape.
+fn struct_value_fields(ir: &Ir, value: InstId) -> Option<(Vec<NameId>, Vec<InstId>)> {
+    match ir.get(value) {
+        Inst::Struct { fields, values } => Some((fields.clone(), values.clone())),
+        Inst::ApplyFn { function, args } if ir.resolve_name(*function) == "fn:struct" => {
+            let args = args.clone();
+            if args.len() % 2 != 0 {
+                return None;
+            }
+            let mut fields = Vec::with_capacity(args.len() / 2);
+            let mut values = Vec::with_capacity(args.len() / 2);
+            for pair in args.chunks_exact(2) {
+                match ir.get(pair[0]) {
+                    Inst::Name(n) => fields.push(*n),
+                    _ => return None,
+                }
+                values.push(pair[1]);
+            }
+            Some((fields, values))
+        }
+        _ => None,
+    }
+}
+
 /// Checks if a value matches a struct type expression.
 fn has_type_struct(ir: &Ir, type_id: InstId, value: InstId) -> bool {
     let type_fields = struct_type_fields(ir, type_id);
-    let value_struct = match ir.get(value) {
-        Inst::Struct { fields, values } => Some((fields.clone(), values.clone())),
-        _ => return false,
+    let (vfields, vvalues) = match struct_value_fields(ir, value) {
+        Some(pair) => pair,
+        None => return false,
     };
-    let (vfields, vvalues) = value_struct.unwrap();
 
     // Build map of value fields.
     let value_map: FxHashMap<String, InstId> = vfields
@@ -1326,9 +1401,9 @@ fn has_type_tagged_variant(
     variant_struct: InstId,
     value: InstId,
 ) -> bool {
-    let (vfields, vvalues) = match ir.get(value) {
-        Inst::Struct { fields, values } => (fields.clone(), values.clone()),
-        _ => return false,
+    let (vfields, vvalues) = match struct_value_fields(ir, value) {
+        Some(pair) => pair,
+        None => return false,
     };
 
     // Check that the tag field has the right value.
@@ -1910,6 +1985,60 @@ mod tests {
             values: vec![bad_val],
         });
         assert!(!has_type(&ir, tu, val_bad));
+    }
+
+    #[test]
+    fn has_type_struct_accepts_applyfn_shape() {
+        // `fn:struct(/x, 42, /y, "hi")` (ApplyFn form — what the parser emits
+        // for `{/x: 42, /y: "hi"}`) must satisfy .Struct</x: /number, /y: /string>.
+        let mut ir = Ir::new();
+        let x = make_name(&mut ir, "/x");
+        let y = make_name(&mut ir, "/y");
+        let num = make_name(&mut ir, "/number");
+        let str_ = make_name(&mut ir, "/string");
+        let stype = make_apply(&mut ir, FN_STRUCT, vec![x, num, y, str_]);
+
+        let x_v = make_name(&mut ir, "/x");
+        let y_v = make_name(&mut ir, "/y");
+        let n = ir.add_inst(Inst::Number(42));
+        let sid = ir.intern_string("hi");
+        let s = ir.add_inst(Inst::String(sid));
+        let value = make_apply(&mut ir, "fn:struct", vec![x_v, n, y_v, s]);
+        assert!(has_type(&ir, stype, value));
+    }
+
+    #[test]
+    fn has_type_list_accepts_applyfn_shape() {
+        // `fn:list(1, 2, 3)` (ApplyFn form) must satisfy fn:List(/number).
+        let mut ir = Ir::new();
+        let num = make_name(&mut ir, "/number");
+        let list_num = make_apply(&mut ir, FN_LIST, vec![num]);
+        let n1 = ir.add_inst(Inst::Number(1));
+        let n2 = ir.add_inst(Inst::Number(2));
+        let n3 = ir.add_inst(Inst::Number(3));
+        let value = make_apply(&mut ir, "fn:list", vec![n1, n2, n3]);
+        assert!(has_type(&ir, list_num, value));
+    }
+
+    #[test]
+    fn conforms_tagged_union_identity() {
+        // Two structurally-identical TaggedUnion types (different IR ids,
+        // same tag field + variants) must conform to each other.
+        let mut ir = Ir::new();
+        let ctx = TypeContext::default();
+        let build = |ir: &mut Ir| {
+            let t = make_name(ir, "/type");
+            let c = make_name(ir, "/create");
+            let name_f = make_name(ir, "/name");
+            let str_ = make_name(ir, "/string");
+            let create_s = make_apply(ir, FN_STRUCT, vec![name_f, str_]);
+            let p = make_name(ir, "/ping");
+            let ping_s = make_apply(ir, FN_STRUCT, vec![]);
+            make_apply(ir, FN_TAGGED_UNION, vec![t, c, create_s, p, ping_s])
+        };
+        let tu1 = build(&mut ir);
+        let tu2 = build(&mut ir);
+        assert!(set_conforms(&ir, &ctx, tu1, tu2));
     }
 
     // -- Expansion tests --
