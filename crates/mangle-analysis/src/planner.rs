@@ -566,8 +566,28 @@ impl<'a> Planner<'a> {
                 })
             }
             Inst::Eq(l, r) => {
-                let body = self.plan_join_sequence(premises, bound_vars, continuation)?;
-                self.wrap_eq_check(l, r, body)
+                // `X = expr` where X is a fresh variable is a let-binding,
+                // matching mangle-go and the `|> let X = expr` transform form.
+                // If both sides are already bound, fall back to a runtime
+                // equality check.
+                let binding = self
+                    .eq_as_binding(l, r, bound_vars)
+                    .or_else(|| self.eq_as_binding(r, l, bound_vars));
+                if let Some((var, expr_inst)) = binding {
+                    self.inst_to_expr(expr_inst, |planner, expr| {
+                        bound_vars.insert(var);
+                        let body =
+                            planner.plan_join_sequence(premises, bound_vars, continuation)?;
+                        Ok(Op::Let {
+                            var,
+                            expr,
+                            body: Box::new(body),
+                        })
+                    })
+                } else {
+                    let body = self.plan_join_sequence(premises, bound_vars, continuation)?;
+                    self.wrap_eq_check(l, r, body)
+                }
             }
             Inst::Ineq(l, r) => {
                 let body = self.plan_join_sequence(premises, bound_vars, continuation)?;
@@ -658,6 +678,22 @@ impl<'a> Planner<'a> {
             }
         }
         Ok(body)
+    }
+
+    /// If `lhs` is a fresh variable (not yet in `bound_vars`), returns the
+    /// variable name and the expression to bind it to. Otherwise `None`.
+    fn eq_as_binding(
+        &self,
+        lhs: InstId,
+        rhs: InstId,
+        bound_vars: &FxHashSet<NameId>,
+    ) -> Option<(NameId, InstId)> {
+        if let Inst::Var(v) = self.ir.get(lhs) {
+            if !bound_vars.contains(v) {
+                return Some((*v, rhs));
+            }
+        }
+        None
     }
 
     fn wrap_eq_check(&mut self, l: InstId, r: InstId, body: Op) -> Result<Op> {

@@ -2188,6 +2188,49 @@ mod tests {
         Ok(())
     }
 
+    /// `X = expr` in a rule body with a fresh LHS variable is a let-binding,
+    /// equivalent to `|> let X = expr`. Matches mangle-go semantics.
+    #[test]
+    fn test_body_eq_as_let_binding() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            p(1). p(2). p(3).
+            q(Y) :- p(X), Y = fn:plus(X, 10).
+        "#;
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+        let mut got: Vec<i64> = interpreter
+            .store()
+            .scan("q")?
+            .map(|f| match &f[0] { Value::Number(n) => *n, v => panic!("{v:?}") })
+            .collect();
+        got.sort();
+        assert_eq!(got, vec![11, 12, 13]);
+        Ok(())
+    }
+
+    /// When both sides of `=` are bound, it remains a runtime equality check
+    /// (non-matching rows are filtered out) rather than becoming a binding.
+    #[test]
+    fn test_body_eq_still_filters_when_bound() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            p(1). p(2). p(3).
+            only_two(X) :- p(X), X = 2.
+        "#;
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+        let got: Vec<i64> = interpreter
+            .store()
+            .scan("only_two")?
+            .map(|f| match &f[0] { Value::Number(n) => *n, v => panic!("{v:?}") })
+            .collect();
+        assert_eq!(got, vec![2]);
+        Ok(())
+    }
+
     /// Test: negation with temporal still works
     #[test]
     fn test_temporal_backward_compat_negation() -> Result<()> {
