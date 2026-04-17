@@ -456,7 +456,7 @@ where
         Ok(())
     }
 
-    // `atoms ::= [ atom {`,` atom } ]
+    // `atoms ::= [ atom {`,` atom } [`,`] ]
     fn parse_atoms(&mut self, atoms: &mut Vec<&'arena ast::Atom<'arena>>) -> Result<()> {
         if let Token::Ident { .. } = self.token {
             atoms.push(self.parse_atom()?);
@@ -465,8 +465,10 @@ where
                     break;
                 }
                 self.next_token()?;
-                let atom = self.parse_atom()?;
-                atoms.push(atom);
+                if !matches!(self.token, Token::Ident { .. }) {
+                    break; // trailing comma before `]`
+                }
+                atoms.push(self.parse_atom()?);
             }
         }
         Ok(())
@@ -709,9 +711,15 @@ where
         }
         let first = self.parse_base_term()?;
         let expr = if Token::Colon != self.token {
-            self.expect(Token::Comma)?;
             let mut items = vec![first];
-            self.parse_base_terms(&mut items)?;
+            if Token::Comma == self.token {
+                self.next_token()?;
+                if Token::RBracket != self.token {
+                    self.parse_base_terms(&mut items)?;
+                }
+            }
+            // Otherwise it's a single-element list `[x]`; fall through to
+            // the closing `]` check below.
             ast::BaseTerm::ApplyFn(fn_list_sym(self.arena), alloc_slice!(self, &items))
         } else {
             self.expect(Token::Colon)?; // is a map
@@ -1173,6 +1181,27 @@ mod test {
             ),
         ];
         verify_that!(got_base_terms, eq(&expected))
+    }
+
+    #[test]
+    fn test_single_element_list() -> googletest::Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let mut p = make_parser(&arena, "[42]");
+        let got = p.parse_base_term().unwrap();
+        let expected = arena.apply_fn(
+            fn_list_sym(&arena),
+            &[arena.const_(ast::Const::Number(42))],
+        );
+        verify_that!(got, eq(expected))
+    }
+
+    #[test]
+    fn test_descr_trailing_comma() -> googletest::Result<()> {
+        // `Decl foo descr [ bar(), ]` — trailing comma after an atom list.
+        let arena = Arena::new_with_global_interner();
+        let mut p = make_parser(&arena, "Decl foo(X) descr [ bar(), ].");
+        p.parse_decl().expect("descr list with trailing comma parses");
+        Ok(())
     }
 
     #[test]
