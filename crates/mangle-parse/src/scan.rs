@@ -136,6 +136,7 @@ where
             Some('⟸') => Ok(Token::LongLeftDoubleArrow),
             Some(delim @ '\'') => self.string(delim, false),
             Some(delim @ '"') => self.string(delim, false),
+            Some('`') => self.long_string(),
             Some(first @ '0'..='9') => self.numeric(first),
             Some('-') => match self.peek()? {
                 Some('0'..='9' | '.') => self.numeric('-'),
@@ -204,6 +205,22 @@ where
         }
         Ok(Token::Name {
             name: self.text.to_string(),
+        })
+    }
+
+    /// Backtick-delimited multi-line string literal. Contents are taken
+    /// verbatim: backslashes, quotes, and newlines are all preserved as-is.
+    fn long_string(&mut self) -> Result<Token> {
+        self.text.clear();
+        loop {
+            match self.next_char()? {
+                Some('`') => break,
+                Some(c) => self.text.push(c),
+                None => anyhow::bail!("unterminated backtick string literal"),
+            }
+        }
+        Ok(Token::String {
+            decoded: self.text.clone(),
         })
     }
 
@@ -640,6 +657,18 @@ mod test {
             Use,
         ];
         assert!(want == got, "want {:?} got {:?}", want, got);
+        Ok(())
+    }
+
+    #[test]
+    fn test_backtick_long_string() -> Result<()> {
+        // Backtick-delimited strings preserve newlines and escape characters
+        // verbatim — they are Mangle's raw multi-line string literal.
+        let got = scan_all("`line one\nline \"two\"\nline three`")?;
+        let want = vec![Token::String {
+            decoded: "line one\nline \"two\"\nline three".to_string(),
+        }];
+        assert_eq!(want, got);
         Ok(())
     }
 
