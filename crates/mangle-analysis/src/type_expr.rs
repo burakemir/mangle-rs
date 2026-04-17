@@ -48,7 +48,7 @@ pub const FN_EMPTY_TYPE: &str = "fn:EmptyType";
 // ---------------------------------------------------------------------------
 
 /// Returns the function name of an `ApplyFn` instruction, or `None`.
-fn apply_fn_name<'a>(ir: &'a Ir, id: InstId) -> Option<&'a str> {
+pub fn apply_fn_name<'a>(ir: &'a Ir, id: InstId) -> Option<&'a str> {
     if let Inst::ApplyFn { function, .. } = ir.get(id) {
         Some(ir.resolve_name(*function))
     } else {
@@ -57,7 +57,7 @@ fn apply_fn_name<'a>(ir: &'a Ir, id: InstId) -> Option<&'a str> {
 }
 
 /// Returns the args of an `ApplyFn` instruction, or `None`.
-fn apply_fn_args(ir: &Ir, id: InstId) -> Option<&[InstId]> {
+pub fn apply_fn_args(ir: &Ir, id: InstId) -> Option<&[InstId]> {
     if let Inst::ApplyFn { args, .. } = ir.get(id) {
         Some(args.as_slice())
     } else {

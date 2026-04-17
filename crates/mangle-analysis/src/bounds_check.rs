@@ -968,6 +968,40 @@ impl<'a> BoundsChecker<'a> {
             "fn:count" | "fn:sum" | "fn:max" | "fn:min" => {
                 type_expr::find_or_create_name(self.ir, "/number")
             }
+            "fn:list:len" | "fn:len" | "fn:map:len" | "fn:struct:len" => {
+                type_expr::find_or_create_name(self.ir, "/number")
+            }
+            "fn:sqrt" => type_expr::find_or_create_name(self.ir, "/float64"),
+            "fn:list:get" if args.len() == 2 => {
+                // Element type of the list argument, or /any if not a list.
+                let list_type = self.bound_of_arg(args[0], var_ranges);
+                match type_expr::apply_fn_args(self.ir, list_type) {
+                    Some(inner) if type_expr::apply_fn_name(self.ir, list_type)
+                        == Some(type_expr::FN_LIST)
+                        && inner.len() == 1 =>
+                    {
+                        inner[0]
+                    }
+                    _ => type_expr::find_or_create_name(self.ir, "/any"),
+                }
+            }
+            "fn:list:append" if args.len() == 2 => {
+                // Widen the list element type to include the appended value.
+                let list_type = self.bound_of_arg(args[0], var_ranges);
+                let new_elem = self.bound_of_arg(args[1], var_ranges);
+                let old_elem = match type_expr::apply_fn_args(self.ir, list_type) {
+                    Some(inner) if type_expr::apply_fn_name(self.ir, list_type)
+                        == Some(type_expr::FN_LIST)
+                        && inner.len() == 1 =>
+                    {
+                        inner[0]
+                    }
+                    _ => type_expr::find_or_create_name(self.ir, "/any"),
+                };
+                let ctx = TypeContext::default();
+                let elem = type_expr::upper_bound(self.ir, &ctx, &[old_elem, new_elem]);
+                type_expr::new_list_type(self.ir, elem)
+            }
             "fn:collect" | "fn:collect_distinct" => {
                 if args.len() == 1 {
                     let elem_type = self.bound_of_arg(args[0], var_ranges);
