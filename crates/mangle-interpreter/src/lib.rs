@@ -1638,6 +1638,19 @@ pub fn eval_function(fn_name: &str, vals: &[Value]) -> Result<Value> {
                 _ => Err(anyhow!("fn:list:get: expected (compound, number)")),
             }
         }
+        "fn:list:append" => {
+            if vals.len() != 2 {
+                return Err(anyhow!("fn:list:append: requires 2 arguments (list, elem)"));
+            }
+            match &vals[0] {
+                Value::Compound(CompoundKind::List, elems) => {
+                    let mut out = elems.clone();
+                    out.push(vals[1].clone());
+                    Ok(Value::Compound(CompoundKind::List, out))
+                }
+                _ => Err(anyhow!("fn:list:append: expected list as first argument")),
+            }
+        }
         "fn:list:len" | "fn:len" => {
             if vals.len() != 1 {
                 return Err(anyhow!("fn:len: requires 1 argument"));
