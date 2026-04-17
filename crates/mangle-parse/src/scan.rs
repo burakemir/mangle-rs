@@ -26,8 +26,11 @@ where
 {
     iter: io::Bytes<io::BufReader<R>>,
 
-    // Peeked char.
+    // Two-slot pushback buffer. `ch` is the next character (what `peek()`
+    // returns); `ch2` is the one after that (what `peek_second()` returns).
+    // Slots are filled lazily and consumed in order by `next_char()`.
     ch: Option<char>,
+    ch2: Option<char>,
 
     pub line: usize,
     pub col: usize,
@@ -51,6 +54,7 @@ where
         Self {
             iter: buf_reader.bytes(),
             ch: None,
+            ch2: None,
             line: 1,
             col: 0,
             start_of_line: 0,
@@ -255,10 +259,18 @@ where
                     self.next_char()?;
                     self.text.push(c)
                 }
-                Some(c @ '.') => {
-                    self.next_char()?;
-                    is_float = true;
-                    self.text.push(c)
+                Some('.') => {
+                    // A `.` only starts a fractional part if the next character
+                    // is a digit. Otherwise the `.` is a rule terminator and
+                    // we stop here, leaving it in the lookahead buffer.
+                    match self.peek_second()? {
+                        Some('0'..='9') => {
+                            self.next_char()?;
+                            is_float = true;
+                            self.text.push('.');
+                        }
+                        _ => break,
+                    }
                 }
                 _ => break,
             }
@@ -279,15 +291,6 @@ where
         }
 
         if is_float {
-            if self.text.ends_with('.') {
-                return Err(anyhow!(
-                    "{}: numeric literal `{}` has no digits after decimal point; \
-                     if you meant an integer followed by a rule terminator, \
-                     add a space before the `.`",
-                    self.get_error_context(),
-                    self.text
-                ));
-            }
             let num = self.text.parse::<f64>()?;
             return Ok(Token::Float { decoded: num });
         }
@@ -470,8 +473,16 @@ where
     #[inline]
     fn next_char(&mut self) -> Result<Option<char>> {
         if let Some(c) = self.ch.take() {
+            // Shift the second slot forward so the next call sees it.
+            self.ch = self.ch2.take();
             return Ok(Some(c));
         }
+        self.read_char_from_iter()
+    }
+
+    /// Reads one character directly from the underlying byte iterator,
+    /// bypassing the pushback buffer.
+    fn read_char_from_iter(&mut self) -> Result<Option<char>> {
         macro_rules! next_byte_or_incomplete {
             ($self:expr) => {
                 $self
@@ -550,13 +561,24 @@ where
 
     #[inline]
     pub fn peek(&mut self) -> Result<Option<char>> {
-        Ok(match self.ch {
-            Some(ch) => Some(ch),
-            None => {
-                self.ch = self.next_char()?;
-                self.ch
-            }
-        })
+        if self.ch.is_none() {
+            self.ch = self.read_char_from_iter()?;
+        }
+        Ok(self.ch)
+    }
+
+    /// Returns the character two positions ahead without consuming anything.
+    /// Used when disambiguating e.g. `1.` from `1.5` (is the `.` a rule
+    /// terminator or the start of a fractional part?).
+    pub fn peek_second(&mut self) -> Result<Option<char>> {
+        self.peek()?;
+        if self.ch.is_none() {
+            return Ok(None);
+        }
+        if self.ch2.is_none() {
+            self.ch2 = self.read_char_from_iter()?;
+        }
+        Ok(self.ch2)
     }
 }
 
@@ -742,17 +764,22 @@ mod test {
     }
 
     #[test]
-    fn test_float_without_fractional_digits_rejected() {
-        let err = scan_all("1.").unwrap_err().to_string();
-        assert!(
-            err.contains("no digits after decimal point"),
-            "unexpected error: {err}"
+    fn test_int_then_dot_is_rule_terminator() -> Result<()> {
+        // `1.` → integer 1 followed by a `.` (rule terminator), not a
+        // malformed float. Matches mangle-go's lexer.
+        let got = scan_all("1.")?;
+        assert_eq!(got, vec![Token::Int { decoded: 1 }, Token::Dot]);
+
+        let got = scan_all("3.14 2.")?;
+        assert_eq!(
+            got,
+            vec![
+                Token::Float { decoded: 3.14 },
+                Token::Int { decoded: 2 },
+                Token::Dot,
+            ]
         );
-        let err = scan_all("3.14 2.").unwrap_err().to_string();
-        assert!(
-            err.contains("no digits after decimal point"),
-            "unexpected error: {err}"
-        );
+        Ok(())
     }
 
     #[test]
