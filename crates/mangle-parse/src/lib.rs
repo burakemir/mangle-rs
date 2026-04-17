@@ -544,6 +544,8 @@ where
         &mut self,
         transforms: &mut Vec<&'arena ast::TransformStmt<'arena>>,
     ) -> Result<()> {
+        // Transform clauses are separated by `,` (matching mangle-go) or `;`
+        // (legacy mangle-rs). Both accepted; one-of required between clauses.
         if Token::Do == self.token {
             self.next_token()?;
             let expr = self.parse_base_term()?;
@@ -554,7 +556,7 @@ where
                     app: expr
                 }
             ));
-            self.expect(Token::Semi)?;
+            self.expect_transform_sep()?;
         }
         loop {
             if Token::Let != self.token {
@@ -577,9 +579,20 @@ where
             if let Token::Dot = self.token {
                 break;
             }
-            self.expect(Token::Semi)?;
+            self.expect_transform_sep()?;
         }
         Ok(())
+    }
+
+    fn expect_transform_sep(&mut self) -> Result<()> {
+        match self.token {
+            Token::Comma | Token::Semi => self.next_token(),
+            _ => bail!(
+                "{}: expected `,` or `;` got {}",
+                self.sc.get_error_context(),
+                self.token
+            ),
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1202,6 +1215,19 @@ mod test {
         let mut p = make_parser(&arena, "Decl foo(X) descr [ bar(), ].");
         p.parse_decl().expect("descr list with trailing comma parses");
         Ok(())
+    }
+
+    #[test]
+    fn test_transform_sep_comma_and_semi() -> googletest::Result<()> {
+        // Transform clauses may be separated by `,` (mangle-go) or `;`
+        // (legacy mangle-rs). Both must parse identically.
+        let arena = Arena::new_with_global_interner();
+        let src_comma = "q(K, S) :- p(K, V) |> do fn:group_by(K), let S = fn:sum(V).";
+        let src_semi  = "q(K, S) :- p(K, V) |> do fn:group_by(K); let S = fn:sum(V).";
+        let a = make_parser(&arena, src_comma).parse_clause().unwrap();
+        let b = make_parser(&arena, src_semi).parse_clause().unwrap();
+        verify_that!(a.transform.len(), eq(2))?;
+        verify_that!(b.transform.len(), eq(2))
     }
 
     #[test]
