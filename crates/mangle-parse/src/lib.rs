@@ -83,6 +83,10 @@ fn fn_option_type_sym(arena: &Arena) -> ast::FunctionIndex {
     arena.function_sym("fn:Option", None)
 }
 
+fn fn_opt_sym(arena: &Arena) -> ast::FunctionIndex {
+    arena.function_sym("fn:opt", None)
+}
+
 fn empty_package_decl(arena: &Arena) -> ast::Decl<'_> {
     ast::Decl {
         atom: arena.alloc(ast::Atom {
@@ -800,9 +804,14 @@ where
 
     /// langle_members ::= `<` [member { `,` member } [`,`]] `>`
     /// member        ::= base_term [`:` base_term]
+    ///                 | `opt` base_term `:` base_term
     ///
     /// When a member contains a colon, both base_terms are pushed (flattened).
     /// This makes `.Struct</x : /number>` parse identically to `fn:Struct(/x, /number)`.
+    ///
+    /// An `opt` member collapses to a single `fn:opt(name, type)` base term, so
+    /// `.Struct</x : /number, opt /y : /string>` is equivalent to
+    /// `fn:Struct(/x, /number, fn:opt(/y, /string))`.
     fn parse_langle_base_terms(
         &mut self,
         base_terms: &mut Vec<&'arena ast::BaseTerm<'arena>>,
@@ -812,25 +821,43 @@ where
             self.next_token()?;
             return Ok(());
         }
-        // Parse first member.
+        self.parse_langle_member(base_terms)?;
+        while Token::Comma == self.token {
+            self.next_token()?;
+            if !base_term_start(&self.token) && !self.is_opt_keyword() {
+                break; // trailing comma
+            }
+            self.parse_langle_member(base_terms)?;
+        }
+        self.expect(Token::Gt)?;
+        Ok(())
+    }
+
+    fn is_opt_keyword(&self) -> bool {
+        matches!(&self.token, Token::Ident { name } if name == "opt")
+    }
+
+    fn parse_langle_member(
+        &mut self,
+        base_terms: &mut Vec<&'arena ast::BaseTerm<'arena>>,
+    ) -> Result<()> {
+        if self.is_opt_keyword() {
+            self.next_token()?;
+            let name = self.parse_base_term()?;
+            self.expect(Token::Colon)?;
+            let ty = self.parse_base_term()?;
+            let opt = alloc!(
+                self,
+                ast::BaseTerm::ApplyFn(fn_opt_sym(self.arena), alloc_slice!(self, &[name, ty]))
+            );
+            base_terms.push(opt);
+            return Ok(());
+        }
         base_terms.push(self.parse_base_term()?);
         if Token::Colon == self.token {
             self.next_token()?;
             base_terms.push(self.parse_base_term()?);
         }
-        // Parse remaining members.
-        while Token::Comma == self.token {
-            self.next_token()?;
-            if !base_term_start(&self.token) {
-                break; // trailing comma
-            }
-            base_terms.push(self.parse_base_term()?);
-            if Token::Colon == self.token {
-                self.next_token()?;
-                base_terms.push(self.parse_base_term()?);
-            }
-        }
-        self.expect(Token::Gt)?;
         Ok(())
     }
 
@@ -1215,6 +1242,29 @@ mod test {
         let mut p = make_parser(&arena, "Decl foo(X) descr [ bar(), ].");
         p.parse_decl().expect("descr list with trailing comma parses");
         Ok(())
+    }
+
+    #[test]
+    fn test_opt_in_struct_type() -> googletest::Result<()> {
+        // `opt NAME : TYPE` inside .Struct<...> collapses to a single
+        // fn:opt(NAME, TYPE) base term so it's distinguishable from a
+        // required field (which is two flattened args).
+        let arena = Arena::new_with_global_interner();
+        let mut p = make_parser(&arena, ".Struct</x : /number, opt /y : /string>");
+        let got = p.parse_base_term().unwrap();
+        let opt_inner = arena.apply_fn(
+            fn_opt_sym(&arena),
+            &[arena.const_(arena.name("/y")), arena.const_(arena.name("/string"))],
+        );
+        let expected = arena.apply_fn(
+            arena.function_sym("fn:Struct", None),
+            &[
+                arena.const_(arena.name("/x")),
+                arena.const_(arena.name("/number")),
+                opt_inner,
+            ],
+        );
+        verify_that!(got, eq(expected))
     }
 
     #[test]
