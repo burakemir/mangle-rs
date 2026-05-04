@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "mangle-py"
-version = "0.7.0"
+version = "0.7.1"
 description = "Python bindings for Mangle, a Datalog-style logic language. Import as `import mangle`."
 readme = "README.md"
 requires-python = ">=3.9"

@@ -1,6 +1,7 @@
 [package]
 name = "mangle-py"
-version.workspace = true
+# Python package release cadence is independent from the Rust workspace.
+version = "0.7.1"
 edition.workspace = true
 authors.workspace = true
 description = "Python bindings for Mangle"
