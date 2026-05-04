@@ -1,0 +1,25 @@
+[package]
+name = "mangle-py"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Python bindings for Mangle"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[lib]
+name = "mangle"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py39"] }
+ouroboros = "0.18"
+anyhow.workspace = true
+mangle-ast.workspace = true
+mangle-driver.workspace = true
+mangle-interpreter.workspace = true
+mangle-parse.workspace = true
+mangle-analysis.workspace = true
+mangle-ir.workspace = true
+mangle-common = { workspace = true, features = ["edge"] }

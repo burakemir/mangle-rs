@@ -1,0 +1,8 @@
+# Allow plain `cargo build` (without maturin) to produce the extension-module
+# cdylib on macOS by leaving Python symbols to be resolved at load time.
+# maturin sets equivalent flags via environment when it builds wheels.
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
+
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]

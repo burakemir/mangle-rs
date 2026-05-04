@@ -16,7 +16,8 @@ members = [
     "crates/mangle-simplecolumn",
     "crates/mangle-server",
     "crates/mangle-db",
-    "crates/mangle-wasm"
+    "crates/mangle-wasm",
+    "crates/mangle-py"
 ]
 
 [workspace.package]

@@ -1,0 +1,20 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "mangle"
+version = "0.7.0"
+description = "Python bindings for Mangle, a Datalog-style logic language"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Burak Emir", email = "burak.emir@gmail.com" }]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: Apache Software License",
+]
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+module-name = "mangle"
