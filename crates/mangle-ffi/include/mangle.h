@@ -29,10 +29,65 @@
 #define MANGLE_OK 0
 
 /**
+ * FFI status: generic error. The thread-local error slot (read via
+ * `mangle_last_error`) holds the formatted message.
+ */
+#define MANGLE_ERR -1
+
+/**
  * FFI status: an argument was invalid (null pointer, malformed UTF-8,
  * wrong kind for an accessor, etc.).
  */
 #define MANGLE_ERR_INVALID_ARG -2
+
+/**
+ * FFI status: the engine has no rules loaded. Returned by query and
+ * snapshot operations on a Fresh engine. Reserved for M2.
+ */
+#define MANGLE_ERR_NO_RULES -3
+
+/**
+ * FFI status: the cursor's engine generation no longer matches the
+ * engine's current generation (rules reloaded, or a panic poisoned the
+ * engine). The cursor handle is still safe to free but produces no
+ * more rows. Reserved for M4.
+ */
+#define MANGLE_ERR_CURSOR_INVALIDATED -4
+
+/**
+ * FFI status: derivation-tree introspection was requested but the
+ * engine was constructed with `enable_provenance = 0`. Reserved for M9.
+ */
+#define MANGLE_ERR_NO_PROVENANCE -5
+
+/**
+ * FFI status: a fact lookup (e.g. for derivation tree) found no
+ * matching tuple. Reserved for M9.
+ */
+#define MANGLE_ERR_FACT_NOT_FOUND -6
+
+/**
+ * FFI status: a parse failure in rule, query, or fact-atom input.
+ * Reserved for M2 onwards.
+ */
+#define MANGLE_ERR_PARSE -7
+
+/**
+ * FFI status: an entry point caught a panic. If the entry point took
+ * an engine, that engine is now *poisoned* — subsequent operations on
+ * it will short-circuit to this same code. Recovery: free the engine
+ * and create a fresh one.
+ */
+#define MANGLE_ERR_PANIC -8
+
+/**
+ * Opaque engine handle.
+ *
+ * The `poisoned` flag is `pub(crate)` so the `panic_boundary` macro can
+ * read and set it directly across module boundaries; consumers see only
+ * an opaque pointer.
+ */
+typedef struct MangleEngine MangleEngine;
 
 /**
  * A heap-allocated byte buffer owned by the caller.
@@ -52,13 +107,11 @@ typedef struct MangleBuffer {
 extern "C" {
 #endif // __cplusplus
 
-extern int32_t c_smoke_run(void);
-
 /**
  * Write the library's semantic version as a UTF-8 string into `out`.
  *
- * Always succeeds unless `out` is null. The returned buffer is owned by
- * the caller and must be released with [`mangle_buffer_free`].
+ * Always succeeds unless `out` is null. The returned buffer is owned
+ * by the caller and must be released with [`mangle_buffer_free`].
  *
  * # Safety
  * `out` must be non-null and point to a writable [`MangleBuffer`].
@@ -78,6 +131,51 @@ int32_t mangle_version(struct MangleBuffer *out);
  * fields must not have been modified by the caller.
  */
 void mangle_buffer_free(struct MangleBuffer *buf);
+
+/**
+ * Construct a new engine.
+ *
+ * `enable_provenance` is nonzero to record derivation provenance during
+ * rule evaluation (M9 surface); zero disables it. The flag is captured
+ * here and consulted later when rules are loaded.
+ *
+ * On success, writes the engine pointer to `*out` and returns
+ * [`MANGLE_OK`]. The caller owns the handle and must release it with
+ * [`mangle_engine_free`].
+ *
+ * # Safety
+ * `out` must be non-null and point to writable storage for a
+ * `*mut MangleEngine`.
+ */
+int32_t mangle_engine_new(int32_t enable_provenance, struct MangleEngine **out);
+
+/**
+ * Release an engine produced by [`mangle_engine_new`].
+ *
+ * Safe to call on a null pointer or a poisoned engine. After return,
+ * the pointer must not be used again. The drop is wrapped in
+ * `catch_unwind` so an internal panic during drop cannot propagate
+ * across the FFI boundary; any panic message is recorded as the
+ * thread-local error.
+ *
+ * # Safety
+ * If `engine` is non-null, it must point to a handle previously
+ * produced by [`mangle_engine_new`] that has not already been freed.
+ */
+void mangle_engine_free(struct MangleEngine *engine);
+
+/**
+ * Copy the current thread-local error message into `out` and clear it.
+ *
+ * Returns [`MANGLE_OK`] regardless of whether an error was set; the
+ * resulting buffer will be empty (zero-length, possibly null `data`)
+ * when there was nothing to report. Calling this in a no-error state
+ * is the canonical way to check + clear.
+ *
+ * # Safety
+ * `out` must be non-null and point to a writable [`MangleBuffer`].
+ */
+int32_t mangle_last_error(struct MangleBuffer *out);
 
 #ifdef __cplusplus
 }  // extern "C"

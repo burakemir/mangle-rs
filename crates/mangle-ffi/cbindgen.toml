@@ -22,6 +22,8 @@ sys_includes = ["stdint.h", "stddef.h"]
 
 [export]
 prefix = ""
+# Internal symbols used by the C smoke harness; not part of the public ABI.
+exclude = ["c_smoke_run"]
 
 [parse]
 parse_deps = false
