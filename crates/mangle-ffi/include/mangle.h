@@ -746,6 +746,48 @@ int32_t mangle_schema_snapshot(struct MangleEngine *engine, struct MangleBuffer 
 int32_t mangle_relation_names(struct MangleEngine *engine, struct MangleBuffer *out);
 
 /**
+ * Emit a "facts overview" snapshot — every declared relation with its
+ * arity, kind (EDB/IDB), current tuple count, and at most
+ * `per_relation_limit` sample tuples.
+ *
+ * Output shape:
+ * ```json
+ * {
+ *   "relations": [
+ *     {
+ *       "name": "edge",
+ *       "arity": 2,
+ *       "kind": "edb",
+ *       "count": 12345,
+ *       "sample": [
+ *         { "tuple": [1, 2] },
+ *         { "tuple": [2, 3] }
+ *       ]
+ *     }
+ *   ]
+ * }
+ * ```
+ *
+ * Relations come from the schema cache so declared-but-empty
+ * predicates also appear (with `count: 0, sample: []`). Tuple
+ * elements use the same value-to-JSON encoding as
+ * `mangle_derivation_tree` — scalars as primitives,
+ * `Name`/`Time`/`Duration`/`Compound` as tagged objects (lossy but
+ * unambiguous for visualization).
+ *
+ * `per_relation_limit = 0` means "don't include any samples, just
+ * counts." Pass `UINT32_MAX` for "include everything" (workbench-
+ * scale only — large stores should use the batch-encode endpoints
+ * instead).
+ *
+ * # Safety
+ * `engine` must be a live handle. `out` must be non-null.
+ */
+int32_t mangle_facts_snapshot(struct MangleEngine *engine,
+                              uint32_t per_relation_limit,
+                              struct MangleBuffer *out);
+
+/**
  * Report the kind tag of a value.
  *
  * Returns one of the `MANGLE_VAL_*` constants. Returns `-1` if `v` is

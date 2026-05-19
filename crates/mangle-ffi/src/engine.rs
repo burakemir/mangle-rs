@@ -152,6 +152,37 @@ impl MangleEngine {
         })
     }
 
+    /// Scan `relation` and return `(count, sample)` where `count` is
+    /// the total number of tuples and `sample` is at most the first
+    /// `limit` of them (in `Store::scan` iteration order).
+    ///
+    /// Returns `Ok(None)` when no rules are loaded. Used by
+    /// `mangle_facts_snapshot` to summarize each relation without
+    /// materializing the whole store. For typical workbench-scale
+    /// snapshots (small N, modest relations) this is O(actual count)
+    /// per relation.
+    pub(crate) fn count_and_sample(
+        &self,
+        relation: &str,
+        limit: usize,
+    ) -> Result<Option<(usize, Vec<Vec<Value>>)>> {
+        let Some(inner) = self.inner.as_ref() else {
+            return Ok(None);
+        };
+        inner.with_interp(|interp: &Interpreter<'_>| {
+            let scan = interp.store().scan(relation)?;
+            let mut count: usize = 0;
+            let mut sample: Vec<Vec<Value>> = Vec::with_capacity(limit.min(64));
+            for tuple in scan {
+                if sample.len() < limit {
+                    sample.push(tuple);
+                }
+                count += 1;
+            }
+            Ok(Some((count, sample)))
+        })
+    }
+
     /// Materialize every relation in the engine's store into a
     /// `Vec<(name, tuples)>` suitable for handoff to
     /// `mangle_db::simplerow::write_simple_row`. Returns `Ok(None)`
@@ -256,9 +287,7 @@ impl MangleEngine {
                     mangle_driver::execute(ir, &*stratified, store)
                 }
                 .map_err(|e| anyhow::anyhow!(e))?;
-                if enable_provenance
-                    && let Some(rec) = interp.provenance()
-                {
+                if enable_provenance && let Some(rec) = interp.provenance() {
                     captured_provenance = Some(DerivationIndex::build(&rec.entries));
                 }
                 Ok(interp)

@@ -46,7 +46,7 @@ pub use io::{
     MANGLE_COMPRESSION_GZIP, MANGLE_COMPRESSION_NONE, MANGLE_COMPRESSION_ZSTD,
     mangle_load_facts_mgr, mangle_query_dump_mgr, mangle_save_facts_mgr, mangle_save_relation_mgr,
 };
-pub use schema::{mangle_relation_names, mangle_schema_snapshot};
+pub use schema::{mangle_facts_snapshot, mangle_relation_names, mangle_schema_snapshot};
 pub use value::{
     MANGLE_COMPOUND_LIST, MANGLE_COMPOUND_MAP, MANGLE_COMPOUND_PAIR, MANGLE_COMPOUND_STRUCT,
     MANGLE_VAL_COMPOUND, MANGLE_VAL_DURATION, MANGLE_VAL_FLOAT, MANGLE_VAL_NAME, MANGLE_VAL_NULL,

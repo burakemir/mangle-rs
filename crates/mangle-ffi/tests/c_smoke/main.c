@@ -946,5 +946,52 @@ int32_t c_smoke_run(void) {
 
     mangle_engine_free(eng_prov);
 
+    /* ---- mangle_facts_snapshot (M10) ----------------------------- */
+
+    /* 49. Facts snapshot includes declared relations with counts. */
+    MangleEngine* eng_snap = NULL;
+    if (mangle_engine_new(0, &eng_snap) != MANGLE_OK) return 180;
+    const char* m10_src = "edge(1, 2). edge(2, 3). node(1).";
+    const uint8_t* m10_sources[1] = { (const uint8_t*)m10_src };
+    size_t m10_lens[1] = { strlen(m10_src) };
+    if (mangle_load_rules(eng_snap, m10_sources, m10_lens, 1) != MANGLE_OK) {
+        mangle_engine_free(eng_snap);
+        return 181;
+    }
+
+    MangleBuffer facts_buf = {0};
+    if (mangle_facts_snapshot(eng_snap, 100, &facts_buf) != MANGLE_OK) {
+        mangle_buffer_free(&facts_buf);
+        mangle_engine_free(eng_snap);
+        return 182;
+    }
+    /* JSON should mention both relations + the relations container. */
+    if (memmem(facts_buf.data, facts_buf.len, "\"relations\"", 11) == NULL
+        || memmem(facts_buf.data, facts_buf.len, "\"edge\"", 6) == NULL
+        || memmem(facts_buf.data, facts_buf.len, "\"node\"", 6) == NULL
+        || memmem(facts_buf.data, facts_buf.len, "\"count\"", 7) == NULL) {
+        mangle_buffer_free(&facts_buf);
+        mangle_engine_free(eng_snap);
+        return 183;
+    }
+    mangle_buffer_free(&facts_buf);
+
+    /* 50. No rules loaded → NO_RULES. */
+    MangleEngine* eng_snap_empty = NULL;
+    mangle_engine_new(0, &eng_snap_empty);
+    MangleBuffer snap_err = {0};
+    int32_t rc_se = mangle_facts_snapshot(eng_snap_empty, 10, &snap_err);
+    if (rc_se != MANGLE_ERR_NO_RULES) {
+        mangle_buffer_free(&snap_err);
+        mangle_engine_free(eng_snap_empty);
+        mangle_engine_free(eng_snap);
+        return 184;
+    }
+    mangle_last_error(&drain);
+    mangle_buffer_free(&drain);
+    mangle_engine_free(eng_snap_empty);
+
+    mangle_engine_free(eng_snap);
+
     return 0;
 }

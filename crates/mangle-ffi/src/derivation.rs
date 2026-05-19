@@ -36,13 +36,14 @@
 
 use std::collections::{HashMap, HashSet};
 
-use mangle_common::{CompoundKind, Value};
+use mangle_common::Value;
 use mangle_interpreter::ProvenanceEntry;
 
 use crate::buffer::{MangleBuffer, write_buffer};
 use crate::engine::MangleEngine;
 use crate::error::{panic_boundary, set_error_msg};
 use crate::query::{ParsedQuery, QueryArg, parse_query_lenient};
+use crate::value::value_to_json;
 use crate::{
     MANGLE_ERR_FACT_NOT_FOUND, MANGLE_ERR_INVALID_ARG, MANGLE_ERR_NO_PROVENANCE,
     MANGLE_ERR_NO_RULES, MANGLE_ERR_PARSE, MANGLE_OK,
@@ -102,31 +103,6 @@ pub(crate) fn parse_fact_atom(s: &str) -> Result<FactKey, String> {
         }
     }
     Ok((predicate, tuple))
-}
-
-/// Render a single `Value` as JSON. Scalars become primitives;
-/// non-primitives become tagged objects so the consumer can tell
-/// `String("x")` from `Name("/x")` etc.
-fn value_to_json(v: &Value) -> serde_json::Value {
-    match v {
-        Value::Null => serde_json::Value::Null,
-        Value::Number(n) => serde_json::json!(*n),
-        Value::Float(f) => serde_json::json!(*f),
-        Value::String(s) => serde_json::json!(s),
-        Value::Name(n) => serde_json::json!({ "name": n }),
-        Value::Time(ns) => serde_json::json!({ "time_ns": ns }),
-        Value::Duration(ns) => serde_json::json!({ "duration_ns": ns }),
-        Value::Compound(kind, elems) => {
-            let subkind = match kind {
-                CompoundKind::List => "list",
-                CompoundKind::Pair => "pair",
-                CompoundKind::Map => "map",
-                CompoundKind::Struct => "struct",
-            };
-            let elems: Vec<serde_json::Value> = elems.iter().map(value_to_json).collect();
-            serde_json::json!({ "compound": subkind, "elems": elems })
-        }
-    }
 }
 
 fn fact_to_json(fact: &FactKey) -> serde_json::Value {

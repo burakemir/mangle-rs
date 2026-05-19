@@ -33,7 +33,7 @@ pub(crate) enum PredicateKind {
 }
 
 impl PredicateKind {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             PredicateKind::Edb => "edb",
             PredicateKind::Idb => "idb",
@@ -352,6 +352,98 @@ pub unsafe extern "C" fn mangle_relation_names(
             return MANGLE_ERR_NO_RULES;
         };
         let bytes = schema.relation_names_json();
+        unsafe { write_buffer(out, bytes) };
+        MANGLE_OK
+    })
+}
+
+/// Emit a "facts overview" snapshot — every declared relation with its
+/// arity, kind (EDB/IDB), current tuple count, and at most
+/// `per_relation_limit` sample tuples.
+///
+/// Output shape:
+/// ```json
+/// {
+///   "relations": [
+///     {
+///       "name": "edge",
+///       "arity": 2,
+///       "kind": "edb",
+///       "count": 12345,
+///       "sample": [
+///         { "tuple": [1, 2] },
+///         { "tuple": [2, 3] }
+///       ]
+///     }
+///   ]
+/// }
+/// ```
+///
+/// Relations come from the schema cache so declared-but-empty
+/// predicates also appear (with `count: 0, sample: []`). Tuple
+/// elements use the same value-to-JSON encoding as
+/// `mangle_derivation_tree` — scalars as primitives,
+/// `Name`/`Time`/`Duration`/`Compound` as tagged objects (lossy but
+/// unambiguous for visualization).
+///
+/// `per_relation_limit = 0` means "don't include any samples, just
+/// counts." Pass `UINT32_MAX` for "include everything" (workbench-
+/// scale only — large stores should use the batch-encode endpoints
+/// instead).
+///
+/// # Safety
+/// `engine` must be a live handle. `out` must be non-null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mangle_facts_snapshot(
+    engine: *mut MangleEngine,
+    per_relation_limit: u32,
+    out: *mut MangleBuffer,
+) -> i32 {
+    panic_boundary!(engine, {
+        if out.is_null() {
+            set_error_msg("mangle_facts_snapshot: out pointer is null");
+            return MANGLE_ERR_INVALID_ARG;
+        }
+        let eng = unsafe { &*engine };
+        let Some(schema) = eng.schema() else {
+            set_error_msg("mangle_facts_snapshot: engine has no rules loaded");
+            return MANGLE_ERR_NO_RULES;
+        };
+
+        let limit = per_relation_limit as usize;
+        let mut relations: Vec<serde_json::Value> = Vec::new();
+        for (name, info) in &schema.predicates {
+            let (count, sample) = match eng.count_and_sample(name, limit) {
+                Ok(Some((c, s))) => (c, s),
+                Ok(None) => {
+                    // Schema says rules are loaded, so this shouldn't
+                    // happen. Treat defensively as empty.
+                    (0, Vec::new())
+                }
+                Err(e) => {
+                    set_error_msg(format!("mangle_facts_snapshot({name}): {e:#}"));
+                    return crate::MANGLE_ERR;
+                }
+            };
+            let sample_json: Vec<serde_json::Value> = sample
+                .iter()
+                .map(|tuple| {
+                    let cells: Vec<serde_json::Value> =
+                        tuple.iter().map(crate::value::value_to_json).collect();
+                    serde_json::json!({ "tuple": cells })
+                })
+                .collect();
+            relations.push(serde_json::json!({
+                "name": name,
+                "arity": info.arity,
+                "kind": info.kind.as_str(),
+                "count": count,
+                "sample": sample_json,
+            }));
+        }
+
+        let doc = serde_json::json!({ "relations": relations });
+        let bytes = serde_json::to_vec(&doc).expect("snapshot serialize");
         unsafe { write_buffer(out, bytes) };
         MANGLE_OK
     })
