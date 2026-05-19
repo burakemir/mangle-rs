@@ -91,6 +91,25 @@ typedef struct MangleVal MangleVal;
 #define MANGLE_ERR_PANIC -8
 
 /**
+ * Compression mode: no compression.
+ */
+#define MANGLE_COMPRESSION_NONE 0
+
+/**
+ * Compression mode: gzip.
+ */
+#define MANGLE_COMPRESSION_GZIP 1
+
+/**
+ * Compression mode: zstd. Reserved; **not currently supported on the
+ * write side** — `ruzstd` is decode-only and we don't pull in a
+ * libzstd dependency just for this. The read side accepts
+ * zstd-compressed `.mgr` input via `ruzstd::decoding::StreamingDecoder`,
+ * so consumers that only need to *load* zstd blobs continue to work.
+ */
+#define MANGLE_COMPRESSION_ZSTD 2
+
+/**
  * Value kind: `Null`.
  */
 #define MANGLE_VAL_NULL 0
@@ -576,6 +595,71 @@ int32_t mangle_load_facts_mgr(struct MangleEngine *engine,
                               const uint8_t *source_name,
                               uintptr_t name_len,
                               uintptr_t *n_inserted_out);
+
+/**
+ * Encode every relation in the engine's store as a single SimpleRow
+ * `.mgr` blob, optionally compressed.
+ *
+ * Use for "Save Project" — write the resulting buffer to `facts.mgr`
+ * (or `facts.mgr.gz` if `compression == MANGLE_COMPRESSION_GZIP`).
+ *
+ * Returns [`MANGLE_OK`] on success; the resulting buffer is owned by
+ * the caller and must be freed with [`mangle_buffer_free`]. Returns
+ * [`MANGLE_ERR_NO_RULES`] when no program is loaded,
+ * [`MANGLE_ERR_INVALID_ARG`] for null `out` or an unsupported
+ * compression mode (currently `MANGLE_COMPRESSION_ZSTD`), or
+ * [`MANGLE_ERR`] for store-side or encoding failures.
+ *
+ * # Safety
+ * `engine` must be a live handle. `out` must be non-null and point to
+ * a writable [`MangleBuffer`].
+ */
+int32_t mangle_save_facts_mgr(struct MangleEngine *engine,
+                              int32_t compression,
+                              struct MangleBuffer *out);
+
+/**
+ * Encode a single named relation as a SimpleRow `.mgr` blob,
+ * optionally compressed. Useful for per-relation backups or exports.
+ *
+ * Returns [`MANGLE_ERR`] if the relation does not exist in the store;
+ * other error codes match [`mangle_save_facts_mgr`].
+ *
+ * # Safety
+ * `engine` must be a live handle. `relation` must point to
+ * `relation_len` readable UTF-8 bytes. `out` must be non-null.
+ */
+int32_t mangle_save_relation_mgr(struct MangleEngine *engine,
+                                 const uint8_t *relation,
+                                 uintptr_t relation_len,
+                                 int32_t compression,
+                                 struct MangleBuffer *out);
+
+/**
+ * Run a query and encode the matching tuples as a SimpleRow `.mgr`
+ * blob under the caller-supplied relation name `out_relation`.
+ *
+ * Useful for "Export Query Result" — the user types `route("GET",
+ * Path)`, the workbench produces a downloadable `.mgr` file where
+ * the matching tuples live under a relation named e.g.
+ * `get_routes`. The output relation name is independent of the
+ * queried predicate, so it can be anything the consumer wants.
+ *
+ * Query syntax matches [`mangle_query`].
+ *
+ * # Safety
+ * `engine` must be a live handle. `query` must point to `query_len`
+ * readable UTF-8 bytes. `out_relation` must point to
+ * `out_relation_len` readable UTF-8 bytes (must be non-empty). `out`
+ * must be non-null.
+ */
+int32_t mangle_query_dump_mgr(struct MangleEngine *engine,
+                              const uint8_t *query,
+                              uintptr_t query_len,
+                              const uint8_t *out_relation,
+                              uintptr_t out_relation_len,
+                              int32_t compression,
+                              struct MangleBuffer *out);
 
 /**
  * Report the kind tag of a value.

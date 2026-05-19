@@ -642,5 +642,158 @@ int32_t c_smoke_run(void) {
 
     mangle_engine_free(eng);
 
+    /* ---- mangle_save_facts_mgr / mangle_save_relation_mgr / ----- */
+    /* ---- mangle_query_dump_mgr ---------------------------------- */
+
+    /* 36. Save-and-reload round-trip: save all → reload → query. */
+    if (mangle_engine_new(0, &eng) != MANGLE_OK) return 130;
+    const char* sr_src =
+        "edge(1, 2).\n"
+        "edge(2, 3).\n"
+        "route(\"GET\", \"/\").\n"
+        "route(\"POST\", \"/login\").\n";
+    const uint8_t* sr_sources[1] = { (const uint8_t*)sr_src };
+    size_t sr_lens[1] = { strlen(sr_src) };
+    if (mangle_load_rules(eng, sr_sources, sr_lens, 1) != MANGLE_OK) {
+        mangle_engine_free(eng);
+        return 131;
+    }
+
+    MangleBuffer saved = {0};
+    int32_t rc_save = mangle_save_facts_mgr(eng, MANGLE_COMPRESSION_NONE, &saved);
+    if (rc_save != MANGLE_OK) {
+        mangle_engine_free(eng);
+        return 132;
+    }
+    if (saved.data == NULL || saved.len == 0) {
+        mangle_buffer_free(&saved);
+        mangle_engine_free(eng);
+        return 133;
+    }
+
+    /* Reload into a fresh engine. */
+    MangleEngine* eng4 = NULL;
+    if (mangle_engine_new(0, &eng4) != MANGLE_OK) {
+        mangle_buffer_free(&saved);
+        mangle_engine_free(eng);
+        return 134;
+    }
+    const char* baseline = "edge(0, 0). route(\"X\", \"X\").";
+    const uint8_t* baseline_src[1] = { (const uint8_t*)baseline };
+    size_t baseline_lens[1] = { strlen(baseline) };
+    if (mangle_load_rules(eng4, baseline_src, baseline_lens, 1) != MANGLE_OK) {
+        mangle_buffer_free(&saved);
+        mangle_engine_free(eng);
+        mangle_engine_free(eng4);
+        return 135;
+    }
+    size_t n_loaded = 0;
+    int32_t rc_load2 = mangle_load_facts_mgr(
+        eng4, saved.data, saved.len,
+        (const uint8_t*)"saved.mgr", 9,
+        &n_loaded);
+    mangle_buffer_free(&saved);
+    if (rc_load2 != MANGLE_OK || n_loaded != 4) {
+        mangle_engine_free(eng);
+        mangle_engine_free(eng4);
+        return 136;
+    }
+
+    /* 37. Gzip save produces a smaller buffer (sometimes) but always */
+    /* starts with the gzip magic bytes 1F 8B. */
+    MangleBuffer gz = {0};
+    if (mangle_save_facts_mgr(eng, MANGLE_COMPRESSION_GZIP, &gz) != MANGLE_OK) {
+        mangle_engine_free(eng);
+        mangle_engine_free(eng4);
+        return 137;
+    }
+    if (gz.len < 2 || gz.data[0] != 0x1f || gz.data[1] != 0x8b) {
+        mangle_buffer_free(&gz);
+        mangle_engine_free(eng);
+        mangle_engine_free(eng4);
+        return 138;
+    }
+    mangle_buffer_free(&gz);
+
+    /* 38. save_relation_mgr round-trip for a single named relation. */
+    MangleBuffer rel = {0};
+    int32_t rc_rel = mangle_save_relation_mgr(
+        eng, (const uint8_t*)"edge", 4,
+        MANGLE_COMPRESSION_NONE, &rel);
+    if (rc_rel != MANGLE_OK) {
+        mangle_buffer_free(&rel);
+        mangle_engine_free(eng);
+        mangle_engine_free(eng4);
+        return 139;
+    }
+    if (rel.data == NULL || rel.len == 0) {
+        mangle_buffer_free(&rel);
+        mangle_engine_free(eng);
+        mangle_engine_free(eng4);
+        return 140;
+    }
+    mangle_buffer_free(&rel);
+
+    /* 39. query_dump_mgr produces a renamed blob. */
+    MangleBuffer dump = {0};
+    int32_t rc_dump = mangle_query_dump_mgr(
+        eng,
+        (const uint8_t*)"route(\"GET\", X)", strlen("route(\"GET\", X)"),
+        (const uint8_t*)"get_routes", 10,
+        MANGLE_COMPRESSION_NONE,
+        &dump);
+    if (rc_dump != MANGLE_OK) {
+        mangle_buffer_free(&dump);
+        mangle_engine_free(eng);
+        mangle_engine_free(eng4);
+        return 141;
+    }
+    /* Output begins with "1\n" (one predicate) and contains the new name. */
+    if (dump.len < 3 || dump.data[0] != '1' || dump.data[1] != '\n') {
+        mangle_buffer_free(&dump);
+        mangle_engine_free(eng);
+        mangle_engine_free(eng4);
+        return 142;
+    }
+    if (memmem(dump.data, dump.len, "get_routes", 10) == NULL) {
+        mangle_buffer_free(&dump);
+        mangle_engine_free(eng);
+        mangle_engine_free(eng4);
+        return 143;
+    }
+    mangle_buffer_free(&dump);
+
+    /* 40. zstd compression on write is not supported → INVALID_ARG. */
+    MangleBuffer zstd_attempt = {0};
+    int32_t rc_zstd = mangle_save_facts_mgr(eng, MANGLE_COMPRESSION_ZSTD, &zstd_attempt);
+    if (rc_zstd != MANGLE_ERR_INVALID_ARG) {
+        mangle_buffer_free(&zstd_attempt);
+        mangle_engine_free(eng);
+        mangle_engine_free(eng4);
+        return 144;
+    }
+    mangle_last_error(&drain);
+    mangle_buffer_free(&drain);
+
+    /* 41. query_dump_mgr with empty out_relation → INVALID_ARG. */
+    MangleBuffer empty_dump = {0};
+    int32_t rc_qd = mangle_query_dump_mgr(
+        eng,
+        (const uint8_t*)"edge", 4,
+        (const uint8_t*)"", 0,
+        MANGLE_COMPRESSION_NONE,
+        &empty_dump);
+    if (rc_qd != MANGLE_ERR_INVALID_ARG) {
+        mangle_buffer_free(&empty_dump);
+        mangle_engine_free(eng);
+        mangle_engine_free(eng4);
+        return 145;
+    }
+    mangle_last_error(&drain);
+    mangle_buffer_free(&drain);
+
+    mangle_engine_free(eng);
+    mangle_engine_free(eng4);
+
     return 0;
 }

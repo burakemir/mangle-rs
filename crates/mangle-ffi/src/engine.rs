@@ -33,6 +33,11 @@ use ouroboros::self_referencing;
 use crate::error::{panic_boundary, set_error_msg};
 use crate::{MANGLE_ERR_INVALID_ARG, MANGLE_ERR_PARSE, MANGLE_OK};
 
+/// Materialized snapshot of every relation in a store: a vec of
+/// `(relation_name, tuples)` pairs. Shaped to plug directly into
+/// `mangle_db::simplerow::write_simple_row`.
+pub(crate) type RelationTables = Vec<(String, Vec<Vec<Value>>)>;
+
 /// Pair holding `Ir` and `StratifiedProgram` together so ouroboros can
 /// carry them in a single self-referencing field. `compile_units`
 /// returns both at once; splitting them into two separate ouroboros
@@ -119,6 +124,31 @@ impl MangleEngine {
             store.merge_deltas();
             store.merge_deltas();
             Ok(Some(added))
+        })
+    }
+
+    /// Materialize every relation in the engine's store into a
+    /// `Vec<(name, tuples)>` suitable for handoff to
+    /// `mangle_db::simplerow::write_simple_row`. Returns `Ok(None)`
+    /// when no rules are loaded.
+    ///
+    /// Relations are emitted in the iteration order of
+    /// `Store::relation_names()`. The caller may reorder if a stable
+    /// byte output is required.
+    pub(crate) fn all_relations_materialized(&self) -> Result<Option<RelationTables>> {
+        let Some(inner) = self.inner.as_ref() else {
+            return Ok(None);
+        };
+        inner.with_interp(|interp: &Interpreter<'_>| {
+            let store = interp.store();
+            let names = store.relation_names();
+            let mut tables: RelationTables = Vec::with_capacity(names.len());
+            for name in names {
+                let scan = store.scan(&name)?;
+                let tuples: Vec<Vec<Value>> = scan.collect();
+                tables.push((name, tuples));
+            }
+            Ok(Some(tables))
         })
     }
 

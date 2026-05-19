@@ -10,14 +10,58 @@
 //! in M7.
 
 use anyhow::{Context, Result};
-use std::io::Read;
+use std::io::{Read, Write};
 
+use crate::buffer::{MangleBuffer, write_buffer};
 use crate::engine::MangleEngine;
 use crate::error::{panic_boundary, set_error_msg};
+use crate::query::{filter_tuples, parse_query_lenient};
 use crate::{MANGLE_ERR, MANGLE_ERR_INVALID_ARG, MANGLE_ERR_NO_RULES, MANGLE_ERR_PARSE, MANGLE_OK};
+
+/// Compression mode: no compression.
+pub const MANGLE_COMPRESSION_NONE: i32 = 0;
+/// Compression mode: gzip.
+pub const MANGLE_COMPRESSION_GZIP: i32 = 1;
+/// Compression mode: zstd. Reserved; **not currently supported on the
+/// write side** — `ruzstd` is decode-only and we don't pull in a
+/// libzstd dependency just for this. The read side accepts
+/// zstd-compressed `.mgr` input via `ruzstd::decoding::StreamingDecoder`,
+/// so consumers that only need to *load* zstd blobs continue to work.
+pub const MANGLE_COMPRESSION_ZSTD: i32 = 2;
 
 const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
+
+/// Encode `bytes` with the requested compression. Returns the bytes
+/// verbatim for [`MANGLE_COMPRESSION_NONE`], gzip-compressed for
+/// [`MANGLE_COMPRESSION_GZIP`], or an error otherwise (including
+/// [`MANGLE_COMPRESSION_ZSTD`] which is not yet supported on write).
+fn compress(bytes: Vec<u8>, compression: i32) -> Result<Vec<u8>> {
+    match compression {
+        MANGLE_COMPRESSION_NONE => Ok(bytes),
+        MANGLE_COMPRESSION_GZIP => {
+            use flate2::Compression;
+            use flate2::write::GzEncoder;
+            let mut enc = GzEncoder::new(Vec::new(), Compression::default());
+            enc.write_all(&bytes).context("gzip encode")?;
+            enc.finish().context("gzip finish")
+        }
+        MANGLE_COMPRESSION_ZSTD => Err(anyhow::anyhow!(
+            "zstd compression is not supported on the write side; \
+             use gzip (1) or no compression (0)"
+        )),
+        n => Err(anyhow::anyhow!("invalid compression mode: {n}")),
+    }
+}
+
+/// Encode the given tables as SimpleRow and apply optional
+/// compression. Shared between save_facts_mgr, save_relation_mgr, and
+/// query_dump_mgr.
+fn encode_tables(tables: crate::engine::RelationTables, compression: i32) -> Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    mangle_db::simplerow::write_simple_row(&mut buf, &tables).context("write_simple_row")?;
+    compress(buf, compression)
+}
 
 /// Sniff compression magic bytes and return the decompressed payload.
 /// Uncompressed input is returned via a copy (cheap relative to the
@@ -141,6 +185,240 @@ pub unsafe extern "C" fn mangle_load_facts_mgr(
             }
         }
     })
+}
+
+// ---- Write side (M7) ---------------------------------------------------
+
+/// Encode every relation in the engine's store as a single SimpleRow
+/// `.mgr` blob, optionally compressed.
+///
+/// Use for "Save Project" — write the resulting buffer to `facts.mgr`
+/// (or `facts.mgr.gz` if `compression == MANGLE_COMPRESSION_GZIP`).
+///
+/// Returns [`MANGLE_OK`] on success; the resulting buffer is owned by
+/// the caller and must be freed with [`mangle_buffer_free`]. Returns
+/// [`MANGLE_ERR_NO_RULES`] when no program is loaded,
+/// [`MANGLE_ERR_INVALID_ARG`] for null `out` or an unsupported
+/// compression mode (currently `MANGLE_COMPRESSION_ZSTD`), or
+/// [`MANGLE_ERR`] for store-side or encoding failures.
+///
+/// # Safety
+/// `engine` must be a live handle. `out` must be non-null and point to
+/// a writable [`MangleBuffer`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mangle_save_facts_mgr(
+    engine: *mut MangleEngine,
+    compression: i32,
+    out: *mut MangleBuffer,
+) -> i32 {
+    panic_boundary!(engine, {
+        if out.is_null() {
+            set_error_msg("mangle_save_facts_mgr: out pointer is null");
+            return MANGLE_ERR_INVALID_ARG;
+        }
+        // SAFETY: engine non-null and not poisoned per panic_boundary.
+        let eng = unsafe { &*engine };
+        let tables = match eng.all_relations_materialized() {
+            Ok(Some(t)) => t,
+            Ok(None) => {
+                set_error_msg("mangle_save_facts_mgr: engine has no rules loaded");
+                return MANGLE_ERR_NO_RULES;
+            }
+            Err(e) => {
+                set_error_msg(format!("mangle_save_facts_mgr: {e:#}"));
+                return MANGLE_ERR;
+            }
+        };
+        match encode_tables(tables, compression) {
+            Ok(bytes) => {
+                // SAFETY: out non-null per the precondition.
+                unsafe { write_buffer(out, bytes) };
+                MANGLE_OK
+            }
+            Err(e) => {
+                let msg = format!("mangle_save_facts_mgr: {e:#}");
+                set_error_msg(msg);
+                // Compression-mode validation errors map to invalid arg;
+                // everything else is generic. Both share the same Vec<u8>
+                // payload path, so the variant is the only thing we
+                // can discriminate on cheaply — done via the error
+                // text below.
+                classify_encode_err(compression)
+            }
+        }
+    })
+}
+
+/// Encode a single named relation as a SimpleRow `.mgr` blob,
+/// optionally compressed. Useful for per-relation backups or exports.
+///
+/// Returns [`MANGLE_ERR`] if the relation does not exist in the store;
+/// other error codes match [`mangle_save_facts_mgr`].
+///
+/// # Safety
+/// `engine` must be a live handle. `relation` must point to
+/// `relation_len` readable UTF-8 bytes. `out` must be non-null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mangle_save_relation_mgr(
+    engine: *mut MangleEngine,
+    relation: *const u8,
+    relation_len: usize,
+    compression: i32,
+    out: *mut MangleBuffer,
+) -> i32 {
+    panic_boundary!(engine, {
+        if out.is_null() {
+            set_error_msg("mangle_save_relation_mgr: out pointer is null");
+            return MANGLE_ERR_INVALID_ARG;
+        }
+        let relation_str = match read_utf8(relation, relation_len, "mangle_save_relation_mgr") {
+            Ok(s) => s,
+            Err(rc) => return rc,
+        };
+        // SAFETY: engine non-null and not poisoned per panic_boundary.
+        let eng = unsafe { &*engine };
+        let tuples = match eng.materialize_relation(&relation_str) {
+            Ok(Some(t)) => t,
+            Ok(None) => {
+                set_error_msg("mangle_save_relation_mgr: engine has no rules loaded");
+                return MANGLE_ERR_NO_RULES;
+            }
+            Err(e) => {
+                set_error_msg(format!("mangle_save_relation_mgr({relation_str}): {e:#}"));
+                return MANGLE_ERR;
+            }
+        };
+        let tables = vec![(relation_str, tuples)];
+        match encode_tables(tables, compression) {
+            Ok(bytes) => {
+                unsafe { write_buffer(out, bytes) };
+                MANGLE_OK
+            }
+            Err(e) => {
+                set_error_msg(format!("mangle_save_relation_mgr: {e:#}"));
+                classify_encode_err(compression)
+            }
+        }
+    })
+}
+
+/// Run a query and encode the matching tuples as a SimpleRow `.mgr`
+/// blob under the caller-supplied relation name `out_relation`.
+///
+/// Useful for "Export Query Result" — the user types `route("GET",
+/// Path)`, the workbench produces a downloadable `.mgr` file where
+/// the matching tuples live under a relation named e.g.
+/// `get_routes`. The output relation name is independent of the
+/// queried predicate, so it can be anything the consumer wants.
+///
+/// Query syntax matches [`mangle_query`].
+///
+/// # Safety
+/// `engine` must be a live handle. `query` must point to `query_len`
+/// readable UTF-8 bytes. `out_relation` must point to
+/// `out_relation_len` readable UTF-8 bytes (must be non-empty). `out`
+/// must be non-null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mangle_query_dump_mgr(
+    engine: *mut MangleEngine,
+    query: *const u8,
+    query_len: usize,
+    out_relation: *const u8,
+    out_relation_len: usize,
+    compression: i32,
+    out: *mut MangleBuffer,
+) -> i32 {
+    panic_boundary!(engine, {
+        if out.is_null() {
+            set_error_msg("mangle_query_dump_mgr: out pointer is null");
+            return MANGLE_ERR_INVALID_ARG;
+        }
+        let query_str = match read_utf8(query, query_len, "mangle_query_dump_mgr: query") {
+            Ok(s) => s,
+            Err(rc) => return rc,
+        };
+        let out_relation_str = match read_utf8(
+            out_relation,
+            out_relation_len,
+            "mangle_query_dump_mgr: out_relation",
+        ) {
+            Ok(s) => s,
+            Err(rc) => return rc,
+        };
+        if out_relation_str.is_empty() {
+            set_error_msg("mangle_query_dump_mgr: out_relation must be non-empty");
+            return MANGLE_ERR_INVALID_ARG;
+        }
+        let parsed = match parse_query_lenient(&query_str) {
+            Ok(p) => p,
+            Err(e) => {
+                set_error_msg(format!("mangle_query_dump_mgr: {e:#}"));
+                return MANGLE_ERR_PARSE;
+            }
+        };
+        // SAFETY: engine non-null and not poisoned per panic_boundary.
+        let eng = unsafe { &*engine };
+        let materialized = match eng.materialize_relation(&parsed.predicate) {
+            Ok(Some(t)) => t,
+            Ok(None) => {
+                set_error_msg("mangle_query_dump_mgr: engine has no rules loaded");
+                return MANGLE_ERR_NO_RULES;
+            }
+            Err(e) => {
+                set_error_msg(format!("mangle_query_dump_mgr: {e:#}"));
+                return MANGLE_ERR;
+            }
+        };
+        let filtered = filter_tuples(materialized, &parsed);
+        let tables = vec![(out_relation_str, filtered)];
+        match encode_tables(tables, compression) {
+            Ok(bytes) => {
+                unsafe { write_buffer(out, bytes) };
+                MANGLE_OK
+            }
+            Err(e) => {
+                set_error_msg(format!("mangle_query_dump_mgr: {e:#}"));
+                classify_encode_err(compression)
+            }
+        }
+    })
+}
+
+/// Read `len` bytes from `ptr` and decode as UTF-8. Returns
+/// `Err(error_code)` on failure with `last_error` populated.
+fn read_utf8(ptr: *const u8, len: usize, who: &str) -> std::result::Result<String, i32> {
+    if len == 0 {
+        return Ok(String::new());
+    }
+    if ptr.is_null() {
+        set_error_msg(format!("{who}: pointer is null but length is {len}"));
+        return Err(MANGLE_ERR_INVALID_ARG);
+    }
+    // SAFETY: caller's contract.
+    let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
+    match std::str::from_utf8(slice) {
+        Ok(s) => Ok(s.to_string()),
+        Err(e) => {
+            set_error_msg(format!("{who}: invalid UTF-8: {e}"));
+            Err(MANGLE_ERR_INVALID_ARG)
+        }
+    }
+}
+
+/// Map an encode/compress error to the right status code. Bad
+/// compression modes (including the unsupported zstd) → INVALID_ARG;
+/// everything else → generic ERR. The message in `last_error` carries
+/// the full detail.
+fn classify_encode_err(compression: i32) -> i32 {
+    // Anything outside the gzip-or-none valid set is treated as a bad
+    // compression argument: out-of-range values and zstd (which is a
+    // reserved-but-unimplemented mode on write) both belong here.
+    let supported = MANGLE_COMPRESSION_NONE..=MANGLE_COMPRESSION_GZIP;
+    if supported.contains(&compression) {
+        MANGLE_ERR
+    } else {
+        MANGLE_ERR_INVALID_ARG
+    }
 }
 
 #[cfg(test)]
