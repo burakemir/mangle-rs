@@ -25,6 +25,7 @@
 use anyhow::Result;
 use mangle_analysis::StratifiedProgram;
 use mangle_ast::Arena;
+use mangle_common::Value;
 use mangle_interpreter::{Interpreter, MemStore, Store};
 use mangle_ir::Ir;
 use ouroboros::self_referencing;
@@ -77,6 +78,23 @@ impl MangleEngine {
             generation: 0,
             inner: None,
         }
+    }
+
+    /// Materialize every tuple in `relation` into an owned `Vec<Vec<Value>>`.
+    ///
+    /// Returns `Ok(None)` when the engine has no rules loaded; returns
+    /// `Err` when the relation doesn't exist or scanning fails. The
+    /// returned vector is independent of the engine state, so cursors
+    /// built on top of it survive engine reload and engine free.
+    pub(crate) fn materialize_relation(&self, relation: &str) -> Result<Option<Vec<Vec<Value>>>> {
+        let Some(inner) = self.inner.as_ref() else {
+            return Ok(None);
+        };
+        inner.with_interp(|interp: &mangle_interpreter::Interpreter<'_>| {
+            let store = interp.store();
+            let scan = store.scan(relation)?;
+            Ok(Some(scan.collect()))
+        })
     }
 
     /// Compile + execute the given sources, replacing any existing

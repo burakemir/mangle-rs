@@ -16,8 +16,10 @@
 
 mod buffer;
 mod builder;
+mod cursor;
 mod engine;
 mod error;
+mod query;
 mod value;
 
 pub use buffer::{MangleBuffer, mangle_buffer_free};
@@ -26,6 +28,10 @@ pub use builder::{
     mangle_val_build_f64, mangle_val_build_i64, mangle_val_build_name, mangle_val_build_null,
     mangle_val_build_string, mangle_val_build_time_ns, mangle_val_builder_free,
     mangle_val_builder_new,
+};
+pub use cursor::{
+    MangleCursor, mangle_cursor_arity, mangle_cursor_col, mangle_cursor_free, mangle_cursor_next,
+    mangle_query,
 };
 pub use engine::{MangleEngine, mangle_engine_free, mangle_engine_new, mangle_load_rules};
 pub use error::mangle_last_error;

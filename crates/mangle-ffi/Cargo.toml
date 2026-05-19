@@ -24,6 +24,7 @@ mangle-ir.workspace = true
 mangle-analysis.workspace = true
 mangle-driver.workspace = true
 mangle-interpreter.workspace = true
+mangle-parse.workspace = true
 mangle-common = { workspace = true, features = ["edge"] }
 
 [build-dependencies]

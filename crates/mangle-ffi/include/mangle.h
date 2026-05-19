@@ -151,6 +151,11 @@ typedef struct MangleVal MangleVal;
 #define MANGLE_COMPOUND_STRUCT 3
 
 /**
+ * Query result cursor.
+ */
+typedef struct MangleCursor MangleCursor;
+
+/**
  * Opaque engine handle.
  *
  * The flag and counter fields are `pub(crate)` so the
@@ -321,6 +326,93 @@ const MangleVal *mangle_val_build_compound(struct MangleValBuilder *b,
                                            int32_t subkind,
                                            const MangleVal *const *elems,
                                            uintptr_t n);
+
+/**
+ * Open a cursor over the tuples matching `query`.
+ *
+ * `query` is a Mangle atom: a bare predicate name like `reachable`,
+ * or `pred(arg1, ...)` with constants used as equality filters and
+ * uppercase identifiers acting as wildcards. See
+ * [`crate::query::parse_query_lenient`] for the exact syntax.
+ *
+ * Returns [`MANGLE_OK`] on success and writes the cursor pointer to
+ * `*out`. Returns [`MANGLE_ERR_NO_RULES`] if the engine has no
+ * program loaded, [`MANGLE_ERR_PARSE`] for a malformed query, or
+ * [`MANGLE_ERR`] if the named relation does not exist in the store.
+ *
+ * The cursor must be released with [`mangle_cursor_free`] (which is
+ * safe to call in any order with respect to engine free). Calling
+ * [`mangle_cursor_next`] requires the engine to still be alive.
+ *
+ * # Safety
+ * `engine` must be a live handle. `query` must point to `query_len`
+ * readable UTF-8 bytes (or be null with `query_len == 0`). `out` must
+ * be non-null and point to writable storage for a `*mut MangleCursor`.
+ */
+int32_t mangle_query(struct MangleEngine *engine,
+                     const uint8_t *query,
+                     uintptr_t query_len,
+                     struct MangleCursor **out);
+
+/**
+ * Advance the cursor to the next row.
+ *
+ * Returns:
+ *   - [`MANGLE_OK`] (0) when a row was produced; access columns via
+ *     [`mangle_cursor_arity`] and [`mangle_cursor_col`].
+ *   - `1` when the cursor has reached end-of-stream. Further calls
+ *     also return `1`.
+ *   - [`MANGLE_ERR_CURSOR_INVALIDATED`] when the engine has been
+ *     reloaded or poisoned since the cursor was opened. The cursor
+ *     handle is still safe to free but yields no more rows.
+ *   - [`MANGLE_ERR_INVALID_ARG`] when `cursor` is null.
+ *
+ * # Safety
+ * `cursor` must be a live cursor. The engine that produced it must be
+ * alive at the time of the call (it is dereferenced to read the
+ * generation counter); calling this after `mangle_engine_free` on
+ * the producing engine is undefined behavior.
+ */
+int32_t mangle_cursor_next(struct MangleCursor *cursor);
+
+/**
+ * Report the arity (column count) of the current row.
+ *
+ * Returns the column count when a row is loaded (after a successful
+ * [`mangle_cursor_next`]). Returns `0` when no row is loaded
+ * (before first call or after end-of-stream). Returns `-1` if
+ * `cursor` is null.
+ *
+ * # Safety
+ * `cursor` must be null or a live cursor.
+ */
+int32_t mangle_cursor_arity(struct MangleCursor *cursor);
+
+/**
+ * Borrowed handle to the column at `col_idx` in the current row.
+ *
+ * Returns null if `cursor` is null, no row is loaded, or the index is
+ * out of range. The returned handle borrows from the cursor's
+ * current-row buffer and is valid until the next call to
+ * [`mangle_cursor_next`] or [`mangle_cursor_free`] on this cursor.
+ *
+ * # Safety
+ * `cursor` must be null or a live cursor.
+ */
+const MangleVal *mangle_cursor_col(struct MangleCursor *cursor, uint32_t col_idx);
+
+/**
+ * Release a cursor.
+ *
+ * Safe to call on null. Safe to call regardless of the producing
+ * engine's state (the cursor's row data is owned, not borrowed; this
+ * function does not dereference the stored engine pointer).
+ *
+ * # Safety
+ * If `cursor` is non-null, it must point to a cursor previously
+ * returned by [`mangle_query`] that has not already been freed.
+ */
+void mangle_cursor_free(struct MangleCursor *cursor);
 
 /**
  * Construct a new engine.

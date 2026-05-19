@@ -279,5 +279,137 @@ int32_t c_smoke_run(void) {
     mangle_val_builder_free(vb);
     mangle_val_builder_free(NULL);
 
+    /* ---- mangle_query + cursor ------------------------------------ */
+
+    /* 24. Open engine, load rules, query, iterate. */
+    if (mangle_engine_new(0, &eng) != MANGLE_OK) return 70;
+    const char* edges =
+        "edge(1, 2).\n"
+        "edge(2, 3).\n"
+        "edge(3, 4).\n";
+    const uint8_t* edge_sources[1] = { (const uint8_t*)edges };
+    size_t edge_lens[1] = { strlen(edges) };
+    if (mangle_load_rules(eng, edge_sources, edge_lens, 1) != MANGLE_OK) {
+        mangle_engine_free(eng);
+        return 71;
+    }
+
+    const char* q = "edge";
+    MangleCursor* cur = NULL;
+    if (mangle_query(eng, (const uint8_t*)q, strlen(q), &cur) != MANGLE_OK) {
+        mangle_engine_free(eng);
+        return 72;
+    }
+    if (cur == NULL) {
+        mangle_engine_free(eng);
+        return 73;
+    }
+
+    /* Iterate; expect 3 rows of arity 2 with i64 columns. */
+    int rows = 0;
+    for (;;) {
+        int32_t rcn = mangle_cursor_next(cur);
+        if (rcn == 1) break;
+        if (rcn != MANGLE_OK) {
+            mangle_cursor_free(cur);
+            mangle_engine_free(eng);
+            return 74;
+        }
+        if (mangle_cursor_arity(cur) != 2) {
+            mangle_cursor_free(cur);
+            mangle_engine_free(eng);
+            return 75;
+        }
+        const MangleVal* c0 = mangle_cursor_col(cur, 0);
+        const MangleVal* c1 = mangle_cursor_col(cur, 1);
+        if (c0 == NULL || c1 == NULL) {
+            mangle_cursor_free(cur);
+            mangle_engine_free(eng);
+            return 76;
+        }
+        if (mangle_val_kind(c0) != MANGLE_VAL_NUMBER
+            || mangle_val_kind(c1) != MANGLE_VAL_NUMBER) {
+            mangle_cursor_free(cur);
+            mangle_engine_free(eng);
+            return 77;
+        }
+        rows++;
+    }
+    if (rows != 3) {
+        mangle_cursor_free(cur);
+        mangle_engine_free(eng);
+        return 78;
+    }
+
+    /* End-of-stream is sticky. */
+    if (mangle_cursor_next(cur) != 1) {
+        mangle_cursor_free(cur);
+        mangle_engine_free(eng);
+        return 79;
+    }
+
+    /* cursor_col after end-of-stream returns NULL. */
+    if (mangle_cursor_col(cur, 0) != NULL) {
+        mangle_cursor_free(cur);
+        mangle_engine_free(eng);
+        return 80;
+    }
+
+    mangle_cursor_free(cur);
+
+    /* 25. Query with engine that has no rules → MANGLE_ERR_NO_RULES. */
+    MangleEngine* eng2 = NULL;
+    mangle_engine_new(0, &eng2);
+    MangleCursor* cur2 = NULL;
+    int32_t rc_nr = mangle_query(eng2, (const uint8_t*)q, strlen(q), &cur2);
+    if (rc_nr != MANGLE_ERR_NO_RULES) {
+        mangle_engine_free(eng2);
+        mangle_engine_free(eng);
+        return 81;
+    }
+    mangle_last_error(&drain);
+    mangle_buffer_free(&drain);
+    mangle_engine_free(eng2);
+
+    /* 26. Reload invalidates the cursor. */
+    if (mangle_query(eng, (const uint8_t*)q, strlen(q), &cur) != MANGLE_OK) {
+        mangle_engine_free(eng);
+        return 82;
+    }
+    /* Read one row (warms up the cursor). */
+    if (mangle_cursor_next(cur) != MANGLE_OK) {
+        mangle_cursor_free(cur);
+        mangle_engine_free(eng);
+        return 83;
+    }
+    /* Reload — bumps the generation. */
+    if (mangle_load_rules(eng, edge_sources, edge_lens, 1) != MANGLE_OK) {
+        mangle_cursor_free(cur);
+        mangle_engine_free(eng);
+        return 84;
+    }
+    /* Next call sees the invalidation. */
+    if (mangle_cursor_next(cur) != MANGLE_ERR_CURSOR_INVALIDATED) {
+        mangle_cursor_free(cur);
+        mangle_engine_free(eng);
+        return 85;
+    }
+    mangle_last_error(&drain);
+    mangle_buffer_free(&drain);
+    mangle_cursor_free(cur);
+
+    /* 27. cursor_free(NULL) and cursor accessors on NULL. */
+    mangle_cursor_free(NULL);
+    if (mangle_cursor_arity(NULL) != -1) {
+        mangle_engine_free(eng);
+        return 86;
+    }
+    if (mangle_cursor_col(NULL, 0) != NULL) {
+        mangle_engine_free(eng);
+        return 87;
+    }
+
+    mangle_engine_free(eng);
+
     return 0;
 }

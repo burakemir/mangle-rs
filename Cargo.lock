@@ -1356,6 +1356,7 @@ dependencies = [
  "mangle-driver",
  "mangle-interpreter",
  "mangle-ir",
+ "mangle-parse",
  "ouroboros",
 ]
 
