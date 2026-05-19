@@ -116,5 +116,66 @@ int32_t c_smoke_run(void) {
     mangle_engine_free(eng_a);
     mangle_engine_free(eng_b);
 
+    /* ---- mangle_load_rules ----------------------------------------- */
+
+    /* 14. Load a small valid program. */
+    if (mangle_engine_new(0, &eng) != MANGLE_OK) return 40;
+    const char* src1 = "edge(1, 2).\nedge(2, 3).\nreachable(X,Y) :- edge(X,Y).\n";
+    const uint8_t* sources1[1] = { (const uint8_t*)src1 };
+    size_t lens1[1] = { strlen(src1) };
+    rc = mangle_load_rules(eng, sources1, lens1, 1);
+    if (rc != MANGLE_OK) {
+        /* Drain the error so it doesn't bleed into the next step. */
+        mangle_last_error(&drain);
+        mangle_buffer_free(&drain);
+        mangle_engine_free(eng);
+        return 41;
+    }
+
+    /* 15. Reload (engine should accept it). */
+    rc = mangle_load_rules(eng, sources1, lens1, 1);
+    if (rc != MANGLE_OK) {
+        mangle_engine_free(eng);
+        return 42;
+    }
+
+    /* 16. Parse error → MANGLE_ERR_PARSE + non-empty last_error. */
+    const char* bad = "@@@ this is not mangle @@@";
+    const uint8_t* sources_bad[1] = { (const uint8_t*)bad };
+    size_t lens_bad[1] = { strlen(bad) };
+    rc = mangle_load_rules(eng, sources_bad, lens_bad, 1);
+    if (rc != MANGLE_ERR_PARSE) {
+        mangle_engine_free(eng);
+        return 43;
+    }
+    MangleBuffer err_load = {0};
+    mangle_last_error(&err_load);
+    if (err_load.len == 0) {
+        mangle_buffer_free(&err_load);
+        mangle_engine_free(eng);
+        return 44;
+    }
+    mangle_buffer_free(&err_load);
+
+    /* 17. null engine → MANGLE_ERR_INVALID_ARG. */
+    rc = mangle_load_rules(NULL, sources1, lens1, 1);
+    if (rc != MANGLE_ERR_INVALID_ARG) {
+        mangle_engine_free(eng);
+        return 45;
+    }
+    mangle_last_error(&drain);
+    mangle_buffer_free(&drain);
+
+    /* 18. Zero sources → MANGLE_ERR_INVALID_ARG. */
+    rc = mangle_load_rules(eng, NULL, NULL, 0);
+    if (rc != MANGLE_ERR_INVALID_ARG) {
+        mangle_engine_free(eng);
+        return 46;
+    }
+    mangle_last_error(&drain);
+    mangle_buffer_free(&drain);
+
+    mangle_engine_free(eng);
+
     return 0;
 }

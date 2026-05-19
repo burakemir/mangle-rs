@@ -1347,8 +1347,16 @@ dependencies = [
 name = "mangle-ffi"
 version = "0.7.0"
 dependencies = [
+ "anyhow",
  "cbindgen",
  "cc",
+ "mangle-analysis",
+ "mangle-ast",
+ "mangle-common",
+ "mangle-driver",
+ "mangle-interpreter",
+ "mangle-ir",
+ "ouroboros",
 ]
 
 [[package]]

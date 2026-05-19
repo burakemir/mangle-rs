@@ -83,9 +83,9 @@
 /**
  * Opaque engine handle.
  *
- * The `poisoned` flag is `pub(crate)` so the `panic_boundary` macro can
- * read and set it directly across module boundaries; consumers see only
- * an opaque pointer.
+ * The flag and counter fields are `pub(crate)` so the
+ * `panic_boundary!` macro can read/mutate them directly; consumers see
+ * only an opaque pointer through the C ABI.
  */
 typedef struct MangleEngine MangleEngine;
 
@@ -137,7 +137,7 @@ void mangle_buffer_free(struct MangleBuffer *buf);
  *
  * `enable_provenance` is nonzero to record derivation provenance during
  * rule evaluation (M9 surface); zero disables it. The flag is captured
- * here and consulted later when rules are loaded.
+ * here and consulted when rules are loaded.
  *
  * On success, writes the engine pointer to `*out` and returns
  * [`MANGLE_OK`]. The caller owns the handle and must release it with
@@ -163,6 +163,32 @@ int32_t mangle_engine_new(int32_t enable_provenance, struct MangleEngine **out);
  * produced by [`mangle_engine_new`] that has not already been freed.
  */
 void mangle_engine_free(struct MangleEngine *engine);
+
+/**
+ * Compile and execute one or more Mangle source units, replacing any
+ * previously loaded program.
+ *
+ * `sources` is an array of `n_sources` pointers; `lens` parallels it
+ * with the byte length of each source. Each source is treated as
+ * UTF-8.
+ *
+ * On success, returns [`MANGLE_OK`] and bumps the engine's generation
+ * counter (any cursors opened against the previous generation will
+ * refuse subsequent reads). On parse / type-check / evaluation
+ * failure, the engine's previous state is preserved unchanged and a
+ * nonzero status is returned with the formatted error available via
+ * [`mangle_last_error`].
+ *
+ * # Safety
+ * `engine` must be a live handle from [`mangle_engine_new`].
+ * `sources` and `lens` must point to readable arrays of `n_sources`
+ * elements; each `sources[i]` must point to `lens[i]` readable bytes
+ * of UTF-8.
+ */
+int32_t mangle_load_rules(struct MangleEngine *engine,
+                          const uint8_t *const *sources,
+                          const uintptr_t *lens,
+                          uintptr_t n_sources);
 
 /**
  * Copy the current thread-local error message into `out` and clear it.

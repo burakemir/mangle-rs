@@ -19,12 +19,14 @@ mod engine;
 mod error;
 
 pub use buffer::{MangleBuffer, mangle_buffer_free};
-pub use engine::{MangleEngine, mangle_engine_free, mangle_engine_new};
+pub use engine::{MangleEngine, mangle_engine_free, mangle_engine_new, mangle_load_rules};
 pub use error::mangle_last_error;
 
 // Re-exported test helpers — not part of the C ABI.
 #[doc(hidden)]
-pub use engine::{force_panic_engineless, force_panic_with_engine};
+pub use engine::{
+    engine_generation, engine_has_rules, force_panic_engineless, force_panic_with_engine,
+};
 
 use buffer::write_buffer;
 use error::{panic_boundary, set_error_msg};

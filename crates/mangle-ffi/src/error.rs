@@ -91,9 +91,13 @@ macro_rules! panic_boundary {
                 $crate::error::set_error_from_panic(payload);
                 // SAFETY: same contract as above; the engine is still
                 // allocated (panic happened inside the closure, not
-                // during a free).
+                // during a free). Bumping the generation invalidates
+                // any cursors that were stamped against the pre-panic
+                // state (M4 cursor check); poisoning blocks all other
+                // operations.
                 unsafe {
                     (*engine_ptr).poisoned = true;
+                    (*engine_ptr).generation = (*engine_ptr).generation.wrapping_add(1);
                 }
                 $crate::MANGLE_ERR_PANIC
             }

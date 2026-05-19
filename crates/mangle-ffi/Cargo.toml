@@ -17,6 +17,14 @@ repository.workspace = true
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
+anyhow.workspace = true
+ouroboros = "0.18"
+mangle-ast.workspace = true
+mangle-ir.workspace = true
+mangle-analysis.workspace = true
+mangle-driver.workspace = true
+mangle-interpreter.workspace = true
+mangle-common = { workspace = true, features = ["edge"] }
 
 [build-dependencies]
 # Need ≥0.28 for Rust 2024 `#[unsafe(no_mangle)]` attribute parsing.
