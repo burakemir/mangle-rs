@@ -17,7 +17,8 @@ members = [
     "crates/mangle-server",
     "crates/mangle-db",
     "crates/mangle-wasm",
-    "crates/mangle-py"
+    "crates/mangle-py",
+    "crates/mangle-ffi"
 ]
 
 [workspace.package]

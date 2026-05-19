@@ -1,0 +1,24 @@
+[package]
+name = "mangle-ffi"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "C ABI for the Mangle logic-programming engine"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[lib]
+# cdylib: shared library for foreign consumers (e.g. .NET P/Invoke, csbindgen).
+# staticlib: static archive variant of the same.
+# rlib: needed so integration tests can link against extern "C" symbols defined
+#       in this crate. Without it, `cargo test` builds a separate test binary
+#       that can't see the cdylib's symbols.
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+
+[build-dependencies]
+# Need ≥0.28 for Rust 2024 `#[unsafe(no_mangle)]` attribute parsing.
+cbindgen = "0.29"
+cc = "1"
