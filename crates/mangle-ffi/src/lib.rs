@@ -15,12 +15,27 @@
 //! the companion impl-plan note.
 
 mod buffer;
+mod builder;
 mod engine;
 mod error;
+mod value;
 
 pub use buffer::{MangleBuffer, mangle_buffer_free};
+pub use builder::{
+    MangleValBuilder, mangle_val_build_compound, mangle_val_build_duration_ns,
+    mangle_val_build_f64, mangle_val_build_i64, mangle_val_build_name, mangle_val_build_null,
+    mangle_val_build_string, mangle_val_build_time_ns, mangle_val_builder_free,
+    mangle_val_builder_new,
+};
 pub use engine::{MangleEngine, mangle_engine_free, mangle_engine_new, mangle_load_rules};
 pub use error::mangle_last_error;
+pub use value::{
+    MANGLE_COMPOUND_LIST, MANGLE_COMPOUND_MAP, MANGLE_COMPOUND_PAIR, MANGLE_COMPOUND_STRUCT,
+    MANGLE_VAL_COMPOUND, MANGLE_VAL_DURATION, MANGLE_VAL_FLOAT, MANGLE_VAL_NAME, MANGLE_VAL_NULL,
+    MANGLE_VAL_NUMBER, MANGLE_VAL_STRING, MANGLE_VAL_TIME, MangleVal, mangle_val_as_f64,
+    mangle_val_as_i64, mangle_val_as_str, mangle_val_compound_get, mangle_val_compound_kind,
+    mangle_val_compound_kv, mangle_val_compound_len, mangle_val_kind,
+};
 
 // Re-exported test helpers — not part of the C ABI.
 #[doc(hidden)]

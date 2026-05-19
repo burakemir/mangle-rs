@@ -177,5 +177,107 @@ int32_t c_smoke_run(void) {
 
     mangle_engine_free(eng);
 
+    /* ---- mangle_val_builder + value accessors ---------------------- */
+
+    /* 19. New builder, build each scalar kind, read back. */
+    MangleValBuilder* vb = mangle_val_builder_new();
+    if (vb == NULL) return 50;
+
+    const MangleVal* vnull = mangle_val_build_null(vb);
+    if (vnull == NULL || mangle_val_kind(vnull) != MANGLE_VAL_NULL) {
+        mangle_val_builder_free(vb);
+        return 51;
+    }
+
+    const MangleVal* vnum = mangle_val_build_i64(vb, 42);
+    int64_t i_out = 0;
+    if (mangle_val_kind(vnum) != MANGLE_VAL_NUMBER
+        || mangle_val_as_i64(vnum, &i_out) != MANGLE_OK
+        || i_out != 42) {
+        mangle_val_builder_free(vb);
+        return 52;
+    }
+
+    const MangleVal* vflt = mangle_val_build_f64(vb, 1.5);
+    double f_out = 0.0;
+    if (mangle_val_kind(vflt) != MANGLE_VAL_FLOAT
+        || mangle_val_as_f64(vflt, &f_out) != MANGLE_OK
+        || f_out != 1.5) {
+        mangle_val_builder_free(vb);
+        return 53;
+    }
+
+    const char* str = "hi";
+    const MangleVal* vstr = mangle_val_build_string(vb, (const uint8_t*)str, strlen(str));
+    MangleBuffer sbuf = {0};
+    if (mangle_val_kind(vstr) != MANGLE_VAL_STRING
+        || mangle_val_as_str(vstr, &sbuf) != MANGLE_OK
+        || sbuf.len != 2
+        || sbuf.data[0] != 'h' || sbuf.data[1] != 'i') {
+        mangle_buffer_free(&sbuf);
+        mangle_val_builder_free(vb);
+        return 54;
+    }
+    mangle_buffer_free(&sbuf);
+
+    /* 20. Name validation: requires leading '/'. */
+    const char* bad_name = "admin";
+    const MangleVal* vnbad = mangle_val_build_name(vb, (const uint8_t*)bad_name, strlen(bad_name));
+    if (vnbad != NULL) {
+        mangle_val_builder_free(vb);
+        return 55;
+    }
+    /* Drain the error from the failed name. */
+    mangle_last_error(&drain);
+    mangle_buffer_free(&drain);
+
+    const char* good_name = "/admin";
+    const MangleVal* vname = mangle_val_build_name(vb, (const uint8_t*)good_name, strlen(good_name));
+    if (vname == NULL || mangle_val_kind(vname) != MANGLE_VAL_NAME) {
+        mangle_val_builder_free(vb);
+        return 56;
+    }
+
+    /* 21. Compound list [1, 2, 3] and walk. */
+    const MangleVal* one = mangle_val_build_i64(vb, 1);
+    const MangleVal* two = mangle_val_build_i64(vb, 2);
+    const MangleVal* three = mangle_val_build_i64(vb, 3);
+    const MangleVal* elems[3] = { one, two, three };
+    const MangleVal* list = mangle_val_build_compound(vb, MANGLE_COMPOUND_LIST, elems, 3);
+    int32_t subkind = -1;
+    size_t clen = 0;
+    if (list == NULL
+        || mangle_val_kind(list) != MANGLE_VAL_COMPOUND
+        || mangle_val_compound_kind(list, &subkind) != MANGLE_OK
+        || subkind != MANGLE_COMPOUND_LIST
+        || mangle_val_compound_len(list, &clen) != MANGLE_OK
+        || clen != 3) {
+        mangle_val_builder_free(vb);
+        return 57;
+    }
+    for (size_t i = 0; i < 3; i++) {
+        const MangleVal* el = mangle_val_compound_get(list, i);
+        int64_t n = 0;
+        if (el == NULL || mangle_val_as_i64(el, &n) != MANGLE_OK || n != (int64_t)(i + 1)) {
+            mangle_val_builder_free(vb);
+            return 58;
+        }
+    }
+
+    /* 22. Out-of-range compound_get returns NULL. */
+    if (mangle_val_compound_get(list, 99) != NULL) {
+        mangle_val_builder_free(vb);
+        return 59;
+    }
+
+    /* 23. mangle_val_kind(NULL) returns -1. */
+    if (mangle_val_kind(NULL) != -1) {
+        mangle_val_builder_free(vb);
+        return 60;
+    }
+
+    mangle_val_builder_free(vb);
+    mangle_val_builder_free(NULL);
+
     return 0;
 }

@@ -20,10 +20,27 @@ documentation_style = "doxy"
 no_includes = false
 sys_includes = ["stdint.h", "stddef.h"]
 
+# Forward-declare MangleVal as an opaque struct. The Rust side uses a
+# type alias `pub type MangleVal = mangle_common::Value;`, but Value
+# lives outside this crate and cbindgen doesn't parse dependencies, so
+# we suppress the (broken) auto-generated typedef and emit our own
+# opaque forward declaration here.
+after_includes = """
+
+/**
+ * Opaque value handle. The layout is internal; consumers may only
+ * inspect a `MangleVal` through the `mangle_val_*` accessor functions
+ * declared below. Lifetime: a handle is borrowed from its producer
+ * (`MangleValBuilder` today, cursor row buffers from M4 onwards) and
+ * must not outlive it.
+ */
+typedef struct MangleVal MangleVal;
+"""
+
 [export]
 prefix = ""
-# Internal symbols used by the C smoke harness; not part of the public ABI.
-exclude = ["c_smoke_run"]
+# Internal symbols and the MangleVal type alias (forward-declared above).
+exclude = ["c_smoke_run", "MangleVal"]
 
 [parse]
 parse_deps = false

@@ -24,6 +24,16 @@
 #include <stddef.h>
 
 /**
+ * Opaque value handle. The layout is internal; consumers may only
+ * inspect a `MangleVal` through the `mangle_val_*` accessor functions
+ * declared below. Lifetime: a handle is borrowed from its producer
+ * (`MangleValBuilder` today, cursor row buffers from M4 onwards) and
+ * must not outlive it.
+ */
+typedef struct MangleVal MangleVal;
+
+
+/**
  * FFI status: success.
  */
 #define MANGLE_OK 0
@@ -81,6 +91,66 @@
 #define MANGLE_ERR_PANIC -8
 
 /**
+ * Value kind: `Null`.
+ */
+#define MANGLE_VAL_NULL 0
+
+/**
+ * Value kind: `Number(i64)`.
+ */
+#define MANGLE_VAL_NUMBER 1
+
+/**
+ * Value kind: `Float(f64)`.
+ */
+#define MANGLE_VAL_FLOAT 2
+
+/**
+ * Value kind: `String`.
+ */
+#define MANGLE_VAL_STRING 3
+
+/**
+ * Value kind: `Name` (a `/`-prefixed identifier).
+ */
+#define MANGLE_VAL_NAME 4
+
+/**
+ * Value kind: `Time` (i64 nanoseconds since Unix epoch).
+ */
+#define MANGLE_VAL_TIME 5
+
+/**
+ * Value kind: `Duration` (i64 nanoseconds).
+ */
+#define MANGLE_VAL_DURATION 6
+
+/**
+ * Value kind: `Compound` (list, pair, map, or struct).
+ */
+#define MANGLE_VAL_COMPOUND 7
+
+/**
+ * Compound subkind: ordered sequence.
+ */
+#define MANGLE_COMPOUND_LIST 0
+
+/**
+ * Compound subkind: two-element pair.
+ */
+#define MANGLE_COMPOUND_PAIR 1
+
+/**
+ * Compound subkind: keyed map (flat `[k0, v0, k1, v1, ...]`).
+ */
+#define MANGLE_COMPOUND_MAP 2
+
+/**
+ * Compound subkind: struct (flat `[k0, v0, k1, v1, ...]` with name keys).
+ */
+#define MANGLE_COMPOUND_STRUCT 3
+
+/**
  * Opaque engine handle.
  *
  * The flag and counter fields are `pub(crate)` so the
@@ -88,6 +158,13 @@
  * only an opaque pointer through the C ABI.
  */
 typedef struct MangleEngine MangleEngine;
+
+/**
+ * Arena owning a set of `Value`s constructed via the `build_*` entry
+ * points. Hands out `*const MangleVal` handles that are valid until
+ * the builder is freed.
+ */
+typedef struct MangleValBuilder MangleValBuilder;
 
 /**
  * A heap-allocated byte buffer owned by the caller.
@@ -131,6 +208,119 @@ int32_t mangle_version(struct MangleBuffer *out);
  * fields must not have been modified by the caller.
  */
 void mangle_buffer_free(struct MangleBuffer *buf);
+
+/**
+ * Construct a new value builder. Returns null on allocation failure
+ * (which is currently unreachable, but the C ABI consumer should still
+ * check). Release with [`mangle_val_builder_free`].
+ *
+ * # Safety
+ * Safe to call from any context; the `unsafe` marker is for ABI
+ * consistency with the other entry points in this crate.
+ */
+struct MangleValBuilder *mangle_val_builder_new(void);
+
+/**
+ * Release a builder. All handles previously returned by `build_*`
+ * against this builder become invalid; using them after this call is
+ * UB. Passing null is a no-op.
+ *
+ * # Safety
+ * If `b` is non-null, it must point to a builder previously returned
+ * by [`mangle_val_builder_new`] that has not already been freed.
+ */
+void mangle_val_builder_free(struct MangleValBuilder *b);
+
+/**
+ * Build a `Null` value.
+ *
+ * # Safety
+ * `b` must be a live builder.
+ */
+const MangleVal *mangle_val_build_null(struct MangleValBuilder *b);
+
+/**
+ * Build a `Number` value from an `i64`.
+ *
+ * # Safety
+ * `b` must be a live builder.
+ */
+const MangleVal *mangle_val_build_i64(struct MangleValBuilder *b, int64_t n);
+
+/**
+ * Build a `Float` value from an `f64`.
+ *
+ * # Safety
+ * `b` must be a live builder.
+ */
+const MangleVal *mangle_val_build_f64(struct MangleValBuilder *b, double f);
+
+/**
+ * Build a `Time` value from i64 nanoseconds since the Unix epoch.
+ *
+ * # Safety
+ * `b` must be a live builder.
+ */
+const MangleVal *mangle_val_build_time_ns(struct MangleValBuilder *b, int64_t nanos);
+
+/**
+ * Build a `Duration` value from i64 nanoseconds.
+ *
+ * # Safety
+ * `b` must be a live builder.
+ */
+const MangleVal *mangle_val_build_duration_ns(struct MangleValBuilder *b, int64_t nanos);
+
+/**
+ * Build a `String` value from a UTF-8 byte slice. Returns null and
+ * sets last_error on invalid UTF-8.
+ *
+ * # Safety
+ * `b` must be live. `s` must point to `len` readable bytes (or be null
+ * with `len == 0`).
+ */
+const MangleVal *mangle_val_build_string(struct MangleValBuilder *b,
+                                         const uint8_t *s,
+                                         uintptr_t len);
+
+/**
+ * Build a `Name` value from a UTF-8 byte slice.
+ *
+ * Mangle name constants must start with `/`; otherwise this returns
+ * null and populates `last_error`. (Matches mangle-py's `PyName::new`
+ * contract.)
+ *
+ * # Safety
+ * `b` must be live. `s` must point to `len` readable bytes (or be null
+ * with `len == 0`).
+ */
+const MangleVal *mangle_val_build_name(struct MangleValBuilder *b, const uint8_t *s, uintptr_t len);
+
+/**
+ * Build a compound value (`List`, `Pair`, `Map`, or `Struct`) by
+ * cloning the given element handles into a new `Value::Compound`.
+ *
+ * `subkind` selects the compound kind via the `MANGLE_COMPOUND_*`
+ * constants. For `Map` and `Struct`, `elems` is a flat `[k0, v0, k1,
+ * v1, ...]` sequence and `n` is the total entry count (so `n` must be
+ * even).
+ *
+ * Element handles must point to values living in the same builder (or
+ * in any other producer with stable lifetime through this call); they
+ * are cloned, not aliased, so the originals can be freed independently
+ * of the resulting compound.
+ *
+ * Returns null and sets last_error on bad subkind, bad element
+ * pointer, or odd `n` for map/struct.
+ *
+ * # Safety
+ * `b` must be live. `elems` must point to `n` readable `*const MangleVal`
+ * entries; each non-null entry must reference a live value.
+ */
+const MangleVal *mangle_val_build_compound(struct MangleValBuilder *b,
+                                           int32_t subkind,
+                                           const MangleVal *const *elems,
+                                           uintptr_t n);
 
 /**
  * Construct a new engine.
@@ -202,6 +392,103 @@ int32_t mangle_load_rules(struct MangleEngine *engine,
  * `out` must be non-null and point to a writable [`MangleBuffer`].
  */
 int32_t mangle_last_error(struct MangleBuffer *out);
+
+/**
+ * Report the kind tag of a value.
+ *
+ * Returns one of the `MANGLE_VAL_*` constants. Returns `-1` if `v` is
+ * null or accessing it panics.
+ *
+ * # Safety
+ * If `v` is non-null, it must point to a live `MangleVal` borrowed
+ * from a producer (builder or cursor row) that has not been freed.
+ */
+int32_t mangle_val_kind(const MangleVal *v);
+
+/**
+ * Extract an `i64` from a `Number`, `Time`, or `Duration` value.
+ *
+ * Returns [`MANGLE_OK`] on success. Returns [`MANGLE_ERR_INVALID_ARG`]
+ * for null inputs and [`MANGLE_ERR`] for a wrong-kind value (with the
+ * last_error slot populated).
+ *
+ * # Safety
+ * `v` and `out` must be non-null and live.
+ */
+int32_t mangle_val_as_i64(const MangleVal *v, int64_t *out);
+
+/**
+ * Extract an `f64` from a `Float` value.
+ *
+ * # Safety
+ * `v` and `out` must be non-null and live.
+ */
+int32_t mangle_val_as_f64(const MangleVal *v, double *out);
+
+/**
+ * Copy the textual content of a `String` or `Name` value into `out`.
+ *
+ * For a `Name`, the leading `/` is **kept** — consumers that want it
+ * stripped should slice the buffer after the call. (Keeping it
+ * preserves the round-trip property: `build_name(as_str(name))` is the
+ * identity.)
+ *
+ * # Safety
+ * `v` and `out` must be non-null and live.
+ */
+int32_t mangle_val_as_str(const MangleVal *v, struct MangleBuffer *out);
+
+/**
+ * Report the compound subkind of a compound value.
+ *
+ * # Safety
+ * `v` and `subkind_out` must be non-null and live.
+ */
+int32_t mangle_val_compound_kind(const MangleVal *v, int32_t *subkind_out);
+
+/**
+ * Report the number of items (for `List`/`Pair`) or pairs (for
+ * `Map`/`Struct`) in a compound value.
+ *
+ * For maps and structs, the underlying flat vector has `2*N` entries
+ * for `N` pairs; this function returns `N`, not `2*N`.
+ *
+ * # Safety
+ * `v` and `out` must be non-null and live.
+ */
+int32_t mangle_val_compound_len(const MangleVal *v, uintptr_t *out);
+
+/**
+ * Borrowed handle to a compound element at the given linear index.
+ *
+ * Use this for `List`/`Pair` values. For `Map`/`Struct`, use
+ * [`mangle_val_compound_kv`] instead — the indexing semantics differ
+ * (pair index vs. flat index).
+ *
+ * Returns `null` if `v` is null, not a compound, or the index is out
+ * of range. The returned handle borrows from the same producer as
+ * `v`; do not outlive it.
+ *
+ * # Safety
+ * `v` must be null or a live handle.
+ */
+const MangleVal *mangle_val_compound_get(const MangleVal *v, uintptr_t index);
+
+/**
+ * Borrowed handles to the key and value at a given pair index in a
+ * `Map` or `Struct` value.
+ *
+ * `pair_index` is in `0..N` where `N` is `mangle_val_compound_len`.
+ * The underlying flat vector positions are `2 * pair_index` (key) and
+ * `2 * pair_index + 1` (value).
+ *
+ * # Safety
+ * `v`, `key_out`, and `val_out` must be non-null and live.
+ */
+int32_t mangle_val_compound_kv(const MangleVal *v,
+                               uintptr_t pair_index,
+                               const MangleVal **key_out,
+                               const MangleVal **val_out);
 
 #ifdef __cplusplus
 }  // extern "C"
