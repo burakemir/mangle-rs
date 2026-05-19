@@ -31,7 +31,8 @@ use mangle_ir::Ir;
 use ouroboros::self_referencing;
 
 use crate::error::{panic_boundary, set_error_msg};
-use crate::{MANGLE_ERR_INVALID_ARG, MANGLE_ERR_PARSE, MANGLE_OK};
+use crate::schema::Schema;
+use crate::{MANGLE_ERR_INVALID_ARG, MANGLE_ERR_PARSE, MANGLE_ERR_UNKNOWN_RELATION, MANGLE_OK};
 
 /// Materialized snapshot of every relation in a store: a vec of
 /// `(relation_name, tuples)` pairs. Shaped to plug directly into
@@ -73,6 +74,11 @@ pub struct MangleEngine {
     pub(crate) poisoned: bool,
     pub(crate) generation: u64,
     pub(crate) inner: Option<ProgramInner>,
+    /// Cached schema, built at `load_rules` time. `None` when Fresh,
+    /// `Some` when Loaded. Touched by every entry point that names a
+    /// relation; the schema check rejects unknown-relation accesses
+    /// before they reach the store. See `crate::schema` for details.
+    pub(crate) schema: Option<Schema>,
 }
 
 impl MangleEngine {
@@ -82,6 +88,7 @@ impl MangleEngine {
             poisoned: false,
             generation: 0,
             inner: None,
+            schema: None,
         }
     }
 
@@ -100,6 +107,11 @@ impl MangleEngine {
             let scan = store.scan(relation)?;
             Ok(Some(scan.collect()))
         })
+    }
+
+    /// Borrow the engine's schema cache. `None` when Fresh.
+    pub(crate) fn schema(&self) -> Option<&Schema> {
+        self.schema.as_ref()
     }
 
     /// Insert a tuple as an EDB fact. Returns `Ok(None)` when no rules
@@ -201,6 +213,15 @@ impl MangleEngine {
     pub(crate) fn load_rules(&mut self, sources: Vec<String>) -> Result<()> {
         let enable_provenance = self.enable_provenance;
 
+        // The schema needs to be built from the just-compiled
+        // StratifiedProgram, but ouroboros's `compiled` field has no
+        // post-construction accessor (it's mut-borrowed by `interp`).
+        // We capture the schema via a side channel inside the
+        // `interp_builder` closure, which is the last place we have a
+        // borrow of `compiled` during construction. Schema is fully
+        // owned (no lifetime tied to the arena), so moving it out
+        // afterwards is sound.
+        let mut captured_schema: Option<Schema> = None;
         let inner = ProgramInnerTryBuilder {
             arena: Arena::new_with_global_interner(),
             compiled_builder: |arena| -> Result<CompiledIr<'_>> {
@@ -209,6 +230,7 @@ impl MangleEngine {
                 Ok(CompiledIr { ir, stratified })
             },
             interp_builder: |compiled: &mut CompiledIr<'_>| -> Result<Interpreter<'_>> {
+                captured_schema = Some(Schema::build(&compiled.stratified));
                 let store: Box<dyn Store> = Box::new(MemStore::new());
                 let CompiledIr { ir, stratified } = compiled;
                 let interp = mangle_driver::execute(ir, &*stratified, store)
@@ -223,6 +245,7 @@ impl MangleEngine {
         .try_build()?;
 
         self.inner = Some(inner);
+        self.schema = captured_schema;
         self.generation = self.generation.wrapping_add(1);
         Ok(())
     }
@@ -411,6 +434,17 @@ pub unsafe extern "C" fn mangle_insert_fact(
         };
         // SAFETY: engine non-null and not poisoned per panic_boundary.
         let eng = unsafe { &mut *engine };
+        // Schema check (M8): strict mode — inserting into an
+        // undeclared relation is a typo, catch it at the entry.
+        match eng.schema() {
+            Some(s) if !s.knows(&relation_str) => {
+                set_error_msg(format!(
+                    "mangle_insert_fact: unknown relation `{relation_str}`"
+                ));
+                return MANGLE_ERR_UNKNOWN_RELATION;
+            }
+            _ => {}
+        }
         match eng.insert_fact(&relation_str, owned) {
             Ok(Some(added)) => {
                 if !added_out.is_null() {
@@ -463,6 +497,16 @@ pub unsafe extern "C" fn mangle_retract_fact(
             Err(rc) => return rc,
         };
         let eng = unsafe { &mut *engine };
+        // Schema check (M8): same strict semantics as insert.
+        match eng.schema() {
+            Some(s) if !s.knows(&relation_str) => {
+                set_error_msg(format!(
+                    "mangle_retract_fact: unknown relation `{relation_str}`"
+                ));
+                return MANGLE_ERR_UNKNOWN_RELATION;
+            }
+            _ => {}
+        }
         match eng.retract_fact(&relation_str, &owned) {
             Ok(Some(found)) => {
                 if !found_out.is_null() {

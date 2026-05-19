@@ -16,7 +16,10 @@ use crate::buffer::{MangleBuffer, write_buffer};
 use crate::engine::MangleEngine;
 use crate::error::{panic_boundary, set_error_msg};
 use crate::query::{filter_tuples, parse_query_lenient};
-use crate::{MANGLE_ERR, MANGLE_ERR_INVALID_ARG, MANGLE_ERR_NO_RULES, MANGLE_ERR_PARSE, MANGLE_OK};
+use crate::{
+    MANGLE_ERR, MANGLE_ERR_INVALID_ARG, MANGLE_ERR_NO_RULES, MANGLE_ERR_PARSE,
+    MANGLE_ERR_UNKNOWN_RELATION, MANGLE_OK,
+};
 
 /// Compression mode: no compression.
 pub const MANGLE_COMPRESSION_NONE: i32 = 0;
@@ -60,6 +63,39 @@ fn compress(bytes: Vec<u8>, compression: i32) -> Result<Vec<u8>> {
 fn encode_tables(tables: crate::engine::RelationTables, compression: i32) -> Result<Vec<u8>> {
     let mut buf = Vec::new();
     mangle_db::simplerow::write_simple_row(&mut buf, &tables).context("write_simple_row")?;
+    compress(buf, compression)
+}
+
+/// Encode a single relation as SimpleRow with an **explicit arity**.
+///
+/// `mangle_db::simplerow::write_simple_row` infers arity from the
+/// first tuple, so empty inputs lose the arity entirely (they write
+/// `name 0 0`). For the M8 schema-aware export paths we know the
+/// real arity from the schema cache and want to preserve it even
+/// when there are zero tuples. This is a thin reimplementation of
+/// the same on-disk format using the caller-supplied arity for the
+/// header line; per-tuple formatting is identical to
+/// `write_simple_row`.
+fn write_simple_row_explicit_arity(
+    out_relation: &str,
+    arity: usize,
+    tuples: &[Vec<mangle_common::Value>],
+    compression: i32,
+) -> Result<Vec<u8>> {
+    use std::io::Write;
+    let mut buf: Vec<u8> = Vec::new();
+    writeln!(&mut buf, "1")?;
+    writeln!(&mut buf, "{} {} {}", out_relation, arity, tuples.len())?;
+    for tuple in tuples {
+        write!(&mut buf, "{out_relation}(")?;
+        for (i, val) in tuple.iter().enumerate() {
+            if i > 0 {
+                write!(&mut buf, ", ")?;
+            }
+            write!(&mut buf, "{val}")?;
+        }
+        writeln!(&mut buf, ").")?;
+    }
     compress(buf, compression)
 }
 
@@ -167,6 +203,22 @@ pub unsafe extern "C" fn mangle_load_facts_mgr(
                 return MANGLE_ERR_PARSE;
             }
         };
+        // Schema check (M8): every relation in the loaded blob must be
+        // declared. Reject the whole load if any aren't — partial
+        // inserts would leave the store in an inconsistent state.
+        if let Some(schema) = eng.schema() {
+            for relation in data.tables.keys() {
+                if !schema.knows(relation) {
+                    set_error_msg(format!(
+                        "mangle_load_facts_mgr({name_slice}): unknown relation `{relation}` in loaded file"
+                    ));
+                    return MANGLE_ERR_UNKNOWN_RELATION;
+                }
+            }
+        } else {
+            set_error_msg("mangle_load_facts_mgr: engine has no rules loaded");
+            return MANGLE_ERR_NO_RULES;
+        }
         match eng.bulk_insert_tables(data.tables) {
             Ok(Some(n)) => {
                 if !n_inserted_out.is_null() {
@@ -277,9 +329,28 @@ pub unsafe extern "C" fn mangle_save_relation_mgr(
         };
         // SAFETY: engine non-null and not poisoned per panic_boundary.
         let eng = unsafe { &*engine };
+        // Schema check (M8): unknown relation → precise error rather
+        // than the M7 behavior of emitting an arity-0 blob.
+        let arity = match eng.schema() {
+            Some(s) => match s.lookup(&relation_str) {
+                Some(p) => p.arity,
+                None => {
+                    set_error_msg(format!(
+                        "mangle_save_relation_mgr: unknown relation `{relation_str}`"
+                    ));
+                    return MANGLE_ERR_UNKNOWN_RELATION;
+                }
+            },
+            None => {
+                set_error_msg("mangle_save_relation_mgr: engine has no rules loaded");
+                return MANGLE_ERR_NO_RULES;
+            }
+        };
         let tuples = match eng.materialize_relation(&relation_str) {
             Ok(Some(t)) => t,
             Ok(None) => {
+                // Should not happen — schema lookup above would have
+                // returned MANGLE_ERR_NO_RULES first.
                 set_error_msg("mangle_save_relation_mgr: engine has no rules loaded");
                 return MANGLE_ERR_NO_RULES;
             }
@@ -288,8 +359,10 @@ pub unsafe extern "C" fn mangle_save_relation_mgr(
                 return MANGLE_ERR;
             }
         };
-        let tables = vec![(relation_str, tuples)];
-        match encode_tables(tables, compression) {
+        // Use schema arity so empty-relation exports still emit the
+        // correct header (fixes M7 SimpleRow arity-from-first-tuple
+        // limitation).
+        match write_simple_row_explicit_arity(&relation_str, arity, &tuples, compression) {
             Ok(bytes) => {
                 unsafe { write_buffer(out, bytes) };
                 MANGLE_OK
@@ -358,6 +431,25 @@ pub unsafe extern "C" fn mangle_query_dump_mgr(
         };
         // SAFETY: engine non-null and not poisoned per panic_boundary.
         let eng = unsafe { &*engine };
+        // Schema check + arity (M8): unknown queried predicate →
+        // precise error; arity for empty-result dump comes from the
+        // schema, not from `filtered.first()`.
+        let arity = match eng.schema() {
+            Some(s) => match s.lookup(&parsed.predicate) {
+                Some(p) => p.arity,
+                None => {
+                    set_error_msg(format!(
+                        "mangle_query_dump_mgr: unknown relation `{}`",
+                        parsed.predicate
+                    ));
+                    return MANGLE_ERR_UNKNOWN_RELATION;
+                }
+            },
+            None => {
+                set_error_msg("mangle_query_dump_mgr: engine has no rules loaded");
+                return MANGLE_ERR_NO_RULES;
+            }
+        };
         let materialized = match eng.materialize_relation(&parsed.predicate) {
             Ok(Some(t)) => t,
             Ok(None) => {
@@ -370,8 +462,7 @@ pub unsafe extern "C" fn mangle_query_dump_mgr(
             }
         };
         let filtered = filter_tuples(materialized, &parsed);
-        let tables = vec![(out_relation_str, filtered)];
-        match encode_tables(tables, compression) {
+        match write_simple_row_explicit_arity(&out_relation_str, arity, &filtered, compression) {
             Ok(bytes) => {
                 unsafe { write_buffer(out, bytes) };
                 MANGLE_OK

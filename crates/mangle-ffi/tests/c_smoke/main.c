@@ -795,5 +795,77 @@ int32_t c_smoke_run(void) {
     mangle_engine_free(eng);
     mangle_engine_free(eng4);
 
+    /* ---- mangle_schema_snapshot / mangle_relation_names + */
+    /*      unknown-relation errors (M8) ----------------------------- */
+
+    /* 42. Schema snapshot of a small program produces non-empty JSON. */
+    if (mangle_engine_new(0, &eng) != MANGLE_OK) return 150;
+    const char* m8_src =
+        "edge(1, 2).\n"
+        "reachable(X, Y) :- edge(X, Y).\n";
+    const uint8_t* m8_sources[1] = { (const uint8_t*)m8_src };
+    size_t m8_lens[1] = { strlen(m8_src) };
+    if (mangle_load_rules(eng, m8_sources, m8_lens, 1) != MANGLE_OK) {
+        mangle_engine_free(eng);
+        return 151;
+    }
+    MangleBuffer schema_buf = {0};
+    if (mangle_schema_snapshot(eng, &schema_buf) != MANGLE_OK) {
+        mangle_engine_free(eng);
+        return 152;
+    }
+    if (schema_buf.len == 0
+        || memmem(schema_buf.data, schema_buf.len, "\"edge\"", 6) == NULL
+        || memmem(schema_buf.data, schema_buf.len, "\"reachable\"", 11) == NULL) {
+        mangle_buffer_free(&schema_buf);
+        mangle_engine_free(eng);
+        return 153;
+    }
+    mangle_buffer_free(&schema_buf);
+
+    /* 43. relation_names returns a JSON array containing both names. */
+    MangleBuffer names_buf = {0};
+    if (mangle_relation_names(eng, &names_buf) != MANGLE_OK) {
+        mangle_engine_free(eng);
+        return 154;
+    }
+    if (names_buf.len < 2 || names_buf.data[0] != '['
+        || memmem(names_buf.data, names_buf.len, "edge", 4) == NULL
+        || memmem(names_buf.data, names_buf.len, "reachable", 9) == NULL) {
+        mangle_buffer_free(&names_buf);
+        mangle_engine_free(eng);
+        return 155;
+    }
+    mangle_buffer_free(&names_buf);
+
+    /* 44. query() on unknown relation returns MANGLE_ERR_UNKNOWN_RELATION. */
+    MangleCursor* cur_un = NULL;
+    int32_t rc_un =
+        mangle_query(eng, (const uint8_t*)"nope", 4, &cur_un);
+    if (rc_un != MANGLE_ERR_UNKNOWN_RELATION) {
+        mangle_cursor_free(cur_un);
+        mangle_engine_free(eng);
+        return 156;
+    }
+    mangle_last_error(&drain);
+    mangle_buffer_free(&drain);
+
+    /* 45. schema_snapshot on engine with no rules returns NO_RULES. */
+    MangleEngine* eng_empty = NULL;
+    mangle_engine_new(0, &eng_empty);
+    MangleBuffer empty_schema = {0};
+    int32_t rc_es = mangle_schema_snapshot(eng_empty, &empty_schema);
+    if (rc_es != MANGLE_ERR_NO_RULES) {
+        mangle_buffer_free(&empty_schema);
+        mangle_engine_free(eng_empty);
+        mangle_engine_free(eng);
+        return 157;
+    }
+    mangle_last_error(&drain);
+    mangle_buffer_free(&drain);
+    mangle_engine_free(eng_empty);
+
+    mangle_engine_free(eng);
+
     return 0;
 }

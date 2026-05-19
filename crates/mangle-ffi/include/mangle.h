@@ -91,6 +91,14 @@ typedef struct MangleVal MangleVal;
 #define MANGLE_ERR_PANIC -8
 
 /**
+ * FFI status: the named relation is not declared in the loaded
+ * program. Catches predicate-name typos at the entry point instead
+ * of silently returning an empty cursor or an empty `.mgr` blob.
+ * Introduced in M8.
+ */
+#define MANGLE_ERR_UNKNOWN_RELATION -9
+
+/**
  * Compression mode: no compression.
  */
 #define MANGLE_COMPRESSION_NONE 0
@@ -660,6 +668,50 @@ int32_t mangle_query_dump_mgr(struct MangleEngine *engine,
                               uintptr_t out_relation_len,
                               int32_t compression,
                               struct MangleBuffer *out);
+
+/**
+ * Emit the engine's schema as a JSON document.
+ *
+ * Shape:
+ * ```json
+ * {
+ *   "predicates": [
+ *     { "name": "edge", "arity": 2, "type_args": null, "kind": "edb" },
+ *     { "name": "reachable", "arity": 2, "type_args": null, "kind": "idb" }
+ *   ],
+ *   "rules": [
+ *     { "rule_id": 0, "head": "reachable", "body": ["edge"] },
+ *     { "rule_id": 1, "head": "reachable", "body": ["edge", "reachable"] }
+ *   ]
+ * }
+ * ```
+ *
+ * `kind` is `"edb"` or `"idb"` based on whether the predicate has
+ * any defining rules. `type_args` will populate in a later milestone
+ * when the Ir's `Decl.bounds` walker is wired up; for now it's
+ * `null`.
+ *
+ * Returns [`MANGLE_OK`] on success; the buffer is owned by the
+ * caller and must be released with `mangle_buffer_free`. Returns
+ * [`MANGLE_ERR_NO_RULES`] when the engine has no program loaded, or
+ * [`MANGLE_ERR_INVALID_ARG`] for null `out`.
+ *
+ * # Safety
+ * `engine` must be a live handle. `out` must be non-null.
+ */
+int32_t mangle_schema_snapshot(struct MangleEngine *engine, struct MangleBuffer *out);
+
+/**
+ * Emit the sorted list of declared predicate names as a JSON array.
+ *
+ * Cheap alternative to [`mangle_schema_snapshot`] when you only need
+ * the picker UI's relation dropdown — no arity, no rule edges, just
+ * the names.
+ *
+ * # Safety
+ * `engine` must be a live handle. `out` must be non-null.
+ */
+int32_t mangle_relation_names(struct MangleEngine *engine, struct MangleBuffer *out);
 
 /**
  * Report the kind tag of a value.

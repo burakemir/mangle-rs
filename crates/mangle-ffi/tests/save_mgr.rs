@@ -270,23 +270,21 @@ fn save_relation_mgr_roundtrip() {
 }
 
 #[test]
-fn save_relation_mgr_unknown_relation_emits_empty_blob() {
-    // MemStore::scan returns an empty iterator (not Err) for an
-    // unknown relation. We mirror that: the saved blob is a valid
-    // SimpleRow with one predicate of zero tuples (and arity 0,
-    // since arity is inferred from the first tuple).
+fn save_relation_mgr_unknown_relation_returns_unknown_relation() {
+    // M8 strict mode: pre-M8 (M7) this would emit a valid-but-useless
+    // arity-0 blob. Now the schema cache catches the typo at the
+    // entry point and returns MANGLE_ERR_UNKNOWN_RELATION.
     drain_last_error();
     let mut p: *mut MangleEngine = ptr::null_mut();
     unsafe { mangle_engine_new(0, &mut p) };
     load_rules(p, "edge(1, 2).");
 
-    let (rc, bytes) = save_relation(p, "no_such_predicate", MANGLE_COMPRESSION_NONE);
-    assert_eq!(rc, MANGLE_OK, "{}", read_last_error());
-    let text = std::str::from_utf8(&bytes).unwrap();
-    assert!(text.starts_with("1\n"), "header: {text:?}");
+    let (rc, _) = save_relation(p, "no_such_predicate", MANGLE_COMPRESSION_NONE);
+    assert_eq!(rc, mangle_ffi::MANGLE_ERR_UNKNOWN_RELATION);
+    let err = read_last_error();
     assert!(
-        text.contains("no_such_predicate 0 0"),
-        "predicate line: {text:?}"
+        err.contains("no_such_predicate"),
+        "error should mention the bad name: {err}"
     );
 
     unsafe { mangle_engine_free(p) };
@@ -356,15 +354,14 @@ fn query_dump_mgr_empty_result_is_valid() {
     assert_eq!(rc, MANGLE_OK);
     assert!(!bytes.is_empty(), "even zero-row dumps have a header");
 
-    // The header should declare 1 predicate with 0 facts. Arity is
-    // inferred from the first tuple, so a zero-row dump emits arity 0
-    // — a known limitation of the SimpleRow format. The output still
-    // round-trips to "an empty relation named patch_routes" which is
-    // what the consumer asked for.
+    // M8: arity comes from the schema's entry for the *queried*
+    // predicate (`route`, arity 2), not from the empty result set.
+    // This fixes the M7 SimpleRow arity-from-first-tuple limitation
+    // for empty exports.
     let text = std::str::from_utf8(&bytes).unwrap();
     assert!(text.starts_with("1\n"), "header: {text:?}");
     assert!(
-        text.contains("patch_routes 0 0"),
+        text.contains("patch_routes 2 0"),
         "predicate line: {text:?}"
     );
 

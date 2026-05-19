@@ -30,7 +30,7 @@ use crate::query::{filter_tuples, parse_query_lenient};
 use crate::value::MangleVal;
 use crate::{
     MANGLE_ERR, MANGLE_ERR_CURSOR_INVALIDATED, MANGLE_ERR_INVALID_ARG, MANGLE_ERR_NO_RULES,
-    MANGLE_ERR_PARSE, MANGLE_OK,
+    MANGLE_ERR_PARSE, MANGLE_ERR_UNKNOWN_RELATION, MANGLE_OK,
 };
 use mangle_common::Value;
 
@@ -114,6 +114,18 @@ pub unsafe extern "C" fn mangle_query(
 
         // SAFETY: engine non-null and not poisoned per panic_boundary.
         let eng = unsafe { &*engine };
+        // Schema check (M8): catch typos before reaching the store,
+        // which would otherwise silently return an empty iterator.
+        match eng.schema() {
+            Some(s) if !s.knows(&parsed.predicate) => {
+                set_error_msg(format!(
+                    "mangle_query: unknown relation `{}`",
+                    parsed.predicate
+                ));
+                return MANGLE_ERR_UNKNOWN_RELATION;
+            }
+            _ => {}
+        }
         let materialized = match eng.materialize_relation(&parsed.predicate) {
             Ok(Some(rows)) => rows,
             Ok(None) => {

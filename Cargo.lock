@@ -1361,6 +1361,7 @@ dependencies = [
  "mangle-parse",
  "ouroboros",
  "ruzstd",
+ "serde_json",
 ]
 
 [[package]]

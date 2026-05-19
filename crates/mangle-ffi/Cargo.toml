@@ -29,6 +29,7 @@ mangle-db.workspace = true
 mangle-common = { workspace = true, features = ["edge"] }
 flate2.workspace = true
 ruzstd.workspace = true
+serde_json.workspace = true
 
 [build-dependencies]
 # Need ≥0.28 for Rust 2024 `#[unsafe(no_mangle)]` attribute parsing.

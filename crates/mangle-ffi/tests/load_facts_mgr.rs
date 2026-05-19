@@ -196,7 +196,7 @@ fn null_inserted_out_is_accepted() {
     drain_last_error();
     let mut p: *mut MangleEngine = ptr::null_mut();
     unsafe { mangle_engine_new(0, &mut p) };
-    load_rules(p, "edge(0, 0).");
+    load_rules(p, "edge(0, 0). route(\"X\", \"X\").");
     let blob = build_fixture();
     let name = "x.mgr";
     let rc = unsafe {
@@ -218,7 +218,7 @@ fn empty_source_name_is_accepted() {
     drain_last_error();
     let mut p: *mut MangleEngine = ptr::null_mut();
     unsafe { mangle_engine_new(0, &mut p) };
-    load_rules(p, "edge(0, 0).");
+    load_rules(p, "edge(0, 0). route(\"X\", \"X\").");
     let blob = build_fixture();
     let mut n: usize = 0;
     let rc = unsafe { mangle_load_facts_mgr(p, blob.as_ptr(), blob.len(), ptr::null(), 0, &mut n) };
@@ -296,7 +296,7 @@ fn invalid_utf8_source_name_returns_invalid_arg() {
     drain_last_error();
     let mut p: *mut MangleEngine = ptr::null_mut();
     unsafe { mangle_engine_new(0, &mut p) };
-    load_rules(p, "edge(0, 0).");
+    load_rules(p, "edge(0, 0). route(\"X\", \"X\").");
     let blob = build_fixture();
     let bad_name: [u8; 4] = [0xff, 0xfe, 0xfd, 0xfc];
     let rc = unsafe {

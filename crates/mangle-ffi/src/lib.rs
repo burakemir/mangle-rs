@@ -21,6 +21,7 @@ mod engine;
 mod error;
 mod io;
 mod query;
+mod schema;
 mod value;
 
 pub use buffer::{MangleBuffer, mangle_buffer_free};
@@ -43,6 +44,7 @@ pub use io::{
     MANGLE_COMPRESSION_GZIP, MANGLE_COMPRESSION_NONE, MANGLE_COMPRESSION_ZSTD,
     mangle_load_facts_mgr, mangle_query_dump_mgr, mangle_save_facts_mgr, mangle_save_relation_mgr,
 };
+pub use schema::{mangle_relation_names, mangle_schema_snapshot};
 pub use value::{
     MANGLE_COMPOUND_LIST, MANGLE_COMPOUND_MAP, MANGLE_COMPOUND_PAIR, MANGLE_COMPOUND_STRUCT,
     MANGLE_VAL_COMPOUND, MANGLE_VAL_DURATION, MANGLE_VAL_FLOAT, MANGLE_VAL_NAME, MANGLE_VAL_NULL,
@@ -104,6 +106,12 @@ pub const MANGLE_ERR_PARSE: i32 = -7;
 /// it will short-circuit to this same code. Recovery: free the engine
 /// and create a fresh one.
 pub const MANGLE_ERR_PANIC: i32 = -8;
+
+/// FFI status: the named relation is not declared in the loaded
+/// program. Catches predicate-name typos at the entry point instead
+/// of silently returning an empty cursor or an empty `.mgr` blob.
+/// Introduced in M8.
+pub const MANGLE_ERR_UNKNOWN_RELATION: i32 = -9;
 
 // ---------------------------------------------------------------------------
 // Entry points carried over from M0, now wrapped in panic_boundary for
