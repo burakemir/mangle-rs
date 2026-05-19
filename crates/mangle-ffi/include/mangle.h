@@ -473,6 +473,62 @@ int32_t mangle_load_rules(struct MangleEngine *engine,
                           uintptr_t n_sources);
 
 /**
+ * Insert a tuple as a fact in the named relation.
+ *
+ * `tuple` is an array of `arity` borrowed `MangleVal` handles. The
+ * values are cloned into the engine's store; the source handles
+ * remain owned by their producer (typically a [`MangleValBuilder`]).
+ *
+ * On success, `*added_out` (if non-null) is set to 1 when the tuple
+ * was new and 0 when the relation already contained it. The store's
+ * scan-visible set is updated atomically: subsequent `mangle_query`
+ * calls see the new tuple.
+ *
+ * **IDB relations are not re-derived.** Inserting a tuple into a
+ * relation that is the head of one or more rules does not cause
+ * those rules to fire on the new fact. To re-evaluate the IDB,
+ * reload the rules with [`mangle_load_rules`]. This mirrors mangle-py
+ * (`PyProgram::insert`).
+ *
+ * Returns [`MANGLE_OK`] on success, [`MANGLE_ERR_NO_RULES`] when no
+ * program is loaded, [`MANGLE_ERR_INVALID_ARG`] for null/invalid
+ * inputs, or [`MANGLE_ERR`] for a store-level failure.
+ *
+ * # Safety
+ * `engine` must be a live handle. `relation` must point to
+ * `relation_len` readable UTF-8 bytes. `tuple` must point to `arity`
+ * readable `*const MangleVal` entries; each entry must be a live
+ * handle. `added_out` is nullable.
+ */
+int32_t mangle_insert_fact(struct MangleEngine *engine,
+                           const uint8_t *relation,
+                           uintptr_t relation_len,
+                           const MangleVal *const *tuple,
+                           uintptr_t arity,
+                           int32_t *added_out);
+
+/**
+ * Retract a tuple from the named relation.
+ *
+ * `*found_out` (if non-null) is set to 1 if the tuple was present and
+ * removed, 0 otherwise. Operates on the stable set; no merge_deltas
+ * is needed.
+ *
+ * Like insert, IDB relations are not automatically reconciled — a
+ * retracted EDB fact whose absence would invalidate derived facts
+ * leaves stale IDB tuples in place until rules are reloaded.
+ *
+ * # Safety
+ * Same as [`mangle_insert_fact`].
+ */
+int32_t mangle_retract_fact(struct MangleEngine *engine,
+                            const uint8_t *relation,
+                            uintptr_t relation_len,
+                            const MangleVal *const *tuple,
+                            uintptr_t arity,
+                            int32_t *found_out);
+
+/**
  * Copy the current thread-local error message into `out` and clear it.
  *
  * Returns [`MANGLE_OK`] regardless of whether an error was set; the

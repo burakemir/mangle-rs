@@ -97,6 +97,44 @@ impl MangleEngine {
         })
     }
 
+    /// Insert a tuple as an EDB fact. Returns `Ok(None)` when no rules
+    /// are loaded, else `Ok(Some(added))` where `added` is true iff the
+    /// tuple was new to the relation.
+    ///
+    /// Mirrors `mangle-py`'s insert path: after `Store::insert` places
+    /// the tuple in `next_delta`, we call `merge_deltas` twice to
+    /// promote it to the stable scan-visible set. IDB relations are
+    /// **not** re-derived — same gotcha as mangle-py.
+    pub(crate) fn insert_fact(
+        &mut self,
+        relation: &str,
+        tuple: Vec<Value>,
+    ) -> Result<Option<bool>> {
+        let Some(inner) = self.inner.as_mut() else {
+            return Ok(None);
+        };
+        inner.with_interp_mut(|interp: &mut Interpreter<'_>| {
+            let store = interp.store_mut();
+            let added = store.insert(relation, tuple)?;
+            store.merge_deltas();
+            store.merge_deltas();
+            Ok(Some(added))
+        })
+    }
+
+    /// Retract a tuple from a relation. Returns `Ok(None)` when no
+    /// rules are loaded, else `Ok(Some(found))` where `found` is true
+    /// iff the tuple was present and removed. Operates on the stable
+    /// set directly; no merge_deltas dance is needed.
+    pub(crate) fn retract_fact(&mut self, relation: &str, tuple: &[Value]) -> Result<Option<bool>> {
+        let Some(inner) = self.inner.as_mut() else {
+            return Ok(None);
+        };
+        inner.with_interp_mut(|interp: &mut Interpreter<'_>| {
+            Ok(Some(interp.store_mut().retract(relation, tuple)?))
+        })
+    }
+
     /// Compile + execute the given sources, replacing any existing
     /// loaded program. On failure, the engine's previous state is
     /// preserved (the error path does not clear `inner`). Bumps the
@@ -266,6 +304,171 @@ pub unsafe extern "C" fn mangle_load_rules(
             }
         }
     })
+}
+
+/// Insert a tuple as a fact in the named relation.
+///
+/// `tuple` is an array of `arity` borrowed `MangleVal` handles. The
+/// values are cloned into the engine's store; the source handles
+/// remain owned by their producer (typically a [`MangleValBuilder`]).
+///
+/// On success, `*added_out` (if non-null) is set to 1 when the tuple
+/// was new and 0 when the relation already contained it. The store's
+/// scan-visible set is updated atomically: subsequent `mangle_query`
+/// calls see the new tuple.
+///
+/// **IDB relations are not re-derived.** Inserting a tuple into a
+/// relation that is the head of one or more rules does not cause
+/// those rules to fire on the new fact. To re-evaluate the IDB,
+/// reload the rules with [`mangle_load_rules`]. This mirrors mangle-py
+/// (`PyProgram::insert`).
+///
+/// Returns [`MANGLE_OK`] on success, [`MANGLE_ERR_NO_RULES`] when no
+/// program is loaded, [`MANGLE_ERR_INVALID_ARG`] for null/invalid
+/// inputs, or [`MANGLE_ERR`] for a store-level failure.
+///
+/// # Safety
+/// `engine` must be a live handle. `relation` must point to
+/// `relation_len` readable UTF-8 bytes. `tuple` must point to `arity`
+/// readable `*const MangleVal` entries; each entry must be a live
+/// handle. `added_out` is nullable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mangle_insert_fact(
+    engine: *mut MangleEngine,
+    relation: *const u8,
+    relation_len: usize,
+    tuple: *const *const crate::value::MangleVal,
+    arity: usize,
+    added_out: *mut i32,
+) -> i32 {
+    panic_boundary!(engine, {
+        let relation_str = match read_utf8(relation, relation_len, "mangle_insert_fact: relation") {
+            Ok(s) => s,
+            Err(rc) => return rc,
+        };
+        let owned = match collect_tuple(tuple, arity, "mangle_insert_fact") {
+            Ok(t) => t,
+            Err(rc) => return rc,
+        };
+        // SAFETY: engine non-null and not poisoned per panic_boundary.
+        let eng = unsafe { &mut *engine };
+        match eng.insert_fact(&relation_str, owned) {
+            Ok(Some(added)) => {
+                if !added_out.is_null() {
+                    // SAFETY: caller's contract.
+                    unsafe { *added_out = i32::from(added) };
+                }
+                MANGLE_OK
+            }
+            Ok(None) => {
+                set_error_msg("mangle_insert_fact: engine has no rules loaded");
+                crate::MANGLE_ERR_NO_RULES
+            }
+            Err(e) => {
+                set_error_msg(format!("mangle_insert_fact: {e:#}"));
+                crate::MANGLE_ERR
+            }
+        }
+    })
+}
+
+/// Retract a tuple from the named relation.
+///
+/// `*found_out` (if non-null) is set to 1 if the tuple was present and
+/// removed, 0 otherwise. Operates on the stable set; no merge_deltas
+/// is needed.
+///
+/// Like insert, IDB relations are not automatically reconciled — a
+/// retracted EDB fact whose absence would invalidate derived facts
+/// leaves stale IDB tuples in place until rules are reloaded.
+///
+/// # Safety
+/// Same as [`mangle_insert_fact`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mangle_retract_fact(
+    engine: *mut MangleEngine,
+    relation: *const u8,
+    relation_len: usize,
+    tuple: *const *const crate::value::MangleVal,
+    arity: usize,
+    found_out: *mut i32,
+) -> i32 {
+    panic_boundary!(engine, {
+        let relation_str = match read_utf8(relation, relation_len, "mangle_retract_fact: relation")
+        {
+            Ok(s) => s,
+            Err(rc) => return rc,
+        };
+        let owned = match collect_tuple(tuple, arity, "mangle_retract_fact") {
+            Ok(t) => t,
+            Err(rc) => return rc,
+        };
+        let eng = unsafe { &mut *engine };
+        match eng.retract_fact(&relation_str, &owned) {
+            Ok(Some(found)) => {
+                if !found_out.is_null() {
+                    unsafe { *found_out = i32::from(found) };
+                }
+                MANGLE_OK
+            }
+            Ok(None) => {
+                set_error_msg("mangle_retract_fact: engine has no rules loaded");
+                crate::MANGLE_ERR_NO_RULES
+            }
+            Err(e) => {
+                set_error_msg(format!("mangle_retract_fact: {e:#}"));
+                crate::MANGLE_ERR
+            }
+        }
+    })
+}
+
+/// Helper: read `len` bytes from `ptr` and decode as UTF-8.
+fn read_utf8(ptr: *const u8, len: usize, who: &str) -> std::result::Result<String, i32> {
+    if len == 0 {
+        return Ok(String::new());
+    }
+    if ptr.is_null() {
+        set_error_msg(format!("{who} pointer is null but length is {len}"));
+        return Err(MANGLE_ERR_INVALID_ARG);
+    }
+    // SAFETY: caller's contract.
+    let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
+    match std::str::from_utf8(slice) {
+        Ok(s) => Ok(s.to_string()),
+        Err(e) => {
+            set_error_msg(format!("{who} is not valid UTF-8: {e}"));
+            Err(MANGLE_ERR_INVALID_ARG)
+        }
+    }
+}
+
+/// Helper: read `arity` handles from `tuple` and clone the underlying
+/// values into an owned `Vec<Value>`.
+fn collect_tuple(
+    tuple: *const *const crate::value::MangleVal,
+    arity: usize,
+    who: &str,
+) -> std::result::Result<Vec<Value>, i32> {
+    if arity == 0 {
+        return Ok(Vec::new());
+    }
+    if tuple.is_null() {
+        set_error_msg(format!("{who}: tuple pointer is null but arity is {arity}"));
+        return Err(MANGLE_ERR_INVALID_ARG);
+    }
+    let mut owned: Vec<Value> = Vec::with_capacity(arity);
+    for i in 0..arity {
+        // SAFETY: caller guarantees the array has `arity` entries.
+        let p = unsafe { *tuple.add(i) };
+        if p.is_null() {
+            set_error_msg(format!("{who}: tuple[{i}] is null"));
+            return Err(MANGLE_ERR_INVALID_ARG);
+        }
+        // SAFETY: caller guarantees each entry is a live handle.
+        owned.push(unsafe { (*p).clone() });
+    }
+    Ok(owned)
 }
 
 /// Internal test helper: deliberately panic inside the engine-bound

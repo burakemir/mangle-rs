@@ -411,5 +411,124 @@ int32_t c_smoke_run(void) {
 
     mangle_engine_free(eng);
 
+    /* ---- mangle_insert_fact / mangle_retract_fact ----------------- */
+
+    /* 28. Insert + query sees new tuple; retract + query doesn't. */
+    if (mangle_engine_new(0, &eng) != MANGLE_OK) return 90;
+    if (mangle_load_rules(eng, edge_sources, edge_lens, 1) != MANGLE_OK) {
+        mangle_engine_free(eng);
+        return 91;
+    }
+
+    MangleValBuilder* ib = mangle_val_builder_new();
+    const MangleVal* v1 = mangle_val_build_i64(ib, 7);
+    const MangleVal* v2 = mangle_val_build_i64(ib, 8);
+    const MangleVal* tuple[2] = { v1, v2 };
+    int32_t added = -1;
+    int32_t rci = mangle_insert_fact(
+        eng, (const uint8_t*)"edge", 4, tuple, 2, &added);
+    if (rci != MANGLE_OK || added != 1) {
+        mangle_val_builder_free(ib);
+        mangle_engine_free(eng);
+        return 92;
+    }
+
+    /* Duplicate insert reports added=0. */
+    rci = mangle_insert_fact(
+        eng, (const uint8_t*)"edge", 4, tuple, 2, &added);
+    if (rci != MANGLE_OK || added != 0) {
+        mangle_val_builder_free(ib);
+        mangle_engine_free(eng);
+        return 93;
+    }
+
+    /* Fresh cursor sees 4 edges now (3 original + 1 inserted). */
+    MangleCursor* cur3 = NULL;
+    if (mangle_query(eng, (const uint8_t*)"edge", 4, &cur3) != MANGLE_OK) {
+        mangle_val_builder_free(ib);
+        mangle_engine_free(eng);
+        return 94;
+    }
+    int n_edges = 0;
+    while (mangle_cursor_next(cur3) == MANGLE_OK) n_edges++;
+    mangle_cursor_free(cur3);
+    if (n_edges != 4) {
+        mangle_val_builder_free(ib);
+        mangle_engine_free(eng);
+        return 95;
+    }
+
+    /* Retract the inserted edge. */
+    int32_t found = -1;
+    int32_t rcr = mangle_retract_fact(
+        eng, (const uint8_t*)"edge", 4, tuple, 2, &found);
+    if (rcr != MANGLE_OK || found != 1) {
+        mangle_val_builder_free(ib);
+        mangle_engine_free(eng);
+        return 96;
+    }
+
+    /* Retract missing tuple reports found=0. */
+    rcr = mangle_retract_fact(
+        eng, (const uint8_t*)"edge", 4, tuple, 2, &found);
+    if (rcr != MANGLE_OK || found != 0) {
+        mangle_val_builder_free(ib);
+        mangle_engine_free(eng);
+        return 97;
+    }
+
+    /* Cursor now sees 3 edges again. */
+    if (mangle_query(eng, (const uint8_t*)"edge", 4, &cur3) != MANGLE_OK) {
+        mangle_val_builder_free(ib);
+        mangle_engine_free(eng);
+        return 98;
+    }
+    n_edges = 0;
+    while (mangle_cursor_next(cur3) == MANGLE_OK) n_edges++;
+    mangle_cursor_free(cur3);
+    if (n_edges != 3) {
+        mangle_val_builder_free(ib);
+        mangle_engine_free(eng);
+        return 99;
+    }
+
+    mangle_val_builder_free(ib);
+
+    /* 29. insert with NULL added_out is allowed. */
+    ib = mangle_val_builder_new();
+    v1 = mangle_val_build_i64(ib, 9);
+    v2 = mangle_val_build_i64(ib, 10);
+    const MangleVal* tuple2[2] = { v1, v2 };
+    rci = mangle_insert_fact(
+        eng, (const uint8_t*)"edge", 4, tuple2, 2, NULL);
+    if (rci != MANGLE_OK) {
+        mangle_val_builder_free(ib);
+        mangle_engine_free(eng);
+        return 100;
+    }
+    mangle_val_builder_free(ib);
+
+    /* 30. insert into engine with no rules → MANGLE_ERR_NO_RULES. */
+    MangleEngine* eng3 = NULL;
+    mangle_engine_new(0, &eng3);
+    ib = mangle_val_builder_new();
+    v1 = mangle_val_build_i64(ib, 1);
+    v2 = mangle_val_build_i64(ib, 2);
+    const MangleVal* tuple3[2] = { v1, v2 };
+    rci = mangle_insert_fact(
+        eng3, (const uint8_t*)"edge", 4, tuple3, 2, NULL);
+    if (rci != MANGLE_ERR_NO_RULES) {
+        mangle_val_builder_free(ib);
+        mangle_engine_free(eng3);
+        mangle_engine_free(eng);
+        return 101;
+    }
+    mangle_last_error(&drain);
+    mangle_buffer_free(&drain);
+    mangle_val_builder_free(ib);
+    mangle_engine_free(eng3);
+
+    mangle_engine_free(eng);
+
     return 0;
 }

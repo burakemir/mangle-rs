@@ -33,7 +33,10 @@ pub use cursor::{
     MangleCursor, mangle_cursor_arity, mangle_cursor_col, mangle_cursor_free, mangle_cursor_next,
     mangle_query,
 };
-pub use engine::{MangleEngine, mangle_engine_free, mangle_engine_new, mangle_load_rules};
+pub use engine::{
+    MangleEngine, mangle_engine_free, mangle_engine_new, mangle_insert_fact, mangle_load_rules,
+    mangle_retract_fact,
+};
 pub use error::mangle_last_error;
 pub use value::{
     MANGLE_COMPOUND_LIST, MANGLE_COMPOUND_MAP, MANGLE_COMPOUND_PAIR, MANGLE_COMPOUND_STRUCT,
