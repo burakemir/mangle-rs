@@ -19,6 +19,7 @@ mod builder;
 mod cursor;
 mod engine;
 mod error;
+mod io;
 mod query;
 mod value;
 
@@ -38,6 +39,7 @@ pub use engine::{
     mangle_retract_fact,
 };
 pub use error::mangle_last_error;
+pub use io::mangle_load_facts_mgr;
 pub use value::{
     MANGLE_COMPOUND_LIST, MANGLE_COMPOUND_MAP, MANGLE_COMPOUND_PAIR, MANGLE_COMPOUND_STRUCT,
     MANGLE_VAL_COMPOUND, MANGLE_VAL_DURATION, MANGLE_VAL_FLOAT, MANGLE_VAL_NAME, MANGLE_VAL_NULL,

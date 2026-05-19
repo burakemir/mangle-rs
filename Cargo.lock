@@ -1350,14 +1350,17 @@ dependencies = [
  "anyhow",
  "cbindgen",
  "cc",
+ "flate2",
  "mangle-analysis",
  "mangle-ast",
  "mangle-common",
+ "mangle-db",
  "mangle-driver",
  "mangle-interpreter",
  "mangle-ir",
  "mangle-parse",
  "ouroboros",
+ "ruzstd",
 ]
 
 [[package]]

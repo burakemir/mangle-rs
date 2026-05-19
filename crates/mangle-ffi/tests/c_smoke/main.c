@@ -530,5 +530,117 @@ int32_t c_smoke_run(void) {
 
     mangle_engine_free(eng);
 
+    /* ---- mangle_load_facts_mgr ------------------------------------ */
+
+    /* 31. Load a small uncompressed SimpleRow blob. */
+    if (mangle_engine_new(0, &eng) != MANGLE_OK) return 110;
+    /* Declare the relation via rules first. */
+    const char* decl = "edge(0, 0).";
+    const uint8_t* decl_src[1] = { (const uint8_t*)decl };
+    size_t decl_lens[1] = { strlen(decl) };
+    if (mangle_load_rules(eng, decl_src, decl_lens, 1) != MANGLE_OK) {
+        mangle_engine_free(eng);
+        return 111;
+    }
+
+    /* Build a minimal SimpleRow blob in-line:
+     *   1 predicate
+     *   edge 2 2  (name arity num_facts)
+     *   edge(7, 8).
+     *   edge(9, 10).
+     */
+    const char* mgr_blob =
+        "1\n"
+        "edge 2 2\n"
+        "edge(7, 8).\n"
+        "edge(9, 10).\n";
+    const char* mgr_name = "inline.mgr";
+    size_t n_inserted = 0;
+    int32_t rc_load = mangle_load_facts_mgr(
+        eng,
+        (const uint8_t*)mgr_blob,
+        strlen(mgr_blob),
+        (const uint8_t*)mgr_name,
+        strlen(mgr_name),
+        &n_inserted);
+    if (rc_load != MANGLE_OK) {
+        /* Drain & report the load error. */
+        mangle_last_error(&drain);
+        mangle_buffer_free(&drain);
+        mangle_engine_free(eng);
+        return 112;
+    }
+    if (n_inserted != 2) {
+        mangle_engine_free(eng);
+        return 113;
+    }
+
+    /* Query to confirm — 1 baseline + 2 loaded = 3 edges. */
+    MangleCursor* cur4 = NULL;
+    if (mangle_query(eng, (const uint8_t*)"edge", 4, &cur4) != MANGLE_OK) {
+        mangle_engine_free(eng);
+        return 114;
+    }
+    int n_edges_2 = 0;
+    while (mangle_cursor_next(cur4) == MANGLE_OK) n_edges_2++;
+    mangle_cursor_free(cur4);
+    if (n_edges_2 != 3) {
+        mangle_engine_free(eng);
+        return 115;
+    }
+
+    /* 32. Empty SimpleRow (header only) loads zero tuples. */
+    const char* empty_blob = "0\n";
+    rc_load = mangle_load_facts_mgr(
+        eng,
+        (const uint8_t*)empty_blob,
+        strlen(empty_blob),
+        NULL, 0,
+        &n_inserted);
+    if (rc_load != MANGLE_OK || n_inserted != 0) {
+        mangle_engine_free(eng);
+        return 116;
+    }
+
+    /* 33. Garbage payload returns MANGLE_ERR_PARSE. */
+    const char* garbage = "99\nbroken header\n";
+    rc_load = mangle_load_facts_mgr(
+        eng,
+        (const uint8_t*)garbage,
+        strlen(garbage),
+        NULL, 0,
+        NULL);
+    if (rc_load != MANGLE_ERR_PARSE) {
+        mangle_last_error(&drain);
+        mangle_buffer_free(&drain);
+        mangle_engine_free(eng);
+        return 117;
+    }
+    mangle_last_error(&drain);
+    mangle_buffer_free(&drain);
+
+    /* 34. NULL bytes with nonzero len → INVALID_ARG. */
+    rc_load = mangle_load_facts_mgr(eng, NULL, 10, NULL, 0, NULL);
+    if (rc_load != MANGLE_ERR_INVALID_ARG) {
+        mangle_engine_free(eng);
+        return 118;
+    }
+    mangle_last_error(&drain);
+    mangle_buffer_free(&drain);
+
+    /* 35. NULL n_inserted_out is accepted. */
+    rc_load = mangle_load_facts_mgr(
+        eng,
+        (const uint8_t*)empty_blob,
+        strlen(empty_blob),
+        NULL, 0,
+        NULL);
+    if (rc_load != MANGLE_OK) {
+        mangle_engine_free(eng);
+        return 119;
+    }
+
+    mangle_engine_free(eng);
+
     return 0;
 }

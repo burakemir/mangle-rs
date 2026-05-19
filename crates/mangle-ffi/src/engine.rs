@@ -122,6 +122,35 @@ impl MangleEngine {
         })
     }
 
+    /// Bulk-insert tuples from a parsed SimpleRow file into the
+    /// store. The caller is responsible for parsing + decompression
+    /// (in `crate::io`); this method just does the
+    /// `store.insert` + double `merge_deltas` dance. Returns
+    /// `Ok(None)` when no rules are loaded, else `Ok(Some(n))` where
+    /// `n` is the count of tuples passed to `Store::insert` (including
+    /// duplicates, which the store silently collapses).
+    pub(crate) fn bulk_insert_tables(
+        &mut self,
+        tables: std::collections::HashMap<String, Vec<Vec<Value>>>,
+    ) -> Result<Option<usize>> {
+        let Some(inner) = self.inner.as_mut() else {
+            return Ok(None);
+        };
+        inner.with_interp_mut(|interp: &mut Interpreter<'_>| {
+            let store = interp.store_mut();
+            let mut total: usize = 0;
+            for (relation, tuples) in tables {
+                for tuple in tuples {
+                    store.insert(&relation, tuple)?;
+                    total += 1;
+                }
+            }
+            store.merge_deltas();
+            store.merge_deltas();
+            Ok(Some(total))
+        })
+    }
+
     /// Retract a tuple from a relation. Returns `Ok(None)` when no
     /// rules are loaded, else `Ok(Some(found))` where `found` is true
     /// iff the tuple was present and removed. Operates on the stable

@@ -542,6 +542,42 @@ int32_t mangle_retract_fact(struct MangleEngine *engine,
 int32_t mangle_last_error(struct MangleBuffer *out);
 
 /**
+ * Bulk-load facts from a `.mgr` byte slice into the engine.
+ *
+ * `bytes` is a SimpleRow byte stream as produced by
+ * `mangle_db::simplerow::write_simple_row` (M7), optionally
+ * compressed with gzip or zstd (auto-detected via magic bytes).
+ *
+ * `source_name` is a human-readable identifier (e.g. a file path)
+ * included verbatim in error messages. May be empty.
+ *
+ * On success, returns [`MANGLE_OK`] and writes the number of
+ * inserted tuples (including duplicates) into `*n_inserted_out` if
+ * non-null. The store's scan-visible set is updated atomically;
+ * subsequent queries see all loaded tuples. Returns
+ * [`MANGLE_ERR_NO_RULES`] when the engine has no program loaded
+ * (load rules first), [`MANGLE_ERR_PARSE`] when the byte stream
+ * isn't a valid `.mgr`, [`MANGLE_ERR_INVALID_ARG`] for null pointers
+ * or invalid UTF-8 in `source_name`, or [`MANGLE_ERR`] for other
+ * failures (decompression error, store-level insert failure).
+ *
+ * IDB relations are not re-derived — see [`mangle_insert_fact`] for
+ * the same caveat.
+ *
+ * # Safety
+ * `engine` must be a live handle. `bytes` must point to `len`
+ * readable bytes (or be null with `len == 0`). `source_name` must
+ * point to `name_len` readable UTF-8 bytes (or be null with
+ * `name_len == 0`). `n_inserted_out` is nullable.
+ */
+int32_t mangle_load_facts_mgr(struct MangleEngine *engine,
+                              const uint8_t *bytes,
+                              uintptr_t len,
+                              const uint8_t *source_name,
+                              uintptr_t name_len,
+                              uintptr_t *n_inserted_out);
+
+/**
  * Report the kind tag of a value.
  *
  * Returns one of the `MANGLE_VAL_*` constants. Returns `-1` if `v` is
