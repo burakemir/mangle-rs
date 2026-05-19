@@ -30,6 +30,7 @@ use mangle_interpreter::{Interpreter, MemStore, Store};
 use mangle_ir::Ir;
 use ouroboros::self_referencing;
 
+use crate::derivation::DerivationIndex;
 use crate::error::{panic_boundary, set_error_msg};
 use crate::schema::Schema;
 use crate::{MANGLE_ERR_INVALID_ARG, MANGLE_ERR_PARSE, MANGLE_ERR_UNKNOWN_RELATION, MANGLE_OK};
@@ -79,6 +80,11 @@ pub struct MangleEngine {
     /// relation; the schema check rejects unknown-relation accesses
     /// before they reach the store. See `crate::schema` for details.
     pub(crate) schema: Option<Schema>,
+    /// Cached derivation index, built at `load_rules` time *only* when
+    /// the engine was constructed with `enable_provenance = 1`. `None`
+    /// otherwise (and `None` when Fresh). Used by
+    /// `mangle_derivation_tree`. See `crate::derivation` for details.
+    pub(crate) provenance: Option<DerivationIndex>,
 }
 
 impl MangleEngine {
@@ -89,6 +95,7 @@ impl MangleEngine {
             generation: 0,
             inner: None,
             schema: None,
+            provenance: None,
         }
     }
 
@@ -112,6 +119,12 @@ impl MangleEngine {
     /// Borrow the engine's schema cache. `None` when Fresh.
     pub(crate) fn schema(&self) -> Option<&Schema> {
         self.schema.as_ref()
+    }
+
+    /// Borrow the engine's derivation index. `None` unless provenance
+    /// was enabled at engine construction *and* rules are loaded.
+    pub(crate) fn provenance(&self) -> Option<&DerivationIndex> {
+        self.provenance.as_ref()
     }
 
     /// Insert a tuple as an EDB fact. Returns `Ok(None)` when no rules
@@ -213,15 +226,16 @@ impl MangleEngine {
     pub(crate) fn load_rules(&mut self, sources: Vec<String>) -> Result<()> {
         let enable_provenance = self.enable_provenance;
 
-        // The schema needs to be built from the just-compiled
-        // StratifiedProgram, but ouroboros's `compiled` field has no
-        // post-construction accessor (it's mut-borrowed by `interp`).
-        // We capture the schema via a side channel inside the
+        // The schema + provenance index need to be built from the
+        // just-compiled program, but ouroboros's `compiled` field has
+        // no post-construction accessor (it's mut-borrowed by
+        // `interp`). We capture both via side channels inside the
         // `interp_builder` closure, which is the last place we have a
-        // borrow of `compiled` during construction. Schema is fully
-        // owned (no lifetime tied to the arena), so moving it out
-        // afterwards is sound.
+        // borrow of `compiled` + the freshly-executed `interp` during
+        // construction. Both are fully owned (no lifetime tied to the
+        // arena), so moving them out afterwards is sound.
         let mut captured_schema: Option<Schema> = None;
+        let mut captured_provenance: Option<DerivationIndex> = None;
         let inner = ProgramInnerTryBuilder {
             arena: Arena::new_with_global_interner(),
             compiled_builder: |arena| -> Result<CompiledIr<'_>> {
@@ -233,19 +247,28 @@ impl MangleEngine {
                 captured_schema = Some(Schema::build(&compiled.stratified));
                 let store: Box<dyn Store> = Box::new(MemStore::new());
                 let CompiledIr { ir, stratified } = compiled;
-                let interp = mangle_driver::execute(ir, &*stratified, store)
-                    .map_err(|e| anyhow::anyhow!(e))?;
-                Ok(if enable_provenance {
-                    interp.with_provenance()
+                // Calling `.with_provenance()` AFTER `execute` is too
+                // late — the recorder needs to be set up before the
+                // strata run. Use `execute_with_provenance` instead.
+                let interp = if enable_provenance {
+                    mangle_driver::execute_with_provenance(ir, &*stratified, store)
                 } else {
-                    interp
-                })
+                    mangle_driver::execute(ir, &*stratified, store)
+                }
+                .map_err(|e| anyhow::anyhow!(e))?;
+                if enable_provenance
+                    && let Some(rec) = interp.provenance()
+                {
+                    captured_provenance = Some(DerivationIndex::build(&rec.entries));
+                }
+                Ok(interp)
             },
         }
         .try_build()?;
 
         self.inner = Some(inner);
         self.schema = captured_schema;
+        self.provenance = captured_provenance;
         self.generation = self.generation.wrapping_add(1);
         Ok(())
     }

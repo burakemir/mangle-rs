@@ -175,6 +175,27 @@ pub fn execute<'a>(
     stratified: &StratifiedProgram<'a>,
     store: Box<dyn Store + 'a>,
 ) -> Result<Interpreter<'a>> {
+    execute_with_options(ir, stratified, store, false)
+}
+
+/// Like [`execute`], but with provenance recording enabled. The
+/// returned `Interpreter` carries a populated `ProvenanceRecorder`;
+/// inspect via `Interpreter::into_provenance` or the matching `&self`
+/// accessor.
+pub fn execute_with_provenance<'a>(
+    ir: &'a mut Ir,
+    stratified: &StratifiedProgram<'a>,
+    store: Box<dyn Store + 'a>,
+) -> Result<Interpreter<'a>> {
+    execute_with_options(ir, stratified, store, true)
+}
+
+fn execute_with_options<'a>(
+    ir: &'a mut Ir,
+    stratified: &StratifiedProgram<'a>,
+    store: Box<dyn Store + 'a>,
+    with_provenance: bool,
+) -> Result<Interpreter<'a>> {
     let arena = stratified.arena();
 
     // 1. Pre-plan everything that needs mutable access to IR
@@ -277,6 +298,9 @@ pub fn execute<'a>(
 
     // 2. Now execute using the interpreter
     let mut interpreter = Interpreter::new(ir, store);
+    if with_provenance {
+        interpreter = interpreter.with_provenance();
+    }
 
     // Initialize EDB relations
     for pred in stratified.extensional_preds() {

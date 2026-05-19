@@ -442,6 +442,38 @@ const MangleVal *mangle_cursor_col(struct MangleCursor *cursor, uint32_t col_idx
 void mangle_cursor_free(struct MangleCursor *cursor);
 
 /**
+ * Emit the derivation tree for a given fact as JSON.
+ *
+ * The fact is parsed as a Mangle atom — same syntax as queries (see
+ * `mangle_query`) — but variables aren't allowed: the fact must be
+ * fully ground.
+ *
+ * Requires the engine was constructed with `enable_provenance = 1`.
+ * Returns:
+ * - [`MANGLE_OK`] on success; JSON buffer owned by caller.
+ * - [`MANGLE_ERR_NO_RULES`] when no program is loaded.
+ * - [`MANGLE_ERR_NO_PROVENANCE`] when the engine was built without
+ *   provenance.
+ * - [`MANGLE_ERR_PARSE`] for a malformed atom or a variable arg.
+ * - [`MANGLE_ERR_FACT_NOT_FOUND`] when the fact has no recorded
+ *   derivations (EDB facts with no IDB consumers may not appear at
+ *   all in the provenance index; user typos likewise).
+ * - [`MANGLE_ERR_INVALID_ARG`] for null pointers.
+ *
+ * `max_depth` is the maximum nesting depth of the returned tree.
+ * Use `0xFFFF_FFFF` (`UINT32_MAX`) for unlimited.
+ *
+ * # Safety
+ * `engine` must be a live handle. `fact` must point to `len`
+ * readable UTF-8 bytes. `out` must be non-null.
+ */
+int32_t mangle_derivation_tree(struct MangleEngine *engine,
+                               const uint8_t *fact,
+                               uintptr_t len,
+                               uint32_t max_depth,
+                               struct MangleBuffer *out);
+
+/**
  * Construct a new engine.
  *
  * `enable_provenance` is nonzero to record derivation provenance during

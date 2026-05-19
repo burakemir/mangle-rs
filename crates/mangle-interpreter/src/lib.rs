@@ -620,6 +620,15 @@ impl<'a> Interpreter<'a> {
         self.provenance
     }
 
+    /// Borrow the provenance recorder without consuming the
+    /// interpreter. Returns `None` when provenance recording wasn't
+    /// enabled via [`with_provenance`].
+    ///
+    /// [`with_provenance`]: Self::with_provenance
+    pub fn provenance(&self) -> Option<&ProvenanceRecorder> {
+        self.provenance.as_ref()
+    }
+
     /// Consume the interpreter, returning the store and optional provenance.
     pub fn into_parts(self) -> (Box<dyn Store + 'a>, Option<ProvenanceRecorder>) {
         (self.store, self.provenance)

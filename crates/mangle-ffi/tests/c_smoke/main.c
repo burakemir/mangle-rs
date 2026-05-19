@@ -867,5 +867,84 @@ int32_t c_smoke_run(void) {
 
     mangle_engine_free(eng);
 
+    /* ---- mangle_derivation_tree (M9) ----------------------------- */
+
+    /* 46. Engine with provenance enabled returns a derivation tree
+     *     for a derived fact. */
+    MangleEngine* eng_prov = NULL;
+    if (mangle_engine_new(1, &eng_prov) != MANGLE_OK) return 170;
+    const char* m9_src =
+        "edge(1, 2).\n"
+        "edge(2, 3).\n"
+        "reachable(X, Y) :- edge(X, Y).\n"
+        "reachable(X, Z) :- edge(X, Y), reachable(Y, Z).\n";
+    const uint8_t* m9_sources[1] = { (const uint8_t*)m9_src };
+    size_t m9_lens[1] = { strlen(m9_src) };
+    if (mangle_load_rules(eng_prov, m9_sources, m9_lens, 1) != MANGLE_OK) {
+        mangle_engine_free(eng_prov);
+        return 171;
+    }
+    MangleBuffer tree_buf = {0};
+    int32_t rc_tree = mangle_derivation_tree(
+        eng_prov,
+        (const uint8_t*)"reachable(1, 3)", strlen("reachable(1, 3)"),
+        100,
+        &tree_buf);
+    if (rc_tree != MANGLE_OK) {
+        mangle_buffer_free(&tree_buf);
+        mangle_engine_free(eng_prov);
+        return 172;
+    }
+    /* The JSON should mention the queried relation name. */
+    if (memmem(tree_buf.data, tree_buf.len, "reachable", 9) == NULL) {
+        mangle_buffer_free(&tree_buf);
+        mangle_engine_free(eng_prov);
+        return 173;
+    }
+    mangle_buffer_free(&tree_buf);
+
+    /* 47. Engine without provenance → MANGLE_ERR_NO_PROVENANCE. */
+    MangleEngine* eng_noprov = NULL;
+    mangle_engine_new(0, &eng_noprov);
+    if (mangle_load_rules(eng_noprov, m9_sources, m9_lens, 1) != MANGLE_OK) {
+        mangle_engine_free(eng_noprov);
+        mangle_engine_free(eng_prov);
+        return 174;
+    }
+    MangleBuffer noprov_buf = {0};
+    int32_t rc_noprov = mangle_derivation_tree(
+        eng_noprov,
+        (const uint8_t*)"reachable(1, 3)", strlen("reachable(1, 3)"),
+        100,
+        &noprov_buf);
+    if (rc_noprov != MANGLE_ERR_NO_PROVENANCE) {
+        mangle_buffer_free(&noprov_buf);
+        mangle_engine_free(eng_noprov);
+        mangle_engine_free(eng_prov);
+        return 175;
+    }
+    mangle_last_error(&drain);
+    mangle_buffer_free(&drain);
+    mangle_buffer_free(&noprov_buf);
+    mangle_engine_free(eng_noprov);
+
+    /* 48. Variable in fact → MANGLE_ERR_PARSE. */
+    MangleBuffer pe_buf = {0};
+    int32_t rc_pe = mangle_derivation_tree(
+        eng_prov,
+        (const uint8_t*)"reachable(X, 3)", strlen("reachable(X, 3)"),
+        100,
+        &pe_buf);
+    if (rc_pe != MANGLE_ERR_PARSE) {
+        mangle_buffer_free(&pe_buf);
+        mangle_engine_free(eng_prov);
+        return 176;
+    }
+    mangle_last_error(&drain);
+    mangle_buffer_free(&drain);
+    mangle_buffer_free(&pe_buf);
+
+    mangle_engine_free(eng_prov);
+
     return 0;
 }
