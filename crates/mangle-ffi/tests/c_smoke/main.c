@@ -17,6 +17,24 @@
 #include <stdint.h>
 #include <string.h>
 
+/* Portable byte-buffer substring search. `memmem` is a GNU/BSD
+ * extension and is not available on Windows MSVC, so the smoke test
+ * uses this drop-in replacement with the same signature/semantics
+ * (returns a pointer to the first occurrence, or NULL). */
+static const void* c_memmem(const void* hay, size_t hlen,
+                            const void* needle, size_t nlen) {
+    const uint8_t* h = (const uint8_t*)hay;
+    const uint8_t* n = (const uint8_t*)needle;
+    if (nlen == 0) return hay;
+    if (hlen < nlen) return NULL;
+    for (size_t i = 0; i + nlen <= hlen; i++) {
+        if (memcmp(h + i, n, nlen) == 0) {
+            return h + i;
+        }
+    }
+    return NULL;
+}
+
 int32_t c_smoke_run(void) {
     /* ---- mangle_version --------------------------------------------- */
 
@@ -755,7 +773,7 @@ int32_t c_smoke_run(void) {
         mangle_engine_free(eng4);
         return 142;
     }
-    if (memmem(dump.data, dump.len, "get_routes", 10) == NULL) {
+    if (c_memmem(dump.data, dump.len, "get_routes", 10) == NULL) {
         mangle_buffer_free(&dump);
         mangle_engine_free(eng);
         mangle_engine_free(eng4);
@@ -815,8 +833,8 @@ int32_t c_smoke_run(void) {
         return 152;
     }
     if (schema_buf.len == 0
-        || memmem(schema_buf.data, schema_buf.len, "\"edge\"", 6) == NULL
-        || memmem(schema_buf.data, schema_buf.len, "\"reachable\"", 11) == NULL) {
+        || c_memmem(schema_buf.data, schema_buf.len, "\"edge\"", 6) == NULL
+        || c_memmem(schema_buf.data, schema_buf.len, "\"reachable\"", 11) == NULL) {
         mangle_buffer_free(&schema_buf);
         mangle_engine_free(eng);
         return 153;
@@ -830,8 +848,8 @@ int32_t c_smoke_run(void) {
         return 154;
     }
     if (names_buf.len < 2 || names_buf.data[0] != '['
-        || memmem(names_buf.data, names_buf.len, "edge", 4) == NULL
-        || memmem(names_buf.data, names_buf.len, "reachable", 9) == NULL) {
+        || c_memmem(names_buf.data, names_buf.len, "edge", 4) == NULL
+        || c_memmem(names_buf.data, names_buf.len, "reachable", 9) == NULL) {
         mangle_buffer_free(&names_buf);
         mangle_engine_free(eng);
         return 155;
@@ -896,7 +914,7 @@ int32_t c_smoke_run(void) {
         return 172;
     }
     /* The JSON should mention the queried relation name. */
-    if (memmem(tree_buf.data, tree_buf.len, "reachable", 9) == NULL) {
+    if (c_memmem(tree_buf.data, tree_buf.len, "reachable", 9) == NULL) {
         mangle_buffer_free(&tree_buf);
         mangle_engine_free(eng_prov);
         return 173;
@@ -966,10 +984,10 @@ int32_t c_smoke_run(void) {
         return 182;
     }
     /* JSON should mention both relations + the relations container. */
-    if (memmem(facts_buf.data, facts_buf.len, "\"relations\"", 11) == NULL
-        || memmem(facts_buf.data, facts_buf.len, "\"edge\"", 6) == NULL
-        || memmem(facts_buf.data, facts_buf.len, "\"node\"", 6) == NULL
-        || memmem(facts_buf.data, facts_buf.len, "\"count\"", 7) == NULL) {
+    if (c_memmem(facts_buf.data, facts_buf.len, "\"relations\"", 11) == NULL
+        || c_memmem(facts_buf.data, facts_buf.len, "\"edge\"", 6) == NULL
+        || c_memmem(facts_buf.data, facts_buf.len, "\"node\"", 6) == NULL
+        || c_memmem(facts_buf.data, facts_buf.len, "\"count\"", 7) == NULL) {
         mangle_buffer_free(&facts_buf);
         mangle_engine_free(eng_snap);
         return 183;
