@@ -29,6 +29,56 @@ jobs:
       - name: Test (unit + integration + C smoke)
         run: cargo test -p mangle-ffi
 
+  # AddressSanitizer over the full suite. Catches use-after-free,
+  # double-free, and heap-buffer-overflow in the crate's pointer
+  # round-tripping (MangleBuffer, value handles, cursor row buffers).
+  #
+  # Three things make this work beyond "just add a flag":
+  #   - nightly toolchain (-Zsanitizer is unstable);
+  #   - explicit --target so host build artifacts (build.rs, cbindgen,
+  #     the cc C-smoke compile) are NOT instrumented;
+  #   - detect_leaks=0 because mangle-ast's global string interner
+  #     leaks by design (LeakSanitizer would fire on every test).
+  #     We use ASan purely for UAF / double-free / overflow here.
+  asan:
+    name: AddressSanitizer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install nightly
+        run: rustup toolchain install nightly
+      - name: ASan — full suite must be clean
+        env:
+          RUSTFLAGS: "-Zsanitizer=address"
+          ASAN_OPTIONS: "detect_leaks=0"
+        run: cargo +nightly test -p mangle-ffi --target x86_64-unknown-linux-gnu
+      - name: ASan canary — a deliberate UAF must be caught
+        env:
+          RUSTFLAGS: "-Zsanitizer=address"
+          ASAN_OPTIONS: "detect_leaks=0:abort_on_error=1"
+        # The `uaf` integration tests are #[ignore]-d and read freed
+        # memory on purpose. ASan must abort on one of them; if the
+        # test instead "passes", ASan isn't instrumenting our
+        # allocations and the whole job is meaningless — so we invert
+        # the exit code and additionally require an ASan report in
+        # stderr.
+        run: |
+          set +e
+          cargo +nightly test -p mangle-ffi --target x86_64-unknown-linux-gnu \
+            --test uaf -- --ignored --exact builder_handle_after_free 2>asan.log
+          status=$?
+          set -e
+          cat asan.log
+          if [ "$status" -eq 0 ]; then
+            echo "FAIL: expected ASan to abort on the deliberate UAF, but the test passed"
+            exit 1
+          fi
+          if ! grep -q "AddressSanitizer" asan.log; then
+            echo "FAIL: test aborted but produced no AddressSanitizer report (compile error?)"
+            exit 1
+          fi
+          echo "OK: ASan caught the deliberate use-after-free"
+
   # Lint + header-hygiene checks. Platform-independent, so ubuntu only.
   lint:
     name: fmt + clippy + header diff
