@@ -111,6 +111,16 @@ cargo test                              # all tests
 cargo test --features csv_storage -p mangle-vm  # CSV storage tests
 ```
 
+> **Note:** `mangle-py` (the PyO3 Python bindings) is excluded from the
+> workspace `default-members`, so root-level `cargo build` / `cargo test` skip
+> it. With the `extension-module` feature enabled, Python symbols are resolved
+> at load time, which only links when cargo runs from the crate directory (it
+> uses `crates/mangle-py/.cargo/config.toml`) or via `maturin`. Build it with:
+>
+> ```bash
+> cd crates/mangle-py && cargo build    # or: maturin develop
+> ```
+
 ### Benchmarks
 
 A criterion benchmark compares three execution modes on transitive closure

@@ -21,6 +21,30 @@ members = [
     "crates/mangle-ffi"
 ]
 
+# mangle-py is a PyO3 extension module: with the `extension-module` feature it
+# leaves Python symbols to be resolved at load time, which only links when the
+# crate-local `crates/mangle-py/.cargo/config.toml` is in effect (i.e. when
+# cargo is invoked from that directory, or via maturin). Excluding it from the
+# default set lets a workspace-root `cargo build`/`cargo test` succeed; build
+# mangle-py from its own directory or with maturin.
+default-members = [
+    "crates/mangle-ast",
+    "crates/mangle-analysis",
+    "crates/mangle-engine",
+    "crates/mangle-common",
+    "crates/mangle-parse",
+    "crates/mangle-ir",
+    "crates/mangle-codegen",
+    "crates/mangle-vm",
+    "crates/mangle-driver",
+    "crates/mangle-interpreter",
+    "crates/mangle-simplecolumn",
+    "crates/mangle-server",
+    "crates/mangle-db",
+    "crates/mangle-wasm",
+    "crates/mangle-ffi"
+]
+
 [workspace.package]
 version = "0.7.0"
 authors = ["Burak Emir <burak.emir@gmail.com>"]
