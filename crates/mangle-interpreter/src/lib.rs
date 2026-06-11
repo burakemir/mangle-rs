@@ -101,6 +101,17 @@ fn skip_one(cells: &[Cell], pos: &mut usize) {
     }
 }
 
+/// Count the number of logical values represented by a flat cell array.
+fn count_logical_values(cells: &[Cell]) -> usize {
+    let mut count = 0;
+    let mut pos = 0;
+    while pos < cells.len() {
+        count += 1;
+        skip_one(cells, &mut pos);
+    }
+    count
+}
+
 /// Reconstruct a `Vec<Value>` tuple from flat cells, reading `n_cols` logical values.
 fn unflatten_tuple(cells: &[Cell], n_cols: usize) -> Vec<Value> {
     let mut pos = 0;
@@ -227,11 +238,20 @@ impl MemStore {
         let mut all_facts: Vec<Vec<Value>> = Vec::new();
         if let Some(table) = self.stable.get(relation) {
             for cells in table {
+                // Defensive: skip if logical column count doesn't match
+                if count_logical_values(cells) != n_cols {
+                    eprintln!("[mangle] coalesce_temporal: skipping malformed cells in '{relation}' (expected {n_cols} logical cols, got {})", count_logical_values(cells));
+                    continue;
+                }
                 all_facts.push(unflatten_tuple(cells, n_cols));
             }
         }
         if let Some(table) = self.delta.get(relation) {
             for cells in table {
+                if count_logical_values(cells) != n_cols {
+                    eprintln!("[mangle] coalesce_temporal: skipping malformed cells in delta '{relation}' (expected {n_cols} logical cols, got {})", count_logical_values(cells));
+                    continue;
+                }
                 all_facts.push(unflatten_tuple(cells, n_cols));
             }
         }
@@ -436,6 +456,19 @@ impl Store for MemStore {
             return Ok(false);
         }
 
+        // Debug: log arity registration / mismatch
+        let existing_arity = self.arity.get(relation).copied();
+        match existing_arity {
+            Some(reg) if reg != n_cols => {
+                eprintln!("[mangle] ARITY MISMATCH in relation '{relation}': registered arity={reg}, inserting tuple with {n_cols} cols, cells.len()={}. Skipping.", cells.len());
+                return Ok(false);
+            }
+            None => {
+                eprintln!("[mangle] Registering arity for relation '{relation}': {n_cols} cols");
+            }
+            _ => {}
+        }
+
         self.arity.entry(relation.to_string()).or_insert(n_cols);
         self.next_delta
             .entry(relation.to_string())
@@ -449,7 +482,12 @@ impl Store for MemStore {
         for (rel_name, mut tuples) in self.delta.drain() {
             let n_cols = self.arity.get(&rel_name).copied().unwrap_or(0);
             let table = self.stable.entry(rel_name.clone()).or_default();
-            for cells in tuples.drain(..) {
+            for (i, cells) in tuples.drain(..).enumerate() {
+                // Defensive: skip tuples where logical arity doesn't match registered arity
+                if count_logical_values(&cells) != n_cols {
+                    eprintln!("[mangle] SKIP: relation '{rel_name}' arity={n_cols} but tuple[{i}] has {} logical cols. Skipping.", count_logical_values(&cells));
+                    continue;
+                }
                 let row_idx = table.len();
                 index_cells(
                     &mut self.stable_indexes,
@@ -468,6 +506,11 @@ impl Store for MemStore {
         for (rel_name, tuples) in &self.delta {
             let n_cols = self.arity.get(rel_name).copied().unwrap_or(0);
             for (row_idx, cells) in tuples.iter().enumerate() {
+                // Defensive: skip tuples where logical arity doesn't match registered arity
+                if count_logical_values(cells) != n_cols {
+                    eprintln!("[mangle] SKIP: relation '{rel_name}' arity={n_cols} but delta tuple[{row_idx}] has {} logical cols. Skipping.", count_logical_values(cells));
+                    continue;
+                }
                 index_cells(
                     &mut self.delta_indexes,
                     rel_name,

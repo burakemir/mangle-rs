@@ -120,6 +120,12 @@ impl ProgramStore {
     /// Compile source, execute, and store the resulting Database.
     pub fn load(&mut self, name: &str, source: &str) -> Result<ProgramInfo> {
         let config = self.make_db_config(name, source);
+        eprintln!("[mangle] Loading program '{}': {} EDB sources, idb_mode={}, store_backend={}",
+            name,
+            config.edb_sources.len(),
+            match config.idb_mode { IdbMode::InMemory => "InMemory", IdbMode::Cached(_) => "Cached" },
+            match config.store_backend { StoreBackend::InMemory => "InMemory", StoreBackend::Disk(_) => "Disk" },
+        );
         let db = Database::open(config)?;
 
         let predicates = db.relation_names()?;
