@@ -21,7 +21,7 @@ use std::sync::{Arc, RwLock};
 
 use anyhow::{Result, anyhow};
 use fxhash::FxHashSet;
-use mangle_analysis::{LoweringContext, Program, StratifiedProgram, rewrite_unit};
+use mangle_analysis::{BoundsChecker, LoweringContext, Program, StratifiedProgram, rewrite_unit};
 use mangle_ast::{self as ast, Arena};
 use mangle_common::{Store, Value};
 use mangle_interpreter::MemStore;
@@ -447,7 +447,11 @@ fn compile_source<'a>(source: &str, arena: &'a Arena) -> Result<(Ir, StratifiedP
 
     let stratified = program.stratify().map_err(|e| anyhow!(e))?;
     let ctx = LoweringContext::new(arena);
-    let ir = ctx.lower_unit(unit);
+    let mut ir = ctx.lower_unit(unit);
+
+    // Validate arity consistency and type bounds.
+    let mut checker = BoundsChecker::new(&mut ir);
+    checker.check()?;
 
     Ok((ir, stratified))
 }
@@ -841,5 +845,27 @@ mod tests {
         assert!(facts.is_empty());
 
         Ok(())
+    }
+
+    #[test]
+    fn test_database_arity_mismatch_error() {
+        // Opening a database with inconsistent predicate arity should fail.
+        let config = DatabaseConfig {
+            name: "test".to_string(),
+            source: r#"
+                p(1).
+                p(2, 3).
+            "#
+            .to_string(),
+            edb_sources: vec![],
+            idb_mode: IdbMode::InMemory,
+            recompute: RecomputeStrategy::Full,
+            store_backend: StoreBackend::InMemory,
+        };
+
+        let result = Database::open(config);
+        assert!(result.is_err(), "expected arity error");
+        let msg = result.err().unwrap().to_string();
+        assert!(msg.contains("inconsistent arity"), "error should mention 'inconsistent arity': {}", msg);
     }
 }

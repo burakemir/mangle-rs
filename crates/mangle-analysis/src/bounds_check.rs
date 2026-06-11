@@ -64,6 +64,7 @@ impl<'a> BoundsChecker<'a> {
     pub fn check(&mut self) -> Result<()> {
         self.collect_declarations()?;
         self.build_rules_map();
+        self.check_arity_consistency()?;
         self.check_all_clauses()
     }
 
@@ -135,6 +136,56 @@ impl<'a> BoundsChecker<'a> {
                     }
                 }
             }
+        }
+    }
+
+    /// Pass 1.5: Check that every predicate is used with a consistent arity.
+    ///
+    /// Scans all facts and rule heads to detect arity mismatches, e.g.:
+    /// `p(1). p(2, 3).` — predicate `p` used with arity 1 and 2.
+    fn check_arity_consistency(&self) -> Result<()> {
+        // Map predicate NameId -> (first seen arity, first seen location)
+        let mut arity_map: FxHashMap<NameId, (usize, String)> = FxHashMap::default();
+        let mut errors: Vec<String> = Vec::new();
+
+        let insts: Vec<Inst> = self.ir.insts.clone();
+        for inst in &insts {
+            if let Inst::Rule { head, premises, transform } = inst {
+                let is_fact = premises.is_empty() && transform.is_empty();
+                if let Some(pred) = self.atom_predicate(*head) {
+                    let expected_args = if self.ir.temporal_predicates.contains(&pred) {
+                        let args = self.atom_args(*head);
+                        if args.len() >= 2 {
+                            args.len() - 2
+                        } else {
+                            args.len()
+                        }
+                    } else {
+                        self.atom_args(*head).len()
+                    };
+
+                    let kind = if is_fact { "fact" } else { "rule" };
+                    let pred_name = self.ir.resolve_name(pred).to_string();
+                    let location = format!("{} {}({} arg(s))", kind, pred_name, expected_args);
+
+                    if let Some(&(first_arity, ref first_location)) = arity_map.get(&pred) {
+                        if first_arity != expected_args {
+                            errors.push(format!(
+                                "predicate '{}' used with inconsistent arity: {} vs {}",
+                                pred_name, first_location, location
+                            ));
+                        }
+                    } else {
+                        arity_map.insert(pred, (expected_args, location));
+                    }
+                }
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!("arity error: {}", errors.join("; ")))
         }
     }
 
@@ -1541,5 +1592,82 @@ mod tests {
             foo(1).
             bar(X) :- foo(X).
         "#).is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // Arity consistency checking (no Decl required)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn arity_mismatch_facts() {
+        // Same predicate with different arity: p(1) vs p(2, 3).
+        let result = check(r#"
+            p(1).
+            p(2, 3).
+        "#);
+        assert!(result.is_err(), "expected arity error, got: {:?}", result);
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("inconsistent arity"), "error should mention 'inconsistent arity': {}", msg);
+        assert!(msg.contains("p"), "error should mention predicate name: {}", msg);
+    }
+
+    #[test]
+    fn arity_mismatch_fact_and_rule() {
+        // Fact p(1) vs rule head p(X, Y) — different arity.
+        let result = check(r#"
+            p(1).
+            p(X, Y) :- q(X, Y).
+            q(1, 2).
+        "#);
+        assert!(result.is_err(), "expected arity error, got: {:?}", result);
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("inconsistent arity"), "error should mention 'inconsistent arity': {}", msg);
+    }
+
+    #[test]
+    fn arity_mismatch_two_rules() {
+        // Two rules with different head arity for same predicate.
+        let result = check(r#"
+            p(X) :- q(X).
+            p(X, Y) :- r(X, Y).
+            q(1).
+            r(1, 2).
+        "#);
+        assert!(result.is_err(), "expected arity error, got: {:?}", result);
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("inconsistent arity"), "error should mention 'inconsistent arity': {}", msg);
+    }
+
+    #[test]
+    fn consistent_arity_passes() {
+        // All uses of p have arity 1 — should pass.
+        assert!(check(r#"
+            p(1).
+            p(2).
+            q(X) :- p(X).
+        "#).is_ok());
+    }
+
+    #[test]
+    fn consistent_arity_rules_passes() {
+        // All uses of p have arity 2 — should pass.
+        assert!(check(r#"
+            p(1, 2).
+            p(X, Y) :- q(X), r(Y).
+            q(1).
+            r(2).
+        "#).is_ok());
+    }
+
+    #[test]
+    fn arity_mismatch_undeclared_predicates() {
+        // Even without any Decl, arity mismatch should be caught.
+        let result = check(r#"
+            edge(1, 2).
+            edge(3, 4, 5).
+        "#);
+        assert!(result.is_err(), "expected arity error, got: {:?}", result);
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("inconsistent arity"), "error should mention 'inconsistent arity': {}", msg);
     }
 }
