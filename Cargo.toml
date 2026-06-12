@@ -1,6 +1,7 @@
 # Cargo.toml for mangle-rs workspace
 [workspace]
 resolver = "2"
+exclude = ["crates/mangle-delta"]
 
 members = [
     "crates/mangle-ast",

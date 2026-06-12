@@ -1299,6 +1299,7 @@ version = "0.7.0"
 dependencies = [
  "anyhow",
  "fxhash",
+ "log",
  "mangle-analysis",
  "mangle-ast",
  "mangle-common",
