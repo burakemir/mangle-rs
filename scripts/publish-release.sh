@@ -34,6 +34,8 @@ CRATES=(
     mangle-db
     mangle-wasm
     mangle-server
+    mangle-parquet
+    mangle-delta
 )
 
 mode="dry-run"
