@@ -2,6 +2,35 @@
 
 All notable changes in mangle/rust will be documented in this file.
 
+## [0.8.0] - 2026-06-19
+
+### 🚀 Features
+
+- **New `mangle-parquet` crate**: `ParquetEdbSource` reads plain Parquet
+  files (single file or a directory of `.parquet` files) as EDB facts,
+  with **row-group predicate pushdown** via per-column min/max
+  statistics. Supports the same `ColumnPredicate` pushdown protocol as
+  `mangle-delta`; pushdown is best-effort and always re-checked in memory.
+- **Shared Arrow → Mangle `Value` mapping**: the converter (`convert.rs`)
+  moved from `mangle-delta` into `mangle-parquet::convert` (now `pub`),
+  so Parquet and Delta Lake data are mapped to Mangle values identically.
+
+### ⚠️ Breaking Changes
+
+- **`mangle-delta` now uses the published `deltalake-core` 0.32** (was a
+  path reference to a sibling `delta-rs` checkout). Same Arrow/Parquet 58.
+
+### ⚙️ Miscellaneous Tasks
+
+- `mangle-parquet` and `mangle-delta` are now full workspace members:
+  inherit version/edition/metadata from `[workspace.package]`, use
+  workspace dependencies, and resolve through the root `Cargo.lock`.
+  Kept out of `default-members` so a plain `cargo build` stays light
+  (DataFusion only pulled by explicit `-p`).
+- Replaced `fxhash` with `rustc-hash`; general dependency updates.
+- 12 `mangle-parquet` integration tests (row-group pruning for int and
+  string columns, multi-file directory, all-pruned and `Neq` safety).
+
 ## [0.7.0] - 2026-04-15
 
 ### 🚀 Features
