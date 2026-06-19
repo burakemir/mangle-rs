@@ -25,7 +25,7 @@
 //! - TaggedUnion expansion
 
 use anyhow::{Result, anyhow, bail};
-use fxhash::{FxHashMap, FxHashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
 use mangle_ir::{Inst, InstId, Ir, NameId};
 
 // Type constructor names.

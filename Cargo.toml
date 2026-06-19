@@ -60,7 +60,7 @@ readme = "README.md"
 [workspace.dependencies]
 anyhow = "1.0"
 bumpalo = "3.14"
-fxhash = "0.2.1"
+rustc-hash = "2.1"
 googletest = { version = "0.14.1", features = ["anyhow"] }
 mangle-analysis = { version = "0.7.0", path = "./crates/mangle-analysis" }
 mangle-ast = { version = "0.7.0", path = "./crates/mangle-ast" }

@@ -59,7 +59,7 @@
 
 use anyhow::{Result, anyhow};
 use ast::Arena;
-use fxhash::FxHashSet;
+use rustc_hash::FxHashSet;
 use mangle_analysis::{BoundsChecker, LoweringContext, Planner, Program, StratifiedProgram, rewrite_unit};
 use mangle_ast as ast;
 use mangle_codegen::{Codegen, WasmImportsBackend};

@@ -68,4 +68,4 @@ pub use stratification::{Program, StratifiedProgram};
 
 /// A set of predicate symbols, typically used to represent a stratum or a
 /// collection of EDB/IDB predicates.
-pub type PredicateSet = fxhash::FxHashSet<ast::PredicateIndex>;
+pub type PredicateSet = rustc_hash::FxHashSet<ast::PredicateIndex>;

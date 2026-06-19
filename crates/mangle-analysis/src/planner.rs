@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use anyhow::{Result, anyhow};
-use fxhash::FxHashSet;
+use rustc_hash::FxHashSet;
 use mangle_ir::physical::{self, Aggregate, CmpOp, Condition, DataSource, Expr, Op, Operand};
 use mangle_ir::{Inst, InstId, Ir, NameId};
 

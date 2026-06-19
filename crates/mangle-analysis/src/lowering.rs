@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use fxhash::FxHashMap;
+use rustc_hash::FxHashMap;
 use mangle_ast as ast;
 use mangle_ir::{Inst, InstId, Ir};
 

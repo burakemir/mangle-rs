@@ -17,7 +17,7 @@ mangle-analysis.workspace = true
 mangle-parse.workspace = true
 mangle-ir.workspace = true
 anyhow.workspace = true
-fxhash.workspace = true
+rustc-hash.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
 postcard = { version = "1", features = ["use-std"] }

@@ -24,7 +24,7 @@
 //! - UpperBound/LowerBound for type intersection/union
 
 use anyhow::{Result, anyhow};
-use fxhash::{FxHashMap, FxHashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
 use mangle_ir::{Inst, InstId, Ir, NameId};
 
 use crate::name_trie::NameTrie;

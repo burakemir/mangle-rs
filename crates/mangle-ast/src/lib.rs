@@ -16,7 +16,7 @@ pub mod pretty;
 pub use pretty::PrettyPrint;
 
 use bumpalo::Bump;
-use fxhash::FxHashMap;
+use rustc_hash::FxHashMap;
 use std::cell::RefCell;
 use std::mem;
 use std::num::NonZeroUsize;

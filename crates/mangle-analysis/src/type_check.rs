@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use anyhow::{Result, anyhow};
-use fxhash::FxHashMap;
+use rustc_hash::FxHashMap;
 use mangle_ir::{Inst, InstId, Ir, NameId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]

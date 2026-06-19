@@ -16,7 +16,7 @@ use crate::Engine;
 use crate::Result;
 use crate::ast::{Arena, Atom, BaseTerm, Term};
 use anyhow::anyhow;
-use fxhash::FxHashMap;
+use rustc_hash::FxHashMap;
 
 pub struct Naive {}
 

@@ -13,7 +13,7 @@ readme = "README.md"
 mangle-ast.workspace = true
 mangle-parse = { workspace = true }
 mangle-analysis.workspace = true
-fxhash.workspace = true
+rustc-hash.workspace = true
 mangle-ir.workspace = true
 mangle-codegen.workspace = true
 mangle-interpreter.workspace = true

@@ -38,7 +38,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use fxhash::FxHashSet;
+use rustc_hash::FxHashSet;
 use mangle_common::Value;
 use mangle_ir::physical::{CmpOp, Condition, DataSource, Op, Operand};
 use mangle_ir::Ir;

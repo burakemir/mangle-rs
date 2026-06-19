@@ -18,7 +18,7 @@
 //! via longest-prefix matching. Used by the bounds checker to infer types
 //! for name constants appearing in facts.
 
-use fxhash::FxHashMap;
+use rustc_hash::FxHashMap;
 use mangle_ir::{Inst, InstId, Ir};
 
 use crate::type_expr;

@@ -552,7 +552,7 @@ impl Host for DummyHost {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fxhash::FxHashSet;
+    use rustc_hash::FxHashSet;
     use mangle_analysis::{rewrite_unit, LoweringContext, Program};
     use mangle_ast as ast;
     use mangle_codegen::{Codegen, WasmImportsBackend};

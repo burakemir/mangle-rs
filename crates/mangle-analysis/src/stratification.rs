@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::PredicateSet;
-use fxhash::{FxHashMap, FxHashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
 use mangle_ast as ast;
 use mangle_ast::Arena;
 use std::fmt;

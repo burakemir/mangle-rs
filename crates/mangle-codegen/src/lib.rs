@@ -552,7 +552,7 @@ impl<'a, B: Backend> Codegen<'a, B> {
         if let Some(stratified) = self.stratified {
             let arena = stratified.arena();
             for stratum in stratified.strata() {
-                use fxhash::FxHashSet;
+                use rustc_hash::FxHashSet;
                 let mut stratum_pred_names = FxHashSet::default();
                 for pred in &stratum {
                     if let Some(name) = arena.predicate_name(*pred) {

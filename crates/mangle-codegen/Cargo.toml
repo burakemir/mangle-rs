@@ -15,7 +15,7 @@ mangle-ast.workspace = true
 mangle-analysis.workspace = true
 wasm-encoder.workspace = true
 anyhow.workspace = true
-fxhash.workspace = true
+rustc-hash.workspace = true
 
 [dev-dependencies]
 wasmparser.workspace = true

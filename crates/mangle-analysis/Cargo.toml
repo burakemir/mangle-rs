@@ -11,7 +11,7 @@ readme = "README.md"
 
 [dependencies]
 anyhow.workspace = true
-fxhash.workspace = true
+rustc-hash.workspace = true
 googletest.workspace = true
 mangle-ast.workspace = true
 mangle-ir.workspace = true

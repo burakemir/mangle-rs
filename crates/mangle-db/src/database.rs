@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use anyhow::{Result, anyhow};
-use fxhash::FxHashSet;
+use rustc_hash::FxHashSet;
 use mangle_analysis::{BoundsChecker, LoweringContext, Program, StratifiedProgram, rewrite_unit};
 use mangle_ast::{self as ast, Arena};
 use mangle_common::{Store, Value};
