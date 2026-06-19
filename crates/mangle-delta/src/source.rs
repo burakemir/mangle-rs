@@ -25,7 +25,7 @@ use mangle_common::Value;
 use mangle_db::{ColumnPredicate, EdbSource, Fingerprint, PredicateOp, RelationInfo};
 use url::Url;
 
-use crate::convert::record_batch_to_values;
+use mangle_parquet::convert::record_batch_to_values;
 
 /// An EDB source backed by a Delta Lake table.
 ///

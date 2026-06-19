@@ -1,0 +1,32 @@
+[package]
+name = "mangle-parquet"
+version.workspace = true
+edition.workspace = true
+description = "Parquet adapter for Mangle — EDB source with row-group pruning"
+documentation.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme = "README.md"
+
+[dependencies]
+# Mangle (workspace)
+mangle-common = { workspace = true, features = ["edge"] }
+mangle-db.workspace = true
+anyhow.workspace = true
+log.workspace = true
+
+# Arrow (for RecordBatch → Value conversion + schema introspection)
+arrow-array = "58"
+arrow-cast = "58"
+arrow-schema = "58"
+
+# Parquet (file reading + row-group statistics for predicate pushdown)
+parquet = "58"
+
+# Fingerprinting (SHA-256 of file metadata, matching mangle-db's file_source)
+sha2.workspace = true
+
+[dev-dependencies]
+arrow = "58"
+tempfile.workspace = true

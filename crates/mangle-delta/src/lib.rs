@@ -119,6 +119,10 @@
 //!
 //! ## Type mapping (Arrow → Mangle)
 //!
+//! Shared with the `mangle-parquet` adapter via the `mangle_parquet::convert`
+//! module, so Delta Lake and plain Parquet data map to Mangle `Value`s
+//! identically.
+//!
 //! | Arrow type | Mangle `Value` |
 //! |---|---|
 //! | `Int8/16/32/64` | `Value::Number(i64)` |
@@ -145,7 +149,6 @@
 //! - **Schema evolution**: The adapter reads the schema at `open()` time.
 //!   Schema changes after opening require re-creating the source.
 
-mod convert;
 mod source;
 
 pub use source::DeltaEdbSource;

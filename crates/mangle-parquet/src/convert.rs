@@ -7,12 +7,29 @@
 //     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS\" BASIS,
+// distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
 //! Arrow → Mangle Value conversion.
+//!
+//! This is the canonical schema mapping shared by the Parquet and Delta Lake
+//! adapters. Keeping it in one place guarantees that plain Parquet files and
+//! Delta tables are mapped to Mangle [`Value`]s identically.
+//!
+//! | Arrow type | Mangle `Value` |
+//! |---|---|
+//! | `Int8/16/32/64` | `Value::Number(i64)` |
+//! | `UInt8/16/32` | `Value::Number(i64)` |
+//! | `UInt64` | `Value::Number(i64)` (truncated, via fallback) |
+//! | `Float32/64` | `Value::Float(f64)` |
+//! | `Utf8/LargeUtf8` | `Value::String(String)` |
+//! | `Timestamp(_, _)` | `Value::Time(i64)` (nanoseconds) |
+//! | `Date32/64` | `Value::Time(i64)` (nanoseconds since epoch) |
+//! | `Duration(_)` | `Value::Duration(i64)` (nanoseconds) |
+//! | `Boolean` | `Value::Number(0 or 1)` |
+//! | `Null` | `Value::Null` |
 
 use arrow_array::{
     Array, BooleanArray, Date32Array, Date64Array, DurationMicrosecondArray,
@@ -40,7 +57,7 @@ pub fn record_batch_to_values(batch: &RecordBatch) -> Vec<Vec<Value>> {
 }
 
 /// Convert an Arrow `Array` into a `Vec<Value>` (one per element).
-fn array_to_values(array: &dyn Array) -> Vec<Value> {
+pub fn array_to_values(array: &dyn Array) -> Vec<Value> {
     let data_type = array.data_type();
 
     match data_type {
