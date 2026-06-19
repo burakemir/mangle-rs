@@ -3172,7 +3172,7 @@ dependencies = [
 
 [[package]]
 name = "mangle-analysis"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "googletest",
@@ -3185,7 +3185,7 @@ dependencies = [
 
 [[package]]
 name = "mangle-ast"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "bumpalo",
  "googletest",
@@ -3194,7 +3194,7 @@ dependencies = [
 
 [[package]]
 name = "mangle-codegen"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "mangle-analysis",
@@ -3207,7 +3207,7 @@ dependencies = [
 
 [[package]]
 name = "mangle-common"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "mangle-ast",
@@ -3216,7 +3216,7 @@ dependencies = [
 
 [[package]]
 name = "mangle-db"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "log",
@@ -3238,7 +3238,7 @@ dependencies = [
 
 [[package]]
 name = "mangle-delta"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -3255,7 +3255,7 @@ dependencies = [
 
 [[package]]
 name = "mangle-driver"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "criterion",
@@ -3272,7 +3272,7 @@ dependencies = [
 
 [[package]]
 name = "mangle-engine"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "mangle-analysis",
@@ -3284,7 +3284,7 @@ dependencies = [
 
 [[package]]
 name = "mangle-ffi"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "cbindgen",
@@ -3305,7 +3305,7 @@ dependencies = [
 
 [[package]]
 name = "mangle-interpreter"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "mangle-ast",
@@ -3315,11 +3315,11 @@ dependencies = [
 
 [[package]]
 name = "mangle-ir"
-version = "0.7.0"
+version = "0.8.0"
 
 [[package]]
 name = "mangle-parquet"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -3336,7 +3336,7 @@ dependencies = [
 
 [[package]]
 name = "mangle-parse"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "googletest",
@@ -3362,7 +3362,7 @@ dependencies = [
 
 [[package]]
 name = "mangle-server"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -3380,7 +3380,7 @@ dependencies = [
 
 [[package]]
 name = "mangle-simplecolumn"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "flate2",
@@ -3394,7 +3394,7 @@ dependencies = [
 
 [[package]]
 name = "mangle-vm"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "csv",
@@ -3412,7 +3412,7 @@ dependencies = [
 
 [[package]]
 name = "mangle-wasm"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "mangle-ast",
