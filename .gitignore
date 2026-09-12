@@ -1,5 +1,7 @@
 **/target
 *.swp
 *.swo
+*.swn
+**.DS_Store
 /crates/mangle-wasm/playground/pkg/
 
