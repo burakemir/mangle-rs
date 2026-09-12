@@ -2,6 +2,34 @@
 
 All notable changes in mangle/rust will be documented in this file.
 
+## Unreleased
+
+### 🚀 Features
+
+- **Connect RPC API for `mangle-server`** (design:
+  `crates/mangle-server/RPC_DESIGN.md`): the new `mangle-proto` crate
+  defines the canonical, schema-less protobuf encoding of Mangle facts
+  (`Value`, row-encoded `Fact`, columnar `FactBatch` with typed packed
+  columns) and the `MangleService` interface, generated with
+  `connectrpc-build` on the buffa runtime (hermetic build via
+  `protoc-bin-vendored`). The server serves it under
+  `/mangle.MangleService/` for Connect, gRPC and gRPC-Web clients:
+  server-streaming `Query`/`Eval` (row or columnar batches, `batch_size`/
+  `limit` control), client-streaming `InsertFacts`/`RetractFacts`, and
+  unary program management. The canonical encoding preserves Mangle type
+  distinctions the JSON API loses (name vs string, time/duration as
+  nanosecond integers, non-finite floats).
+- `mangle-server` restructured into lib + bin with end-to-end integration
+  tests covering both APIs.
+
+### ⚠️ Deprecations
+
+- **The JSON HTTP API of `mangle-server` (`/query`, `/programs`, `/eval`,
+  `/admin/reload-all`) is deprecated.** It coexists with the Connect RPC
+  API for one release and will be removed in the release after that.
+  Responses carry `Deprecation: true` (RFC 8594) and a `Sunset` header;
+  no flags or config changes are required to keep using it meanwhile.
+
 ## [0.8.0] - 2026-06-19
 
 ### 🚀 Features

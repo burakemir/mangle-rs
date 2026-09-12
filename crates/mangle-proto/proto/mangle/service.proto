@@ -1,0 +1,142 @@
+// MangleService: the RPC interface of mangle-server.
+//
+// See crates/mangle-server/RPC_DESIGN.md for the full design rationale.
+syntax = "proto3";
+
+package mangle;
+
+import "mangle/value.proto";
+
+service MangleService {
+  // Query a loaded program; results stream in FactBatch chunks.
+  rpc Query(QueryRequest) returns (stream QueryEvent);
+  // Stateless: compile + run the given source, stream results.
+  rpc Eval(EvalRequest) returns (stream QueryEvent);
+
+  // Insert facts into a program's EDB. Stream single Facts or FactBatches.
+  rpc InsertFacts(stream MutationRequest) returns (MutationSummary);
+  // Retract facts from a program's EDB.
+  rpc RetractFacts(stream MutationRequest) returns (MutationSummary);
+
+  rpc ListPrograms(ListProgramsRequest) returns (ListProgramsResponse);
+  rpc LoadProgram(LoadProgramRequest) returns (ProgramInfo);
+  rpc GetProgram(GetProgramRequest) returns (ProgramInfo);
+  rpc DeleteProgram(DeleteProgramRequest) returns (Empty);
+  rpc ReloadProgram(ReloadProgramRequest) returns (ProgramInfo);
+  rpc ReloadAll(ReloadAllRequest) returns (ListProgramsResponse);
+}
+
+message Empty {}
+
+message QueryRequest {
+  string program = 1;
+
+  oneof query {
+    // Textual form (same grammar as the CLI), parsed server-side.
+    string text = 2;
+    // Structured form, no parsing involved.
+    StructuredQuery structured = 3;
+  }
+
+  // Encoding of result facts in the stream.
+  ResultEncoding encoding = 4;
+  // Target number of facts per streamed FactBatch (server may deviate).
+  uint32 batch_size = 5;
+  // Hard limit on number of result facts; 0 = unlimited.
+  uint64 limit = 6;
+}
+
+enum ResultEncoding {
+  ROWS = 0;
+  COLUMNAR = 1;
+}
+
+message StructuredQuery {
+  string predicate = 1;
+  // One entry per column position. Absent trailing entries = wildcard.
+  repeated ArgPattern args = 2;
+}
+
+message ArgPattern {
+  oneof pattern {
+    // Unbound: matches anything (a Mangle variable / `_`).
+    Wildcard any = 1;
+    // Ground constant at this position.
+    Value const = 2;
+  }
+}
+
+message Wildcard {}
+
+message EvalRequest {
+  string source = 1;
+  // Additional source units (libs) compiled together with `source`.
+  repeated string libs = 2;
+  // Optional query; empty means "all relations".
+  string query = 3;
+  ResultEncoding encoding = 4;
+  uint32 batch_size = 5;
+  uint64 limit = 6;
+}
+
+// One streamed event of Query / Eval.
+message QueryEvent {
+  oneof event {
+    FactBatch batch = 1;
+    QueryStats done = 2;
+  }
+}
+
+message QueryStats {
+  uint64 num_facts = 1;
+  // Wall time of query evaluation, microseconds.
+  uint64 elapsed_us = 2;
+  // Names of the variables bound by the query, in column order.
+  repeated string variables = 3;
+}
+
+message MutationRequest {
+  string program = 1;
+  oneof payload {
+    Fact fact = 2;
+    FactBatch batch = 3;
+  }
+}
+
+message MutationSummary {
+  uint64 num_inserted = 1;
+  uint64 num_retracted = 2;
+  uint64 num_skipped = 3;
+}
+
+message ProgramInfo {
+  string name = 1;
+  repeated string predicates = 2;
+  // Only populated by GetProgram.
+  string source = 3;
+}
+
+message LoadProgramRequest {
+  string name = 1;
+  string source = 2;
+}
+
+message GetProgramRequest {
+  string name = 1;
+}
+
+message DeleteProgramRequest {
+  string name = 1;
+}
+
+message ReloadProgramRequest {
+  string name = 1;
+}
+
+message ListProgramsRequest {}
+
+message ReloadAllRequest {}
+
+message ListProgramsResponse {
+  repeated ProgramInfo programs = 1;
+}

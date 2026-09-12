@@ -1,24 +1,15 @@
-mod config;
-mod handlers;
-mod mutations;
-mod query;
-mod store;
-
-use axum::Router;
-use axum::routing::{get, post};
-use handlers::{
-    AppState, delete_program_handler, eval_handler, get_program_handler, insert_handler,
-    list_programs_handler, load_program_handler, query_handler, reload_all_handler,
-    reload_program_handler, retract_handler,
-};
-use mutations::MutationLog;
+use mangle_server::app::build_app;
+use mangle_server::config::ServerConfig;
+use mangle_server::handlers::AppState;
+use mangle_server::mutations::MutationLog;
+use mangle_server::store::ProgramStore;
 use std::fs;
-use std::sync::{Arc, RwLock};
-use store::ProgramStore;
+use std::sync::Arc;
+use std::sync::RwLock;
 
 #[tokio::main]
 async fn main() {
-    let config = match config::ServerConfig::from_args() {
+    let config = match ServerConfig::from_args() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Error loading config: {}", e);
@@ -76,25 +67,12 @@ async fn main() {
         }
     }
 
-    let app = Router::new()
-        .route("/query", post(query_handler))
-        .route(
-            "/programs",
-            get(list_programs_handler).post(load_program_handler),
-        )
-        .route(
-            "/programs/{name}",
-            get(get_program_handler).delete(delete_program_handler),
-        )
-        .route("/programs/{name}/reload", post(reload_program_handler))
-        .route("/programs/{name}/insert", post(insert_handler))
-        .route("/programs/{name}/retract", post(retract_handler))
-        .route("/admin/reload-all", post(reload_all_handler))
-        .route("/eval", post(eval_handler))
-        .with_state(state);
+    let app = build_app(state);
 
     let addr = format!("0.0.0.0:{}", config.port);
     eprintln!("mangle-server listening on {addr}");
+    eprintln!("  Connect RPC API: /mangle.MangleService/ (Connect, gRPC, gRPC-Web)");
+    eprintln!("  deprecated JSON HTTP API: /query, /programs, /eval");
     eprintln!("  config: {}", config.config_path.display());
     if let Some(ref dir) = config.programs_dir {
         eprintln!("  programs-dir: {}", dir.display());

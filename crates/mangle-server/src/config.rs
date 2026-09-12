@@ -53,9 +53,8 @@ impl ServerConfig {
         let edb_dir =
             query_single_string(config_source, "config_schema.edb_dir(X)")?.map(PathBuf::from);
 
-        let idb_cache_dir =
-            query_single_string(config_source, "config_schema.idb_cache_dir(X)")?
-                .map(PathBuf::from);
+        let idb_cache_dir = query_single_string(config_source, "config_schema.idb_cache_dir(X)")?
+            .map(PathBuf::from);
 
         let persist_edb = query_all_strings(config_source, "config_schema.persist_edb(X)")?;
 
@@ -123,10 +122,7 @@ mod tests {
 
         let config = ServerConfig::from_source(source).unwrap();
         assert_eq!(config.port, 9090);
-        assert_eq!(
-            config.programs_dir,
-            Some(PathBuf::from("/my/programs"))
-        );
+        assert_eq!(config.programs_dir, Some(PathBuf::from("/my/programs")));
         assert_eq!(config.edb_dir, Some(PathBuf::from("/my/edb")));
         assert_eq!(config.idb_cache_dir, Some(PathBuf::from("/my/idb")));
         assert!(config.persist_edb.contains("runtime"));

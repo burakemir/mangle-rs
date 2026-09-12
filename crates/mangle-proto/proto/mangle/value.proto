@@ -1,0 +1,121 @@
+// Canonical Mangle value encoding. One message per Mangle value; mirrors
+// mangle_common::Value (plus Bool and Bytes, which the internal Value does
+// not carry yet — the wire format reserves them, conversions return an
+// error until the internal representation catches up).
+syntax = "proto3";
+
+package mangle;
+
+message Value {
+  oneof kind {
+    sint64 number_value = 1;
+    double float_value = 2;
+    string string_value = 3;
+    // Mangle name constant (e.g. "/role/admin"). Distinct from string_value.
+    string name_value = 4;
+    // Nanoseconds since Unix epoch.
+    sfixed64 time_value = 5;
+    // Nanoseconds.
+    sfixed64 duration_value = 6;
+    bytes bytes_value = 7;
+    bool bool_value = 8;
+    ListValue list_value = 9;
+    PairValue pair_value = 10;
+    MapValue map_value = 11;
+    StructValue struct_value = 12;
+  }
+}
+
+message ListValue {
+  repeated Value elems = 1;
+}
+
+message PairValue {
+  Value first = 1;
+  Value second = 2;
+}
+
+message MapValue {
+  repeated Entry entries = 1;
+}
+
+message Entry {
+  Value key = 1;
+  Value value = 2;
+}
+
+message StructValue {
+  repeated Field fields = 1;
+}
+
+message Field {
+  string name = 1;
+  Value value = 2;
+}
+
+// Temporal validity interval for a fact.
+message Interval {
+  oneof start_bound {
+    sfixed64 start_ts = 1;
+    Unbounded start_unbounded = 2;
+  }
+  oneof end_bound {
+    sfixed64 end_ts = 3;
+    Unbounded end_unbounded = 4;
+  }
+  enum Unbounded {
+    UNBOUNDED = 0;
+  }
+}
+
+// A single fact: a ground atom. Row encoding; see FactBatch for the
+// columnar bulk encoding.
+message Fact {
+  string relation = 1;
+  // One per column; length == arity.
+  repeated Value args = 2;
+  // Present iff the predicate is temporal.
+  Interval valid_time = 3;
+}
+
+// Wire type of a packed column in FactBatch.
+enum ColumnType {
+  NUMBER = 0;
+  FLOAT = 1;
+  STRING = 2;
+  NAME = 3;
+  TIME = 4;
+  DURATION = 5;
+  BYTES = 6;
+  BOOL = 7;
+  // Heterogeneous / union-typed columns; row-encoded `values`.
+  ANY = 8;
+}
+
+// One column of a FactBatch. The field selected by `type` must be the only
+// populated one, with exactly `num_rows` elements.
+message Column {
+  ColumnType type = 1;
+
+  repeated sint64 numbers = 2;
+  repeated double floats = 3;
+  repeated string strings = 4;
+  repeated string names = 5;
+  repeated sfixed64 times = 6;
+  repeated sfixed64 durations = 7;
+  repeated bytes byte_strings = 8;
+  repeated bool bools = 9;
+
+  // ANY (and compound-typed columns, until packed compound support lands).
+  repeated Value values = 15;
+}
+
+// A batch of facts for a single relation, encoded column-wise.
+message FactBatch {
+  string relation = 1;
+  uint32 num_rows = 2;
+  // columns.len() == arity (== length of each packed column).
+  repeated Column columns = 3;
+  // For temporal predicates: one entry per row.
+  repeated Interval valid_times = 4;
+}

@@ -37,7 +37,7 @@ pub struct ProgramInfo {
 }
 
 /// Parse a query string, falling back to simple predicate extraction.
-fn parse_query_lenient(query: &str) -> Result<ParsedQuery> {
+pub(crate) fn parse_query_lenient(query: &str) -> Result<ParsedQuery> {
     parse_query(query).or_else(|_| {
         let trimmed = query.trim();
         let paren = trimmed
@@ -120,11 +120,18 @@ impl ProgramStore {
     /// Compile source, execute, and store the resulting Database.
     pub fn load(&mut self, name: &str, source: &str) -> Result<ProgramInfo> {
         let config = self.make_db_config(name, source);
-        eprintln!("[mangle] Loading program '{}': {} EDB sources, idb_mode={}, store_backend={}",
+        eprintln!(
+            "[mangle] Loading program '{}': {} EDB sources, idb_mode={}, store_backend={}",
             name,
             config.edb_sources.len(),
-            match config.idb_mode { IdbMode::InMemory => "InMemory", IdbMode::Cached(_) => "Cached" },
-            match config.store_backend { StoreBackend::InMemory => "InMemory", StoreBackend::Disk(_) => "Disk" },
+            match config.idb_mode {
+                IdbMode::InMemory => "InMemory",
+                IdbMode::Cached(_) => "Cached",
+            },
+            match config.store_backend {
+                StoreBackend::InMemory => "InMemory",
+                StoreBackend::Disk(_) => "Disk",
+            },
         );
         let db = Database::open(config)?;
 
@@ -218,6 +225,34 @@ impl ProgramStore {
         Ok(filter_tuples(tuples, &parsed))
     }
 
+    /// Query a loaded program's database with structured argument patterns.
+    ///
+    /// `patterns[i]` is `None` for a wildcard (unbound) position and
+    /// `Some(v)` for a constant that must equal the value at column `i`.
+    /// Trailing entries may be omitted (treated as wildcards).
+    pub fn execute_query_patterns(
+        &self,
+        name: &str,
+        predicate: &str,
+        patterns: &[Option<Value>],
+    ) -> Result<Vec<Vec<Value>>> {
+        let prog = self
+            .programs
+            .get(name)
+            .ok_or_else(|| anyhow!("program '{}' not found", name))?;
+
+        let tuples = prog.db.query(predicate)?;
+        Ok(tuples
+            .into_iter()
+            .filter(|t| {
+                patterns
+                    .iter()
+                    .enumerate()
+                    .all(|(i, p)| p.as_ref().is_none_or(|v| t.get(i) == Some(v)))
+            })
+            .collect())
+    }
+
     /// Insert a fact into a program's database.
     pub fn insert_fact(&self, name: &str, relation: &str, tuple: Vec<Value>) -> Result<()> {
         let prog = self
@@ -252,6 +287,18 @@ pub fn eval_source(source: &str, query: Option<&str>) -> Result<Vec<Vec<Value>>>
 
 /// Compile and execute multiple source units, returning results for the queried relation.
 pub fn eval_source_multi(sources: &[&str], query: Option<&str>) -> Result<Vec<Vec<Value>>> {
+    Ok(eval_source_relations(sources, query)?
+        .into_iter()
+        .flat_map(|(_, rows)| rows)
+        .collect())
+}
+
+/// Like [`eval_source_multi`], but keeps results grouped by relation so that
+/// they can be streamed as per-relation fact batches (used by the RPC API).
+pub fn eval_source_relations(
+    sources: &[&str],
+    query: Option<&str>,
+) -> Result<Vec<(String, Vec<Vec<Value>>)>> {
     let arena = Arena::new_with_global_interner();
     let (mut ir, stratified) = mangle_driver::compile_units(sources, &arena)?;
     let store = Box::new(MemStore::new());
@@ -259,13 +306,14 @@ pub fn eval_source_multi(sources: &[&str], query: Option<&str>) -> Result<Vec<Ve
 
     if let Some(q) = query {
         let parsed = parse_query_lenient(q)?;
-        let tuples: Vec<Vec<Value>> = interpreter.store().scan(&parsed.predicate)?.collect();
-        Ok(filter_tuples(tuples, &parsed))
+        let predicate = parsed.predicate.clone();
+        let tuples: Vec<Vec<Value>> = interpreter.store().scan(&predicate)?.collect();
+        Ok(vec![(predicate, filter_tuples(tuples, &parsed))])
     } else {
         let mut all = Vec::new();
         for name in interpreter.store().relation_names() {
             let tuples: Vec<Vec<Value>> = interpreter.store().scan(&name)?.collect();
-            all.extend(tuples);
+            all.push((name, tuples));
         }
         Ok(all)
     }
@@ -503,9 +551,7 @@ mod tests {
             store.reload("runtime").unwrap();
 
             // Only "db" should remain ("web" was retracted)
-            let results = store
-                .execute_query("runtime", "running(Name)")
-                .unwrap();
+            let results = store.execute_query("runtime", "running(Name)").unwrap();
             assert_eq!(results.len(), 1);
             assert_eq!(results[0][0], Value::String("db".to_string()));
 

@@ -164,10 +164,7 @@ mod tests {
         .unwrap();
 
         let content = std::fs::read_to_string(dir.path().join("runtime/mutations.mg")).unwrap();
-        assert_eq!(
-            content,
-            "__retract__container(\"web\", \"running\").\n"
-        );
+        assert_eq!(content, "__retract__container(\"web\", \"running\").\n");
     }
 
     #[test]
