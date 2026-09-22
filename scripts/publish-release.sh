@@ -13,6 +13,12 @@
 # mangle-engine publishes AFTER mangle-driver because engine has a dev-dep on
 # driver; nothing depends on engine, so this is fine.
 #
+# Intentionally NOT published here:
+#   - mangle-py: PyO3 extension module, versioned/released independently via
+#     PyPI (maturin), not crates.io.
+#   - mangle-ffi: C-ABI glue crate (cdylib/staticlib), consumed via git/local
+#     builds, never published to crates.io.
+#
 # Safety: --dry-run is the default. You must pass --publish explicitly.
 # A dry-run that passes is NOT a guarantee the real publish will — crates.io
 # may still reject on rate-limiting, duplicate version, or name squatting.
@@ -23,6 +29,7 @@ CRATES=(
     mangle-ast
     mangle-ir
     mangle-common
+    mangle-proto
     mangle-parse
     mangle-interpreter
     mangle-analysis

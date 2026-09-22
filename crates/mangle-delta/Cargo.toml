@@ -21,6 +21,11 @@ log.workspace = true
 # Delta Lake (published)
 deltalake-core = { version = "0.32", features = ["datafusion"] }
 
+# buoyant_kernel 0.22 (via deltalake-core 0.32) uses `parse_column_name!`, which
+# only exists in buoyant_kernel_derive 1.0.0 (removed in 1.1+). Pin it so a
+# `cargo update` can't drift into the incompatible 1.2.x line.
+buoyant_kernel_derive = "=1.0.0"
+
 # Arrow (RecordBatch type used directly by the source)
 arrow-array = "58"
 

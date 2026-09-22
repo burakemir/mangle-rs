@@ -705,9 +705,9 @@ dependencies = [
 
 [[package]]
 name = "buoyant_kernel_derive"
-version = "1.2.0"
+version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f22616ba486e89c304e6bf092f573545220da1f3e1399bb594b47698578a588"
+checksum = "3448e05bba811d98c73a466843abd8c16d0416dc083f92b66847693fcb0714f4"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3435,6 +3435,7 @@ dependencies = [
  "anyhow",
  "arrow-array",
  "arrow-schema",
+ "buoyant_kernel_derive",
  "deltalake-core",
  "log",
  "mangle-common",
