@@ -144,7 +144,10 @@ where
             Some(first @ '0'..='9') => self.numeric(first),
             Some('-') => match self.peek()? {
                 Some('0'..='9' | '.') => self.numeric('-'),
-                _ => Err(anyhow!(ScanError::Unexpected(self.get_error_context(), '-'))),
+                _ => Err(anyhow!(ScanError::Unexpected(
+                    self.get_error_context(),
+                    '-'
+                ))),
             },
             Some(ch) if is_ident_start(ch) => {
                 if ch == 'b'
@@ -277,17 +280,20 @@ where
         }
 
         // Check for timestamp: exactly 4 digits followed by '-'
-        if !is_float && self.text.len() == 4 && first != '-' {
-            if let Some('-') = self.peek()? {
-                return self.timestamp();
-            }
+        if !is_float
+            && self.text.len() == 4
+            && first != '-'
+            && let Some('-') = self.peek()?
+        {
+            return self.timestamp();
         }
 
         // Check for duration suffix: digits followed by d, h, m, s, or ms
-        if !is_float && first != '-' {
-            if let Some(c @ ('d' | 'h' | 'm' | 's')) = self.peek()? {
-                return self.duration_literal(c);
-            }
+        if !is_float
+            && first != '-'
+            && let Some(c @ ('d' | 'h' | 'm' | 's')) = self.peek()?
+        {
+            return self.duration_literal(c);
         }
 
         if is_float {
@@ -398,11 +404,7 @@ where
         for _ in 0..n {
             match self.next_char()? {
                 Some(c @ '0'..='9') => self.text.push(c),
-                Some(c) => {
-                    return Err(anyhow!(
-                        "{context}: expected digit, got '{c}'"
-                    ))
-                }
+                Some(c) => return Err(anyhow!("{context}: expected digit, got '{c}'")),
                 None => return Err(anyhow!("{context}: unexpected end of input")),
             }
         }
@@ -416,9 +418,7 @@ where
                 self.text.push(c);
                 Ok(())
             }
-            Some(c) => Err(anyhow!(
-                "{context}: expected '{expected}', got '{c}'"
-            )),
+            Some(c) => Err(anyhow!("{context}: expected '{expected}', got '{c}'")),
             None => Err(anyhow!(
                 "{context}: expected '{expected}', got end of input"
             )),
@@ -803,7 +803,10 @@ mod test {
         match &got[0] {
             Token::Timestamp { nanos } => {
                 // 2024-01-15T10:30:00Z = 2024-01-15T00:00:00Z + 10*3600 + 30*60
-                assert_eq!(*nanos, 1705276800_000_000_000 + (10 * 3600 + 30 * 60) * 1_000_000_000);
+                assert_eq!(
+                    *nanos,
+                    1705276800_000_000_000 + (10 * 3600 + 30 * 60) * 1_000_000_000
+                );
             }
             _ => panic!("expected Timestamp, got {:?}", got[0]),
         }
@@ -828,11 +831,21 @@ mod test {
     fn test_duration_literals() -> Result<()> {
         let got = scan_all("1d 2h 30m 10s 500ms")?;
         let want = vec![
-            Token::Duration { nanos: 24 * 60 * 60 * 1_000_000_000 },
-            Token::Duration { nanos: 2 * 60 * 60 * 1_000_000_000 },
-            Token::Duration { nanos: 30 * 60 * 1_000_000_000 },
-            Token::Duration { nanos: 10 * 1_000_000_000 },
-            Token::Duration { nanos: 500 * 1_000_000 },
+            Token::Duration {
+                nanos: 24 * 60 * 60 * 1_000_000_000,
+            },
+            Token::Duration {
+                nanos: 2 * 60 * 60 * 1_000_000_000,
+            },
+            Token::Duration {
+                nanos: 30 * 60 * 1_000_000_000,
+            },
+            Token::Duration {
+                nanos: 10 * 1_000_000_000,
+            },
+            Token::Duration {
+                nanos: 500 * 1_000_000,
+            },
         ];
         assert!(want == got, "want {:?} got {:?}", want, got);
         Ok(())

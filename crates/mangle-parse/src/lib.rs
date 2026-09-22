@@ -397,7 +397,9 @@ where
                 let left_base_term = self.parse_base_term()?;
                 let op = self.token.clone();
                 match op {
-                    Token::Eq | Token::BangEq | Token::Lt | Token::Le | Token::Gt | Token::Ge => self.next_token()?,
+                    Token::Eq | Token::BangEq | Token::Lt | Token::Le | Token::Gt | Token::Ge => {
+                        self.next_token()?
+                    }
                     Token::LParen if leading_var.is_some() => {
                         let name = leading_var.unwrap();
                         bail!(
@@ -408,7 +410,10 @@ where
                             lowercase_first(&name)
                         );
                     }
-                    _ => bail!("parse_terms: expected comparison operator, got {}", self.token),
+                    _ => bail!(
+                        "parse_terms: expected comparison operator, got {}",
+                        self.token
+                    ),
                 };
                 let right_base_term = self.parse_base_term()?;
                 let term = match op {
@@ -643,7 +648,10 @@ where
                 self.next_token()?;
                 Ok(ast::TemporalBound::Variable(var_idx))
             }
-            _ => bail!("parse_temporal_bound: expected timestamp, variable, or '_', got {:?}", self.token),
+            _ => bail!(
+                "parse_temporal_bound: expected timestamp, variable, or '_', got {:?}",
+                self.token
+            ),
         }
     }
 
@@ -1117,8 +1125,7 @@ mod test {
     #[gtest]
     fn test_structured_data_and_types() -> googletest::Result<()> {
         let arena = Arena::new_with_global_interner();
-        let input =
-            "[] [1,2,3] [1: 'one', 2: 'two'] {} {/foo: /bar} {/name: \"alice\", /age: 30} .List<.Option</name>, /string>";
+        let input = "[] [1,2,3] [1: 'one', 2: 'two'] {} {/foo: /bar} {/name: \"alice\", /age: 30} .List<.Option</name>, /string>";
         let mut p = make_parser(&arena, input);
         let mut got_base_terms = vec![];
         loop {
@@ -1228,10 +1235,7 @@ mod test {
         let arena = Arena::new_with_global_interner();
         let mut p = make_parser(&arena, "[42]");
         let got = p.parse_base_term().unwrap();
-        let expected = arena.apply_fn(
-            fn_list_sym(&arena),
-            &[arena.const_(ast::Const::Number(42))],
-        );
+        let expected = arena.apply_fn(fn_list_sym(&arena), &[arena.const_(ast::Const::Number(42))]);
         verify_that!(got, eq(expected))
     }
 
@@ -1240,7 +1244,8 @@ mod test {
         // `Decl foo descr [ bar(), ]` — trailing comma after an atom list.
         let arena = Arena::new_with_global_interner();
         let mut p = make_parser(&arena, "Decl foo(X) descr [ bar(), ].");
-        p.parse_decl().expect("descr list with trailing comma parses");
+        p.parse_decl()
+            .expect("descr list with trailing comma parses");
         Ok(())
     }
 
@@ -1254,7 +1259,10 @@ mod test {
         let got = p.parse_base_term().unwrap();
         let opt_inner = arena.apply_fn(
             fn_opt_sym(&arena),
-            &[arena.const_(arena.name("/y")), arena.const_(arena.name("/string"))],
+            &[
+                arena.const_(arena.name("/y")),
+                arena.const_(arena.name("/string")),
+            ],
         );
         let expected = arena.apply_fn(
             arena.function_sym("fn:Struct", None),
@@ -1273,7 +1281,7 @@ mod test {
         // (legacy mangle-rs). Both must parse identically.
         let arena = Arena::new_with_global_interner();
         let src_comma = "q(K, S) :- p(K, V) |> do fn:group_by(K), let S = fn:sum(V).";
-        let src_semi  = "q(K, S) :- p(K, V) |> do fn:group_by(K); let S = fn:sum(V).";
+        let src_semi = "q(K, S) :- p(K, V) |> do fn:group_by(K); let S = fn:sum(V).";
         let a = make_parser(&arena, src_comma).parse_clause().unwrap();
         let b = make_parser(&arena, src_semi).parse_clause().unwrap();
         verify_that!(a.transform.len(), eq(2))?;
@@ -1511,7 +1519,10 @@ mod test {
         let arena = Arena::new_with_global_interner();
         let mut p = make_parser(&arena, "regular(/fact).");
         let clause = p.parse_clause()?;
-        assert!(clause.head_time.is_none(), "non-temporal fact should have no annotation");
+        assert!(
+            clause.head_time.is_none(),
+            "non-temporal fact should have no annotation"
+        );
         Ok(())
     }
 
@@ -1534,7 +1545,10 @@ mod test {
         let mut p = make_parser(&arena, "Decl config(X) bound [/string].");
         let unit = p.parse_unit()?;
         assert_eq!(unit.decls.len(), 2);
-        assert!(!unit.decls[1].is_temporal, "expected non-temporal declaration");
+        assert!(
+            !unit.decls[1].is_temporal,
+            "expected non-temporal declaration"
+        );
         Ok(())
     }
 
@@ -1566,7 +1580,10 @@ mod test {
             let mut p = make_parser(&arena, prog);
             let unit = p.parse_unit()?;
             for clause in unit.clauses {
-                assert!(clause.head_time.is_none(), "clause should not have temporal annotation in: {prog}");
+                assert!(
+                    clause.head_time.is_none(),
+                    "clause should not have temporal annotation in: {prog}"
+                );
             }
         }
         Ok(())

@@ -17,8 +17,8 @@ use mangle_db::{ColumnPredicate, EdbSource, PredicateOp};
 ///   (id: int64, amount: int64, region: string)
 /// where `region` is a partition column.
 async fn create_test_delta_table(dir: &std::path::Path) -> Result<DeltaTable> {
-    use deltalake_core::operations::create::CreateBuilder;
     use deltalake_core::kernel::schema::{DataType as DDataType, StructField};
+    use deltalake_core::operations::create::CreateBuilder;
 
     let table = CreateBuilder::new()
         .with_location(dir.to_str().unwrap())
@@ -34,7 +34,12 @@ async fn create_test_delta_table(dir: &std::path::Path) -> Result<DeltaTable> {
 }
 
 /// Write a batch of rows to a Delta table.
-async fn write_batch(table: &DeltaTable, ids: &[i64], amounts: &[i64], regions: &[&str]) -> Result<()> {
+async fn write_batch(
+    table: &DeltaTable,
+    ids: &[i64],
+    amounts: &[i64],
+    regions: &[&str],
+) -> Result<()> {
     use deltalake_core::datafusion::prelude::SessionContext;
 
     let schema = Arc::new(Schema::new(vec![
@@ -105,7 +110,12 @@ async fn test_delta_edb_source_full_scan() -> Result<()> {
 
     // Full scan should return all 4 rows
     let rows = source.scan("orders")?;
-    assert_eq!(rows.len(), 4, "full scan should return 4 rows, got {}", rows.len());
+    assert_eq!(
+        rows.len(),
+        4,
+        "full scan should return 4 rows, got {}",
+        rows.len()
+    );
 
     Ok(())
 }
@@ -123,7 +133,11 @@ async fn test_delta_edb_source_scan_with_partition_predicate() -> Result<()> {
     );
 
     // Scan with equality predicate on partition column "region" (col index 2)
-    let preds = vec![ColumnPredicate::new(2, PredicateOp::Eq, Value::String("US".to_string()))];
+    let preds = vec![ColumnPredicate::new(
+        2,
+        PredicateOp::Eq,
+        Value::String("US".to_string()),
+    )];
 
     let rows = source.scan_with_predicates("orders", &preds)?;
     assert!(

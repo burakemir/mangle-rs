@@ -24,8 +24,8 @@
 //! - UpperBound/LowerBound for type intersection/union
 
 use anyhow::{Result, anyhow};
-use rustc_hash::{FxHashMap, FxHashSet};
 use mangle_ir::{Inst, InstId, Ir, NameId};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::name_trie::NameTrie;
 use crate::type_expr::{self, TypeContext};
@@ -127,13 +127,14 @@ impl<'a> BoundsChecker<'a> {
             } = inst
             {
                 // Only non-unit clauses (actual rules with premises or transforms).
-                if !premises.is_empty() || !transform.is_empty() {
-                    if let Some(pred) = self.atom_predicate(*head) {
-                        self.rules_map
-                            .entry(pred)
-                            .or_default()
-                            .push((*head, premises.clone(), transform.clone()));
-                    }
+                if (!premises.is_empty() || !transform.is_empty())
+                    && let Some(pred) = self.atom_predicate(*head)
+                {
+                    self.rules_map.entry(pred).or_default().push((
+                        *head,
+                        premises.clone(),
+                        transform.clone(),
+                    ));
                 }
             }
         }
@@ -150,7 +151,12 @@ impl<'a> BoundsChecker<'a> {
 
         let insts: Vec<Inst> = self.ir.insts.clone();
         for inst in &insts {
-            if let Inst::Rule { head, premises, transform } = inst {
+            if let Inst::Rule {
+                head,
+                premises,
+                transform,
+            } = inst
+            {
                 let is_fact = premises.is_empty() && transform.is_empty();
                 if let Some(pred) = self.atom_predicate(*head) {
                     let expected_args = if self.ir.temporal_predicates.contains(&pred) {
@@ -193,26 +199,24 @@ impl<'a> BoundsChecker<'a> {
     fn check_all_clauses(&mut self) -> Result<()> {
         let insts: Vec<Inst> = self.ir.insts.clone();
         for inst in &insts {
-            match inst {
-                Inst::Rule {
-                    head,
-                    premises,
-                    transform,
-                } => {
-                    let head = *head;
-                    let premises = premises.clone();
-                    let transform = transform.clone();
-                    if let Some(pred) = self.atom_predicate(head) {
-                        if let Some(alternatives) = self.rel_type_map.get(&pred).cloned() {
-                            if premises.is_empty() && transform.is_empty() {
-                                self.check_fact(head, &alternatives)?;
-                            } else {
-                                self.check_rule(head, &premises, &transform, &alternatives)?;
-                            }
-                        }
+            if let Inst::Rule {
+                head,
+                premises,
+                transform,
+            } = inst
+            {
+                let head = *head;
+                let premises = premises.clone();
+                let transform = transform.clone();
+                if let Some(pred) = self.atom_predicate(head)
+                    && let Some(alternatives) = self.rel_type_map.get(&pred).cloned()
+                {
+                    if premises.is_empty() && transform.is_empty() {
+                        self.check_fact(head, &alternatives)?;
+                    } else {
+                        self.check_rule(head, &premises, &transform, &alternatives)?;
                     }
                 }
-                _ => {}
             }
         }
         Ok(())
@@ -418,8 +422,7 @@ impl<'a> BoundsChecker<'a> {
 
                 // Regular atom: look up or infer alternatives.
                 let var_ranges = state.as_map();
-                let feasible =
-                    self.get_or_infer_alternatives(pred, &args, &var_ranges);
+                let feasible = self.get_or_infer_alternatives(pred, &args, &var_ranges);
 
                 if !feasible.is_empty() {
                     // Use the first feasible alternative to bind variables.
@@ -457,13 +460,13 @@ impl<'a> BoundsChecker<'a> {
                         if let Inst::Var(v) = self.ir.get(args[0]) {
                             let v = *v;
                             let bound = self.bound_of_arg(args[1], &state.as_map());
-                            if let Some(existing) = state.as_map().get(&v).copied() {
-                                if type_expr::is_union_type(self.ir, existing) {
-                                    let refined =
-                                        type_expr::remove_from_union_type(self.ir, bound, existing);
-                                    if !type_expr::is_empty_type(self.ir, refined) {
-                                        state.set_var(v, refined);
-                                    }
+                            if let Some(existing) = state.as_map().get(&v).copied()
+                                && type_expr::is_union_type(self.ir, existing)
+                            {
+                                let refined =
+                                    type_expr::remove_from_union_type(self.ir, bound, existing);
+                                if !type_expr::is_empty_type(self.ir, refined) {
+                                    state.set_var(v, refined);
                                 }
                             }
                         }
@@ -709,11 +712,7 @@ impl<'a> BoundsChecker<'a> {
     }
 
     /// Special case inference for `:match_prefix(Name, Prefix)`.
-    fn infer_match_prefix(
-        &mut self,
-        args: &[InstId],
-        mut state: InferState,
-    ) -> Result<InferState> {
+    fn infer_match_prefix(&mut self, args: &[InstId], mut state: InferState) -> Result<InferState> {
         if args.len() != 2 {
             return Ok(state);
         }
@@ -739,11 +738,7 @@ impl<'a> BoundsChecker<'a> {
     }
 
     /// Special case inference for `:match_field(Struct, FieldName, Value)`.
-    fn infer_match_field(
-        &mut self,
-        args: &[InstId],
-        mut state: InferState,
-    ) -> Result<InferState> {
+    fn infer_match_field(&mut self, args: &[InstId], mut state: InferState) -> Result<InferState> {
         if args.len() != 3 {
             return Ok(state);
         }
@@ -756,26 +751,22 @@ impl<'a> BoundsChecker<'a> {
             _ => None,
         };
 
-        if let Some(field) = field_name_id {
-            if type_expr::is_struct_type(self.ir, scrutinee_type)
+        if let Some(field) = field_name_id
+            && (type_expr::is_struct_type(self.ir, scrutinee_type)
                 || type_expr::is_tagged_union_type(self.ir, scrutinee_type)
-                || type_expr::is_union_type(self.ir, scrutinee_type)
+                || type_expr::is_union_type(self.ir, scrutinee_type))
+            && let Some(field_type) =
+                type_expr::struct_type_field_deep(self.ir, scrutinee_type, field)
+        {
+            // Bind the value variable.
+            let ctx = TypeContext::default();
+            let value_bound = self.bound_of_arg(args[2], &state.as_map());
+            let meet = type_expr::lower_bound(self.ir, &ctx, &[value_bound, field_type]);
+            if !type_expr::is_empty_type(self.ir, meet)
+                && let Inst::Var(v) = self.ir.get(args[2])
             {
-                if let Some(field_type) =
-                    type_expr::struct_type_field_deep(self.ir, scrutinee_type, field)
-                {
-                    // Bind the value variable.
-                    let ctx = TypeContext::default();
-                    let value_bound = self.bound_of_arg(args[2], &state.as_map());
-                    let meet =
-                        type_expr::lower_bound(self.ir, &ctx, &[value_bound, field_type]);
-                    if !type_expr::is_empty_type(self.ir, meet) {
-                        if let Inst::Var(v) = self.ir.get(args[2]) {
-                            let v = *v;
-                            state.add_or_refine_with_ir(self.ir, v, meet);
-                        }
-                    }
-                }
+                let v = *v;
+                state.add_or_refine_with_ir(self.ir, v, meet);
             }
         }
         // Bind first arg if variable.
@@ -794,82 +785,67 @@ impl<'a> BoundsChecker<'a> {
     }
 
     /// Special case inference for `:match_entry(Map, Key, Value)`.
-    fn infer_match_entry(
-        &mut self,
-        args: &[InstId],
-        mut state: InferState,
-    ) -> Result<InferState> {
+    fn infer_match_entry(&mut self, args: &[InstId], mut state: InferState) -> Result<InferState> {
         if args.len() != 3 {
             return Ok(state);
         }
         let var_ranges = state.as_map();
         let map_type = self.bound_of_arg(args[0], &var_ranges);
 
-        if type_expr::is_map_type(self.ir, map_type) {
-            if let Some((key_type, val_type)) = type_expr::map_type_args(self.ir, map_type) {
-                let ctx = TypeContext::default();
+        if type_expr::is_map_type(self.ir, map_type)
+            && let Some((key_type, val_type)) = type_expr::map_type_args(self.ir, map_type)
+        {
+            let ctx = TypeContext::default();
 
-                // Bind key.
-                let key_bound = self.bound_of_arg(args[1], &state.as_map());
-                let key_meet =
-                    type_expr::lower_bound(self.ir, &ctx, &[key_bound, key_type]);
-                if !type_expr::is_empty_type(self.ir, key_meet) {
-                    if let Inst::Var(v) = self.ir.get(args[1]) {
-                        let v = *v;
-                        state.add_or_refine_with_ir(self.ir, v, key_meet);
-                    }
-                }
+            // Bind key.
+            let key_bound = self.bound_of_arg(args[1], &state.as_map());
+            let key_meet = type_expr::lower_bound(self.ir, &ctx, &[key_bound, key_type]);
+            if !type_expr::is_empty_type(self.ir, key_meet)
+                && let Inst::Var(v) = self.ir.get(args[1])
+            {
+                let v = *v;
+                state.add_or_refine_with_ir(self.ir, v, key_meet);
+            }
 
-                // Bind value.
-                let val_bound = self.bound_of_arg(args[2], &state.as_map());
-                let val_meet =
-                    type_expr::lower_bound(self.ir, &ctx, &[val_bound, val_type]);
-                if !type_expr::is_empty_type(self.ir, val_meet) {
-                    if let Inst::Var(v) = self.ir.get(args[2]) {
-                        let v = *v;
-                        state.add_or_refine_with_ir(self.ir, v, val_meet);
-                    }
-                }
+            // Bind value.
+            let val_bound = self.bound_of_arg(args[2], &state.as_map());
+            let val_meet = type_expr::lower_bound(self.ir, &ctx, &[val_bound, val_type]);
+            if !type_expr::is_empty_type(self.ir, val_meet)
+                && let Inst::Var(v) = self.ir.get(args[2])
+            {
+                let v = *v;
+                state.add_or_refine_with_ir(self.ir, v, val_meet);
             }
         }
         Ok(state)
     }
 
     /// Special case inference for `:list:member(Elem, List)`.
-    fn infer_list_member(
-        &mut self,
-        args: &[InstId],
-        mut state: InferState,
-    ) -> Result<InferState> {
+    fn infer_list_member(&mut self, args: &[InstId], mut state: InferState) -> Result<InferState> {
         if args.len() != 2 {
             return Ok(state);
         }
         let var_ranges = state.as_map();
         let list_type = self.bound_of_arg(args[1], &var_ranges);
 
-        if type_expr::is_list_type(self.ir, list_type) {
-            if let Some(elem_type) = type_expr::list_type_arg(self.ir, list_type) {
-                let ctx = TypeContext::default();
-                let elem_bound = self.bound_of_arg(args[0], &state.as_map());
-                let meet =
-                    type_expr::lower_bound(self.ir, &ctx, &[elem_bound, elem_type]);
-                if !type_expr::is_empty_type(self.ir, meet) {
-                    if let Inst::Var(v) = self.ir.get(args[0]) {
-                        let v = *v;
-                        state.add_or_refine_with_ir(self.ir, v, meet);
-                    }
-                }
+        if type_expr::is_list_type(self.ir, list_type)
+            && let Some(elem_type) = type_expr::list_type_arg(self.ir, list_type)
+        {
+            let ctx = TypeContext::default();
+            let elem_bound = self.bound_of_arg(args[0], &state.as_map());
+            let meet = type_expr::lower_bound(self.ir, &ctx, &[elem_bound, elem_type]);
+            if !type_expr::is_empty_type(self.ir, meet)
+                && let Inst::Var(v) = self.ir.get(args[0])
+            {
+                let v = *v;
+                state.add_or_refine_with_ir(self.ir, v, meet);
             }
         }
         Ok(state)
     }
 
     /// Infers the type bound for a single argument.
-    fn bound_of_arg(
-        &mut self,
-        arg: InstId,
-        var_ranges: &FxHashMap<NameId, InstId>,
-    ) -> InstId {
+    fn bound_of_arg(&mut self, arg: InstId, var_ranges: &FxHashMap<NameId, InstId>) -> InstId {
         match self.ir.get(arg) {
             Inst::Var(v) => {
                 let v = *v;
@@ -999,8 +975,7 @@ impl<'a> BoundsChecker<'a> {
                 let struct_type = self.bound_of_arg(args[0], var_ranges);
                 if let Inst::Name(n) = self.ir.get(args[1]) {
                     let field = *n;
-                    if let Some(ft) =
-                        type_expr::struct_type_field_deep(self.ir, struct_type, field)
+                    if let Some(ft) = type_expr::struct_type_field_deep(self.ir, struct_type, field)
                     {
                         return ft;
                     }
@@ -1027,9 +1002,10 @@ impl<'a> BoundsChecker<'a> {
                 // Element type of the list argument, or /any if not a list.
                 let list_type = self.bound_of_arg(args[0], var_ranges);
                 match type_expr::apply_fn_args(self.ir, list_type) {
-                    Some(inner) if type_expr::apply_fn_name(self.ir, list_type)
-                        == Some(type_expr::FN_LIST)
-                        && inner.len() == 1 =>
+                    Some(inner)
+                        if type_expr::apply_fn_name(self.ir, list_type)
+                            == Some(type_expr::FN_LIST)
+                            && inner.len() == 1 =>
                     {
                         inner[0]
                     }
@@ -1041,9 +1017,10 @@ impl<'a> BoundsChecker<'a> {
                 let list_type = self.bound_of_arg(args[0], var_ranges);
                 let new_elem = self.bound_of_arg(args[1], var_ranges);
                 let old_elem = match type_expr::apply_fn_args(self.ir, list_type) {
-                    Some(inner) if type_expr::apply_fn_name(self.ir, list_type)
-                        == Some(type_expr::FN_LIST)
-                        && inner.len() == 1 =>
+                    Some(inner)
+                        if type_expr::apply_fn_name(self.ir, list_type)
+                            == Some(type_expr::FN_LIST)
+                            && inner.len() == 1 =>
                     {
                         inner[0]
                     }
@@ -1095,8 +1072,7 @@ impl<'a> BoundsChecker<'a> {
             Inst::Var(v) => self.ir.resolve_name(*v).to_string(),
             Inst::ApplyFn { function, args } => {
                 let fname = self.ir.resolve_name(*function);
-                let arg_strs: Vec<String> =
-                    args.iter().map(|a| self.describe_inst(*a)).collect();
+                let arg_strs: Vec<String> = args.iter().map(|a| self.describe_inst(*a)).collect();
                 format!("{}({})", fname, arg_strs.join(", "))
             }
             _ => format!("inst#{}", id.index()),
@@ -1375,28 +1351,43 @@ mod tests {
     #[test]
     fn multiple_alternatives_first_matches() {
         // pair(42, 99) matches first alternative [/number, /number].
-        assert!(check(r#"
+        assert!(
+            check(
+                r#"
             Decl pair(X, Y) bound [/number, /number] bound [/string, /string].
             pair(42, 99).
-        "#).is_ok());
+        "#
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn multiple_alternatives_second_matches() {
         // pair("a", "b") matches second alternative [/string, /string].
-        assert!(check(r#"
+        assert!(
+            check(
+                r#"
             Decl pair(X, Y) bound [/number, /number] bound [/string, /string].
             pair("a", "b").
-        "#).is_ok());
+        "#
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn multiple_alternatives_none_matches() {
         // pair(42, "b") matches neither alternative.
-        assert!(check(r#"
+        assert!(
+            check(
+                r#"
             Decl pair(X, Y) bound [/number, /number] bound [/string, /string].
             pair(42, "b").
-        "#).is_err());
+        "#
+            )
+            .is_err()
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1406,21 +1397,31 @@ mod tests {
     #[test]
     fn rule_infers_type_from_premise() {
         // X gets type /number from src, which conforms to dst's bound.
-        assert!(check(r#"
+        assert!(
+            check(
+                r#"
             Decl src(X) bound [/number].
             Decl dst(X) bound [/number].
             dst(X) :- src(X).
-        "#).is_ok());
+        "#
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn rule_type_mismatch_from_premise() {
         // X inferred as /string from src, but dst expects /number.
-        assert!(check(r#"
+        assert!(
+            check(
+                r#"
             Decl src(X) bound [/string].
             Decl dst(X) bound [/number].
             dst(X) :- src(X).
-        "#).is_err());
+        "#
+            )
+            .is_err()
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1431,12 +1432,17 @@ mod tests {
     fn two_premises_refine_variable() {
         // X starts as fn:Union(/number, /string) from 'wide',
         // then refined to /number from 'narrow'. Should conform to /number.
-        assert!(check(r#"
+        assert!(
+            check(
+                r#"
             Decl wide(X) bound [fn:Union(/number, /string)].
             Decl narrow(X) bound [/number].
             Decl result(X) bound [/number].
             result(X) :- wide(X), narrow(X).
-        "#).is_ok());
+        "#
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -1444,12 +1450,17 @@ mod tests {
         // X inferred as /string from src1, then /number from src2.
         // Intersection is empty, so X keeps /string (conservative).
         // /string does not conform to /number → error.
-        assert!(check(r#"
+        assert!(
+            check(
+                r#"
             Decl src1(X) bound [/string].
             Decl src2(X) bound [/number].
             Decl dst(X) bound [/number].
             dst(X) :- src1(X), src2(X).
-        "#).is_err());
+        "#
+            )
+            .is_err()
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1459,30 +1470,45 @@ mod tests {
     #[test]
     fn polymorphic_identity_number() {
         // T is a type variable. pair(42, 99) should pass: T can be /number.
-        assert!(check(r#"
+        assert!(
+            check(
+                r#"
             Decl pair(X, Y) bound [T, T].
             pair(42, 99).
-        "#).is_ok());
+        "#
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn polymorphic_identity_string() {
         // T is a type variable. pair("a", "b") should pass: T can be /string.
-        assert!(check(r#"
+        assert!(
+            check(
+                r#"
             Decl pair(X, Y) bound [T, T].
             pair("a", "b").
-        "#).is_ok());
+        "#
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn polymorphic_rule_with_inferred_type() {
         // T skolemized to fresh var. X inferred as /number from src.
         // /number conforms to ?X0 (mapped to /any in context) → passes.
-        assert!(check(r#"
+        assert!(
+            check(
+                r#"
             Decl src(X) bound [/number].
             Decl dst(X) bound [T].
             dst(X) :- src(X).
-        "#).is_ok());
+        "#
+            )
+            .is_ok()
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1493,34 +1519,49 @@ mod tests {
     fn cross_predicate_inference_basic() {
         // 'helper' has no declaration. Its type is inferred from its rule
         // (which uses 'src' with bound [/number]). Then 'dst' uses 'helper'.
-        assert!(check(r#"
+        assert!(
+            check(
+                r#"
             Decl src(X) bound [/number].
             Decl dst(X) bound [/number].
             helper(X) :- src(X).
             dst(X) :- helper(X).
-        "#).is_ok());
+        "#
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn cross_predicate_inference_type_mismatch() {
         // 'helper' inferred as /string from src. dst expects /number → error.
-        assert!(check(r#"
+        assert!(
+            check(
+                r#"
             Decl src(X) bound [/string].
             Decl dst(X) bound [/number].
             helper(X) :- src(X).
             dst(X) :- helper(X).
-        "#).is_err());
+        "#
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn cross_predicate_inference_chain() {
         // Chain: src → mid → dst, only src and dst declared.
-        assert!(check(r#"
+        assert!(
+            check(
+                r#"
             Decl src(X) bound [/number].
             Decl dst(X) bound [/number].
             mid(X) :- src(X).
             dst(X) :- mid(X).
-        "#).is_ok());
+        "#
+            )
+            .is_ok()
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1530,21 +1571,31 @@ mod tests {
     #[test]
     fn equality_binds_variable() {
         // X = "hello" gives X type /string.
-        assert!(check(r#"
+        assert!(
+            check(
+                r#"
             Decl src(X) bound [/string].
             Decl dst(X) bound [/string].
             dst(X) :- src(X), X = "hello".
-        "#).is_ok());
+        "#
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn inequality_refines_variable() {
         // X from src is /string, X != "bad" should still be /string.
-        assert!(check(r#"
+        assert!(
+            check(
+                r#"
             Decl src(X) bound [/string].
             Decl dst(X) bound [/string].
             dst(X) :- src(X), X != "bad".
-        "#).is_ok());
+        "#
+            )
+            .is_ok()
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1554,31 +1605,46 @@ mod tests {
     #[test]
     fn transform_arithmetic() {
         // let Y = fn:plus(X, 1) → Y inferred as /number.
-        assert!(check(r#"
+        assert!(
+            check(
+                r#"
             Decl src(X) bound [/number].
             Decl dst(X, Y) bound [/number, /number].
             dst(X, Y) :- src(X) |> let Y = fn:plus(X, 1).
-        "#).is_ok());
+        "#
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn transform_string_concat() {
         // let Y = fn:string:concat(X, "!") → Y inferred as /string.
-        assert!(check(r#"
+        assert!(
+            check(
+                r#"
             Decl src(X) bound [/string].
             Decl dst(X, Y) bound [/string, /string].
             dst(X, Y) :- src(X) |> let Y = fn:string:concat(X, "!").
-        "#).is_ok());
+        "#
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn transform_type_mismatch() {
         // Y = fn:plus(X, 1) → /number, but dst expects /string for Y.
-        assert!(check(r#"
+        assert!(
+            check(
+                r#"
             Decl src(X) bound [/number].
             Decl dst(X, Y) bound [/number, /string].
             dst(X, Y) :- src(X) |> let Y = fn:plus(X, 1).
-        "#).is_err());
+        "#
+            )
+            .is_err()
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1588,10 +1654,15 @@ mod tests {
     #[test]
     fn undeclared_predicate_passes() {
         // Rules with no declarations should pass without error.
-        assert!(check(r#"
+        assert!(
+            check(
+                r#"
             foo(1).
             bar(X) :- foo(X).
-        "#).is_ok());
+        "#
+            )
+            .is_ok()
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1601,73 +1672,111 @@ mod tests {
     #[test]
     fn arity_mismatch_facts() {
         // Same predicate with different arity: p(1) vs p(2, 3).
-        let result = check(r#"
+        let result = check(
+            r#"
             p(1).
             p(2, 3).
-        "#);
+        "#,
+        );
         assert!(result.is_err(), "expected arity error, got: {:?}", result);
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("inconsistent arity"), "error should mention 'inconsistent arity': {}", msg);
-        assert!(msg.contains("p"), "error should mention predicate name: {}", msg);
+        assert!(
+            msg.contains("inconsistent arity"),
+            "error should mention 'inconsistent arity': {}",
+            msg
+        );
+        assert!(
+            msg.contains("p"),
+            "error should mention predicate name: {}",
+            msg
+        );
     }
 
     #[test]
     fn arity_mismatch_fact_and_rule() {
         // Fact p(1) vs rule head p(X, Y) — different arity.
-        let result = check(r#"
+        let result = check(
+            r#"
             p(1).
             p(X, Y) :- q(X, Y).
             q(1, 2).
-        "#);
+        "#,
+        );
         assert!(result.is_err(), "expected arity error, got: {:?}", result);
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("inconsistent arity"), "error should mention 'inconsistent arity': {}", msg);
+        assert!(
+            msg.contains("inconsistent arity"),
+            "error should mention 'inconsistent arity': {}",
+            msg
+        );
     }
 
     #[test]
     fn arity_mismatch_two_rules() {
         // Two rules with different head arity for same predicate.
-        let result = check(r#"
+        let result = check(
+            r#"
             p(X) :- q(X).
             p(X, Y) :- r(X, Y).
             q(1).
             r(1, 2).
-        "#);
+        "#,
+        );
         assert!(result.is_err(), "expected arity error, got: {:?}", result);
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("inconsistent arity"), "error should mention 'inconsistent arity': {}", msg);
+        assert!(
+            msg.contains("inconsistent arity"),
+            "error should mention 'inconsistent arity': {}",
+            msg
+        );
     }
 
     #[test]
     fn consistent_arity_passes() {
         // All uses of p have arity 1 — should pass.
-        assert!(check(r#"
+        assert!(
+            check(
+                r#"
             p(1).
             p(2).
             q(X) :- p(X).
-        "#).is_ok());
+        "#
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn consistent_arity_rules_passes() {
         // All uses of p have arity 2 — should pass.
-        assert!(check(r#"
+        assert!(
+            check(
+                r#"
             p(1, 2).
             p(X, Y) :- q(X), r(Y).
             q(1).
             r(2).
-        "#).is_ok());
+        "#
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn arity_mismatch_undeclared_predicates() {
         // Even without any Decl, arity mismatch should be caught.
-        let result = check(r#"
+        let result = check(
+            r#"
             edge(1, 2).
             edge(3, 4, 5).
-        "#);
+        "#,
+        );
         assert!(result.is_err(), "expected arity error, got: {:?}", result);
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("inconsistent arity"), "error should mention 'inconsistent arity': {}", msg);
+        assert!(
+            msg.contains("inconsistent arity"),
+            "error should mention 'inconsistent arity': {}",
+            msg
+        );
     }
 }

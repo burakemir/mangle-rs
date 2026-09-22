@@ -13,9 +13,9 @@
 // limitations under the License.
 
 use anyhow::{Result, anyhow};
-use rustc_hash::FxHashSet;
 use mangle_ir::physical::{self, Aggregate, CmpOp, Condition, DataSource, Expr, Op, Operand};
 use mangle_ir::{Inst, InstId, Ir, NameId};
+use rustc_hash::FxHashSet;
 
 pub struct Planner<'a> {
     ir: &'a mut Ir,
@@ -386,9 +386,18 @@ impl<'a> Planner<'a> {
             Inst::Atom { predicate, args }
                 if matches!(
                     self.ir.resolve_name(predicate),
-                    ":lt" | ":le" | ":gt" | ":ge"
-                        | ":time:lt" | ":time:le" | ":time:gt" | ":time:ge"
-                        | ":duration:lt" | ":duration:le" | ":duration:gt" | ":duration:ge"
+                    ":lt"
+                        | ":le"
+                        | ":gt"
+                        | ":ge"
+                        | ":time:lt"
+                        | ":time:le"
+                        | ":time:gt"
+                        | ":time:ge"
+                        | ":duration:lt"
+                        | ":duration:le"
+                        | ":duration:gt"
+                        | ":duration:ge"
                 ) =>
             {
                 let cmp_op = match self.ir.resolve_name(predicate) {
@@ -425,9 +434,7 @@ impl<'a> Planner<'a> {
                 ) =>
             {
                 if args.len() != 2 {
-                    return Err(anyhow!(
-                        "Built-in predicate requires exactly 2 arguments"
-                    ));
+                    return Err(anyhow!("Built-in predicate requires exactly 2 arguments"));
                 }
                 let body = self.plan_join_sequence(premises, bound_vars, continuation)?;
                 self.with_eval(args[0], |this, left_op| {
@@ -456,16 +463,11 @@ impl<'a> Planner<'a> {
                 if self.hash_join
                     && self.delta_pred.is_none()
                     && !premises.is_empty()
+                    && let Some(op) =
+                        self.try_plan_hash_join(predicate, &args, &mut premises, bound_vars)?
                 {
-                    if let Some(op) = self.try_plan_hash_join(
-                        predicate,
-                        &args,
-                        &mut premises,
-                        bound_vars,
-                    )? {
-                        let body_op = self.plan_join_sequence(premises, bound_vars, continuation)?;
-                        return Ok(splice_hash_join_body(op, body_op));
-                    }
+                    let body_op = self.plan_join_sequence(premises, bound_vars, continuation)?;
+                    return Ok(splice_hash_join_body(op, body_op));
                 }
 
                 let mut scan_vars = Vec::new();
@@ -512,11 +514,9 @@ impl<'a> Planner<'a> {
                                     Some((i, Operand::Const(physical::Constant::Time(t))));
                             }
                         }
-                        Inst::Duration(d) => {
-                            if index_lookup.is_none() {
-                                index_lookup =
-                                    Some((i, Operand::Const(physical::Constant::Duration(d))));
-                            }
+                        Inst::Duration(d) if index_lookup.is_none() => {
+                            index_lookup =
+                                Some((i, Operand::Const(physical::Constant::Duration(d))));
                         }
                         _ => {}
                     }
@@ -688,10 +688,10 @@ impl<'a> Planner<'a> {
         rhs: InstId,
         bound_vars: &FxHashSet<NameId>,
     ) -> Option<(NameId, InstId)> {
-        if let Inst::Var(v) = self.ir.get(lhs) {
-            if !bound_vars.contains(v) {
-                return Some((*v, rhs));
-            }
+        if let Inst::Var(v) = self.ir.get(lhs)
+            && !bound_vars.contains(v)
+        {
+            return Some((*v, rhs));
         }
         None
     }

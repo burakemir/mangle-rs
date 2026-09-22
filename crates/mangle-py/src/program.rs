@@ -31,10 +31,7 @@ struct ProgramInner {
     interp: Interpreter<'this>,
 }
 
-fn compile_in_arena<'a>(
-    arena: &'a Arena,
-    sources: &[&str],
-) -> Result<CompiledIr<'a>> {
+fn compile_in_arena<'a>(arena: &'a Arena, sources: &[&str]) -> Result<CompiledIr<'a>> {
     let (ir, stratified) = mangle_driver::compile_units(sources, arena)?;
     Ok(CompiledIr { ir, stratified })
 }
@@ -49,8 +46,7 @@ fn build_inner(sources: Vec<String>) -> Result<ProgramInner> {
         interp_builder: |compiled: &mut CompiledIr<'_>| -> Result<Interpreter<'_>> {
             let store: Box<dyn mangle_interpreter::Store> = Box::new(MemStore::new());
             let CompiledIr { ir, stratified } = compiled;
-            mangle_driver::execute(ir, &*stratified, store)
-                .map_err(|e| anyhow!(e))
+            mangle_driver::execute(ir, &*stratified, store).map_err(|e| anyhow!(e))
         },
     }
     .try_build()?;
@@ -95,12 +91,15 @@ impl PyProgram {
     /// (uppercase identifiers) are wildcards.
     fn query(&self, py: Python<'_>, query: &str) -> PyResult<PyObject> {
         let parsed = parse_query_lenient(query).into_py()?;
-        let tuples: Vec<Vec<Value>> = self.inner.with_interp(|interp| {
-            interp
-                .store()
-                .scan(&parsed.predicate)
-                .map(|it| it.collect::<Vec<_>>())
-        }).into_py()?;
+        let tuples: Vec<Vec<Value>> = self
+            .inner
+            .with_interp(|interp| {
+                interp
+                    .store()
+                    .scan(&parsed.predicate)
+                    .map(|it| it.collect::<Vec<_>>())
+            })
+            .into_py()?;
         let filtered = filter_tuples(tuples, &parsed);
         tuples_to_pylist(py, &filtered)
     }
@@ -153,11 +152,7 @@ fn tuples_to_pylist(py: Python<'_>, tuples: &[Vec<Value>]) -> PyResult<PyObject>
 }
 
 /// One-shot evaluation: compile, execute, return tuples.
-pub fn eval_source_py(
-    py: Python<'_>,
-    source: &str,
-    query: Option<&str>,
-) -> PyResult<PyObject> {
+pub fn eval_source_py(py: Python<'_>, source: &str, query: Option<&str>) -> PyResult<PyObject> {
     eval_units_py(py, vec![source.to_string()], query)
 }
 
@@ -174,11 +169,7 @@ pub fn eval_units_py(
 
     let tuples: Vec<Vec<Value>> = if let Some(q) = query {
         let parsed = parse_query_lenient(q).into_py()?;
-        let scanned: Vec<Vec<Value>> = interp
-            .store()
-            .scan(&parsed.predicate)
-            .into_py()?
-            .collect();
+        let scanned: Vec<Vec<Value>> = interp.store().scan(&parsed.predicate).into_py()?.collect();
         filter_tuples(scanned, &parsed)
     } else {
         let mut all = Vec::new();

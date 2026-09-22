@@ -569,7 +569,9 @@ impl std::fmt::Display for Term<'_> {
             Term::NegAtom(atom) => write!(f, "!{atom}"),
             Term::Eq(left, right) => write!(f, "{left} = {right}"),
             Term::Ineq(left, right) => write!(f, "{left} != {right}"),
-            Term::TemporalAtom(atom, interval) => write!(f, "{atom}@[{}, {}]", interval.start, interval.end),
+            Term::TemporalAtom(atom, interval) => {
+                write!(f, "{atom}@[{}, {}]", interval.start, interval.end)
+            }
         }
     }
 }

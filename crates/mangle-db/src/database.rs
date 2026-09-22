@@ -20,18 +20,18 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use anyhow::{Result, anyhow};
-use rustc_hash::FxHashSet;
 use mangle_analysis::{BoundsChecker, LoweringContext, Program, StratifiedProgram, rewrite_unit};
 use mangle_ast::{self as ast, Arena};
 use mangle_common::{Store, Value};
 use mangle_interpreter::MemStore;
-use mangle_ir::{Inst, InstId, Ir};
+use mangle_ir::{Inst, Ir};
 use mangle_parse::Parser;
+use rustc_hash::FxHashSet;
 use sha2::{Digest, Sha256};
 
 use crate::backend::IdbBackend;
-use crate::provenance::ProvenanceIndex;
 use crate::predicate::extract_predicates;
+use crate::provenance::ProvenanceIndex;
 use crate::source::{ColumnPredicate, EdbSource, Fingerprint};
 
 /// How IDB (derived facts) are handled across restarts.
@@ -118,25 +118,23 @@ impl Database {
 
         // Try loading cached IDB
         let mut cache_hit = false;
-        if let Some(ref backend) = idb_backend {
-            if let Some((meta, snapshot)) = backend.load(&config.name)? {
-                if meta.program_hash == program_hash
-                    && edb_fingerprint
-                        .as_ref()
-                        .is_some_and(|fp| fp.0 == meta.edb_fingerprint)
-                {
-                    // Cache is valid — load EDB from sources, then IDB from cache
-                    load_edb_into_store(&config.edb_sources, &mut *store)?;
-                    for (rel_name, facts) in snapshot.relations {
-                        store.create_relation(&rel_name);
-                        for tuple in facts {
-                            store.insert(&rel_name, tuple)?;
-                        }
-                    }
-                    store.merge_deltas();
-                    cache_hit = true;
+        if let Some(ref backend) = idb_backend
+            && let Some((meta, snapshot)) = backend.load(&config.name)?
+            && meta.program_hash == program_hash
+            && edb_fingerprint
+                .as_ref()
+                .is_some_and(|fp| fp.0 == meta.edb_fingerprint)
+        {
+            // Cache is valid — load EDB from sources, then IDB from cache
+            load_edb_into_store(&config.edb_sources, &mut *store)?;
+            for (rel_name, facts) in snapshot.relations {
+                store.create_relation(&rel_name);
+                for tuple in facts {
+                    store.insert(&rel_name, tuple)?;
                 }
             }
+            store.merge_deltas();
+            cache_hit = true;
         }
 
         let (edb_relations, idb_relations, provenance) = if !cache_hit {
@@ -152,21 +150,20 @@ impl Database {
         };
 
         // Save to cache if needed and we just computed
-        if !cache_hit {
-            if let Some(ref backend) = idb_backend {
-                if let Some(ref fp) = edb_fingerprint {
-                    let meta = crate::backend::CacheMeta {
-                        program_hash,
-                        edb_fingerprint: fp.0.clone(),
-                        created_at: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs(),
-                    };
-                    let snapshot = extract_idb_snapshot(&*store, &idb_relations);
-                    backend.save(&config.name, &meta, &snapshot)?;
-                }
-            }
+        if !cache_hit
+            && let Some(ref backend) = idb_backend
+            && let Some(ref fp) = edb_fingerprint
+        {
+            let meta = crate::backend::CacheMeta {
+                program_hash,
+                edb_fingerprint: fp.0.clone(),
+                created_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            };
+            let snapshot = extract_idb_snapshot(&*store, &idb_relations);
+            backend.save(&config.name, &meta, &snapshot)?;
         }
 
         let state = DatabaseState {
@@ -182,7 +179,7 @@ impl Database {
             config_name: config.name,
             config_source: config.source,
             edb_sources: config.edb_sources,
-            idb_mode_is_cached: idb_mode_is_cached,
+            idb_mode_is_cached,
             idb_backend,
             recompute_is_incremental,
             state: RwLock::new(state),
@@ -243,8 +240,11 @@ impl Database {
         )?;
 
         // Recompute
-        let (edb_rels, idb_rels, provenance) =
-            full_recompute(&self.config_source, &mut *state.store, Some(&self.edb_sources))?;
+        let (edb_rels, idb_rels, provenance) = full_recompute(
+            &self.config_source,
+            &mut *state.store,
+            Some(&self.edb_sources),
+        )?;
         state.edb_relations = edb_rels;
         state.idb_relations = idb_rels;
         state.provenance = provenance;
@@ -252,19 +252,19 @@ impl Database {
         state.program_hash = compute_program_hash(&self.config_source);
 
         // Update cache
-        if let Some(ref backend) = self.idb_backend {
-            if let Some(ref fp) = state.edb_fingerprint {
-                let meta = crate::backend::CacheMeta {
-                    program_hash: state.program_hash,
-                    edb_fingerprint: fp.0.clone(),
-                    created_at: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs(),
-                };
-                let snapshot = extract_idb_snapshot(&*state.store, &state.idb_relations);
-                backend.save(&self.config_name, &meta, &snapshot)?;
-            }
+        if let Some(ref backend) = self.idb_backend
+            && let Some(ref fp) = state.edb_fingerprint
+        {
+            let meta = crate::backend::CacheMeta {
+                program_hash: state.program_hash,
+                edb_fingerprint: fp.0.clone(),
+                created_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            };
+            let snapshot = extract_idb_snapshot(&*state.store, &state.idb_relations);
+            backend.save(&self.config_name, &meta, &snapshot)?;
         }
 
         Ok(())
@@ -335,24 +335,25 @@ impl Database {
         }
 
         // Re-execute
-        let (_, idb_rels, provenance) = full_recompute(&self.config_source, &mut *state.store, None)?;
+        let (_, idb_rels, provenance) =
+            full_recompute(&self.config_source, &mut *state.store, None)?;
         state.idb_relations = idb_rels;
         state.provenance = provenance;
 
         // Update cache
-        if let Some(ref backend) = self.idb_backend {
-            if let Some(ref fp) = state.edb_fingerprint {
-                let meta = crate::backend::CacheMeta {
-                    program_hash: state.program_hash,
-                    edb_fingerprint: fp.0.clone(),
-                    created_at: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs(),
-                };
-                let snapshot = extract_idb_snapshot(&*state.store, &state.idb_relations);
-                backend.save(&self.config_name, &meta, &snapshot)?;
-            }
+        if let Some(ref backend) = self.idb_backend
+            && let Some(ref fp) = state.edb_fingerprint
+        {
+            let meta = crate::backend::CacheMeta {
+                program_hash: state.program_hash,
+                edb_fingerprint: fp.0.clone(),
+                created_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            };
+            let snapshot = extract_idb_snapshot(&*state.store, &state.idb_relations);
+            backend.save(&self.config_name, &meta, &snapshot)?;
         }
 
         Ok(())
@@ -429,7 +430,10 @@ fn load_edb_into_store_filtered(
         let relations = source.relations()?;
         for rel_info in &relations {
             store.create_relation(&rel_info.name);
-            let preds = predicates.get(&rel_info.name).map(|v| v.as_slice()).unwrap_or(&[]);
+            let preds = predicates
+                .get(&rel_info.name)
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
             let tuples = source.scan_with_predicates(&rel_info.name, preds)?;
             for tuple in tuples {
                 store.insert(&rel_info.name, tuple)?;
@@ -986,7 +990,11 @@ mod tests {
         let result = Database::open(config);
         assert!(result.is_err(), "expected arity error");
         let msg = result.err().unwrap().to_string();
-        assert!(msg.contains("inconsistent arity"), "error should mention 'inconsistent arity': {}", msg);
+        assert!(
+            msg.contains("inconsistent arity"),
+            "error should mention 'inconsistent arity': {}",
+            msg
+        );
     }
 
     /// An EDB source that tracks whether scan_with_predicates was called
@@ -1064,10 +1072,26 @@ mod tests {
         let source = PushdownTrackingSource::new(
             "orders",
             vec![
-                vec![Value::Number(1), Value::Number(50), Value::String("US".to_string())],
-                vec![Value::Number(2), Value::Number(200), Value::String("US".to_string())],
-                vec![Value::Number(3), Value::Number(150), Value::String("EU".to_string())],
-                vec![Value::Number(4), Value::Number(3000), Value::String("US".to_string())],
+                vec![
+                    Value::Number(1),
+                    Value::Number(50),
+                    Value::String("US".to_string()),
+                ],
+                vec![
+                    Value::Number(2),
+                    Value::Number(200),
+                    Value::String("US".to_string()),
+                ],
+                vec![
+                    Value::Number(3),
+                    Value::Number(150),
+                    Value::String("EU".to_string()),
+                ],
+                vec![
+                    Value::Number(4),
+                    Value::Number(3000),
+                    Value::String("US".to_string()),
+                ],
             ],
         );
 
@@ -1113,9 +1137,21 @@ mod tests {
         let source = PushdownTrackingSource::new(
             "orders",
             vec![
-                vec![Value::Number(1), Value::Number(50), Value::String("US".to_string())],
-                vec![Value::Number(2), Value::Number(200), Value::String("US".to_string())],
-                vec![Value::Number(3), Value::Number(150), Value::String("EU".to_string())],
+                vec![
+                    Value::Number(1),
+                    Value::Number(50),
+                    Value::String("US".to_string()),
+                ],
+                vec![
+                    Value::Number(2),
+                    Value::Number(200),
+                    Value::String("US".to_string()),
+                ],
+                vec![
+                    Value::Number(3),
+                    Value::Number(150),
+                    Value::String("EU".to_string()),
+                ],
             ],
         );
 

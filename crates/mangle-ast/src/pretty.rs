@@ -181,7 +181,13 @@ impl<'a> fmt::Display for Pretty<'a, Term<'a>> {
                 write!(f, "{} != {}", l.pretty(self.arena), r.pretty(self.arena))
             }
             Term::TemporalAtom(a, interval) => {
-                write!(f, "{}@[{}, {}]", a.pretty(self.arena), interval.start, interval.end)
+                write!(
+                    f,
+                    "{}@[{}, {}]",
+                    a.pretty(self.arena),
+                    interval.start,
+                    interval.end
+                )
             }
         }
     }

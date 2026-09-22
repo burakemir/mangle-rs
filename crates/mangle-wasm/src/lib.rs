@@ -47,7 +47,6 @@ use mangle_ast::Arena;
 use mangle_common::{Store, Value};
 use mangle_driver::{compile, execute};
 use mangle_interpreter::MemStore;
-use serde_json;
 
 #[cfg(feature = "bindgen")]
 use wasm_bindgen::prelude::*;
@@ -201,8 +200,12 @@ pub extern "C" fn run_raw(
     facts_ptr: *const u8,
     facts_len: u32,
 ) -> i64 {
-    let source = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(source_ptr, source_len as usize)) };
-    let facts = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(facts_ptr, facts_len as usize)) };
+    let source = unsafe {
+        std::str::from_utf8_unchecked(std::slice::from_raw_parts(source_ptr, source_len as usize))
+    };
+    let facts = unsafe {
+        std::str::from_utf8_unchecked(std::slice::from_raw_parts(facts_ptr, facts_len as usize))
+    };
 
     match run(source, facts) {
         Ok(result) => {
@@ -230,11 +233,7 @@ mod tests {
 
     #[test]
     fn test_with_initial_facts() {
-        let result = run(
-            "q(X) :- p(X).",
-            r#"{"p": [[10], [20], [30]]}"#,
-        )
-        .unwrap();
+        let result = run("q(X) :- p(X).", r#"{"p": [[10], [20], [30]]}"#).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         let q = parsed["q"].as_array().unwrap();
         assert_eq!(q.len(), 3);
@@ -274,11 +273,7 @@ mod tests {
     fn test_name_values_are_tagged() {
         // Names must be distinguishable from strings in the JSON output. A
         // plain string becomes "alice"; a name becomes {"@name": "/alice"}.
-        let result = run(
-            r#"role(/admin). role(/user). greeting("hello")."#,
-            "{}",
-        )
-        .unwrap();
+        let result = run(r#"role(/admin). role(/user). greeting("hello")."#, "{}").unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
 
         let roles = parsed["role"].as_array().unwrap();

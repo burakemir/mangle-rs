@@ -46,7 +46,7 @@ fn extract_hv<T>(val: &Option<Rooted<ExternRef>>, caller: &wasmtime::Caller<'_, 
 fn make_ref<H>(
     caller: &mut wasmtime::Caller<'_, HostWrapper<H>>,
     hv: HostVal,
-) -> Result<Option<Rooted<ExternRef>>> {
+) -> wasmtime::Result<Option<Rooted<ExternRef>>> {
     let r = ExternRef::new(caller, hv.0)?;
     Ok(Some(r))
 }
@@ -101,7 +101,7 @@ impl Vm {
             |mut caller: wasmtime::Caller<'_, HostWrapper<H>>,
              ptr: i32,
              idx: i32|
-             -> Result<Option<Rooted<ExternRef>>> {
+             -> wasmtime::Result<Option<Rooted<ExternRef>>> {
                 let hv = caller.data_mut().host.get_col(ptr, idx);
                 make_ref(&mut caller, hv)
             },
@@ -120,8 +120,7 @@ impl Vm {
         linker.func_wrap(
             "env",
             "insert_push",
-            |mut caller: wasmtime::Caller<'_, HostWrapper<H>>,
-             val: Option<Rooted<ExternRef>>| {
+            |mut caller: wasmtime::Caller<'_, HostWrapper<H>>, val: Option<Rooted<ExternRef>>| {
                 let hv = extract_hv(&val, &caller);
                 caller.data_mut().host.insert_push(hv);
             },
@@ -158,8 +157,7 @@ impl Vm {
         linker.func_wrap(
             "env",
             "debuglog",
-            |mut caller: wasmtime::Caller<'_, HostWrapper<H>>,
-             val: Option<Rooted<ExternRef>>| {
+            |mut caller: wasmtime::Caller<'_, HostWrapper<H>>, val: Option<Rooted<ExternRef>>| {
                 let hv = extract_hv(&val, &caller);
                 caller.data_mut().host.debuglog(hv);
             },
@@ -175,10 +173,7 @@ impl Vm {
              val: Option<Rooted<ExternRef>>|
              -> i32 {
                 let hv = extract_hv(&val, &caller);
-                caller
-                    .data_mut()
-                    .host
-                    .scan_index_start(rel_id, col_idx, hv)
+                caller.data_mut().host.scan_index_start(rel_id, col_idx, hv)
             },
         )?;
 
@@ -204,10 +199,7 @@ impl Vm {
                 for chunk in bytes.chunks_exact(4) {
                     desc.push(i32::from_le_bytes(chunk.try_into().unwrap()));
                 }
-                caller
-                    .data_mut()
-                    .host
-                    .scan_aggregate_start(rel_id, desc)
+                caller.data_mut().host.scan_aggregate_start(rel_id, desc)
             },
         )?;
 
@@ -217,7 +209,7 @@ impl Vm {
             "const_number",
             |mut caller: wasmtime::Caller<'_, HostWrapper<H>>,
              n: i64|
-             -> Result<Option<Rooted<ExternRef>>> {
+             -> wasmtime::Result<Option<Rooted<ExternRef>>> {
                 let hv = caller.data_mut().host.const_number(n);
                 make_ref(&mut caller, hv)
             },
@@ -229,7 +221,7 @@ impl Vm {
             "const_float",
             |mut caller: wasmtime::Caller<'_, HostWrapper<H>>,
              bits: i64|
-             -> Result<Option<Rooted<ExternRef>>> {
+             -> wasmtime::Result<Option<Rooted<ExternRef>>> {
                 let hv = caller.data_mut().host.const_float(bits);
                 make_ref(&mut caller, hv)
             },
@@ -241,7 +233,7 @@ impl Vm {
             "const_string",
             |mut caller: wasmtime::Caller<'_, HostWrapper<H>>,
              id: i32|
-             -> Result<Option<Rooted<ExternRef>>> {
+             -> wasmtime::Result<Option<Rooted<ExternRef>>> {
                 let hv = caller.data_mut().host.const_string(id);
                 make_ref(&mut caller, hv)
             },
@@ -253,7 +245,7 @@ impl Vm {
             "const_name",
             |mut caller: wasmtime::Caller<'_, HostWrapper<H>>,
              id: i32|
-             -> Result<Option<Rooted<ExternRef>>> {
+             -> wasmtime::Result<Option<Rooted<ExternRef>>> {
                 let hv = caller.data_mut().host.const_name(id);
                 make_ref(&mut caller, hv)
             },
@@ -265,7 +257,7 @@ impl Vm {
             "const_time",
             |mut caller: wasmtime::Caller<'_, HostWrapper<H>>,
              nanos: i64|
-             -> Result<Option<Rooted<ExternRef>>> {
+             -> wasmtime::Result<Option<Rooted<ExternRef>>> {
                 let hv = caller.data_mut().host.const_time(nanos);
                 make_ref(&mut caller, hv)
             },
@@ -277,7 +269,7 @@ impl Vm {
             "const_duration",
             |mut caller: wasmtime::Caller<'_, HostWrapper<H>>,
              nanos: i64|
-             -> Result<Option<Rooted<ExternRef>>> {
+             -> wasmtime::Result<Option<Rooted<ExternRef>>> {
                 let hv = caller.data_mut().host.const_duration(nanos);
                 make_ref(&mut caller, hv)
             },
@@ -292,7 +284,7 @@ impl Vm {
                     |mut caller: wasmtime::Caller<'_, HostWrapper<H>>,
                      a: Option<Rooted<ExternRef>>,
                      b: Option<Rooted<ExternRef>>|
-                     -> Result<Option<Rooted<ExternRef>>> {
+                     -> wasmtime::Result<Option<Rooted<ExternRef>>> {
                         let a_hv = extract_hv(&a, &caller);
                         let b_hv = extract_hv(&b, &caller);
                         let result = caller.data_mut().host.$method(a_hv, b_hv);
@@ -312,7 +304,7 @@ impl Vm {
             "val_sqrt",
             |mut caller: wasmtime::Caller<'_, HostWrapper<H>>,
              a: Option<Rooted<ExternRef>>|
-             -> Result<Option<Rooted<ExternRef>>> {
+             -> wasmtime::Result<Option<Rooted<ExternRef>>> {
                 let a_hv = extract_hv(&a, &caller);
                 let result = caller.data_mut().host.val_sqrt(a_hv);
                 make_ref(&mut caller, result)
@@ -355,12 +347,15 @@ impl Vm {
              old: Option<Rooted<ExternRef>>,
              new: Option<Rooted<ExternRef>>,
              count: Option<Rooted<ExternRef>>|
-             -> Result<Option<Rooted<ExternRef>>> {
+             -> wasmtime::Result<Option<Rooted<ExternRef>>> {
                 let s_hv = extract_hv(&s, &caller);
                 let old_hv = extract_hv(&old, &caller);
                 let new_hv = extract_hv(&new, &caller);
                 let count_hv = extract_hv(&count, &caller);
-                let result = caller.data_mut().host.str_replace(s_hv, old_hv, new_hv, count_hv);
+                let result = caller
+                    .data_mut()
+                    .host
+                    .str_replace(s_hv, old_hv, new_hv, count_hv);
                 make_ref(&mut caller, result)
             },
         )?;
@@ -371,7 +366,7 @@ impl Vm {
             "val_to_string",
             |mut caller: wasmtime::Caller<'_, HostWrapper<H>>,
              a: Option<Rooted<ExternRef>>|
-             -> Result<Option<Rooted<ExternRef>>> {
+             -> wasmtime::Result<Option<Rooted<ExternRef>>> {
                 let a_hv = extract_hv(&a, &caller);
                 let result = caller.data_mut().host.val_to_string(a_hv);
                 make_ref(&mut caller, result)
@@ -391,8 +386,7 @@ impl Vm {
         linker.func_wrap(
             "env",
             "compound_push",
-            |mut caller: wasmtime::Caller<'_, HostWrapper<H>>,
-             val: Option<Rooted<ExternRef>>| {
+            |mut caller: wasmtime::Caller<'_, HostWrapper<H>>, val: Option<Rooted<ExternRef>>| {
                 let hv = extract_hv(&val, &caller);
                 caller.data_mut().host.compound_push(hv);
             },
@@ -403,7 +397,7 @@ impl Vm {
             "env",
             "compound_end",
             |mut caller: wasmtime::Caller<'_, HostWrapper<H>>|
-             -> Result<Option<Rooted<ExternRef>>> {
+             -> wasmtime::Result<Option<Rooted<ExternRef>>> {
                 let result = caller.data_mut().host.compound_end();
                 make_ref(&mut caller, result)
             },
@@ -418,7 +412,7 @@ impl Vm {
             "compound_len",
             |mut caller: wasmtime::Caller<'_, HostWrapper<H>>,
              a: Option<Rooted<ExternRef>>|
-             -> Result<Option<Rooted<ExternRef>>> {
+             -> wasmtime::Result<Option<Rooted<ExternRef>>> {
                 let a_hv = extract_hv(&a, &caller);
                 let result = caller.data_mut().host.compound_len(a_hv);
                 make_ref(&mut caller, result)
@@ -431,7 +425,7 @@ impl Vm {
             "pair_first",
             |mut caller: wasmtime::Caller<'_, HostWrapper<H>>,
              a: Option<Rooted<ExternRef>>|
-             -> Result<Option<Rooted<ExternRef>>> {
+             -> wasmtime::Result<Option<Rooted<ExternRef>>> {
                 let a_hv = extract_hv(&a, &caller);
                 let result = caller.data_mut().host.pair_first(a_hv);
                 make_ref(&mut caller, result)
@@ -444,7 +438,7 @@ impl Vm {
             "pair_second",
             |mut caller: wasmtime::Caller<'_, HostWrapper<H>>,
              a: Option<Rooted<ExternRef>>|
-             -> Result<Option<Rooted<ExternRef>>> {
+             -> wasmtime::Result<Option<Rooted<ExternRef>>> {
                 let a_hv = extract_hv(&a, &caller);
                 let result = caller.data_mut().host.pair_second(a_hv);
                 make_ref(&mut caller, result)
@@ -464,8 +458,7 @@ impl Vm {
         linker.func_wrap(
             "env",
             "hash_join_push",
-            |mut caller: wasmtime::Caller<'_, HostWrapper<H>>,
-             v: Option<Rooted<ExternRef>>| {
+            |mut caller: wasmtime::Caller<'_, HostWrapper<H>>, v: Option<Rooted<ExternRef>>| {
                 let hv = extract_hv(&v, &caller);
                 caller.data_mut().host.hash_join_push(hv);
             },
@@ -476,7 +469,10 @@ impl Vm {
             "env",
             "hash_join_commit_build",
             |mut caller: wasmtime::Caller<'_, HostWrapper<H>>, join_id: i32, n_keys: i32| {
-                caller.data_mut().host.hash_join_commit_build(join_id, n_keys);
+                caller
+                    .data_mut()
+                    .host
+                    .hash_join_commit_build(join_id, n_keys);
             },
         )?;
 
@@ -509,54 +505,124 @@ impl Vm {
 // Minimal dummy host for tests that don't need storage
 pub struct DummyHost;
 impl Host for DummyHost {
-    fn scan_start(&mut self, _rel_id: i32) -> i32 { 0 }
-    fn scan_delta_start(&mut self, _rel_id: i32) -> i32 { 0 }
-    fn scan_next(&mut self, _iter_id: i32) -> i32 { 0 }
-    fn merge_deltas(&mut self) -> i32 { 0 }
-    fn scan_aggregate_start(&mut self, _rel_id: i32, _desc: Vec<i32>) -> i32 { 0 }
-    fn scan_index_start(&mut self, _rel_id: i32, _col_idx: i32, _val: HostVal) -> i32 { 0 }
-    fn get_col(&mut self, _ptr: i32, _idx: i32) -> HostVal { HostVal(0) }
+    fn scan_start(&mut self, _rel_id: i32) -> i32 {
+        0
+    }
+    fn scan_delta_start(&mut self, _rel_id: i32) -> i32 {
+        0
+    }
+    fn scan_next(&mut self, _iter_id: i32) -> i32 {
+        0
+    }
+    fn merge_deltas(&mut self) -> i32 {
+        0
+    }
+    fn scan_aggregate_start(&mut self, _rel_id: i32, _desc: Vec<i32>) -> i32 {
+        0
+    }
+    fn scan_index_start(&mut self, _rel_id: i32, _col_idx: i32, _val: HostVal) -> i32 {
+        0
+    }
+    fn get_col(&mut self, _ptr: i32, _idx: i32) -> HostVal {
+        HostVal(0)
+    }
     fn insert_begin(&mut self, _rel_id: i32) {}
     fn insert_push(&mut self, _val: HostVal) {}
     fn insert_end(&mut self) {}
-    fn const_number(&mut self, _n: i64) -> HostVal { HostVal(0) }
-    fn const_float(&mut self, _bits: i64) -> HostVal { HostVal(0) }
-    fn const_string(&mut self, _id: i32) -> HostVal { HostVal(0) }
-    fn const_name(&mut self, _id: i32) -> HostVal { HostVal(0) }
-    fn const_time(&mut self, _nanos: i64) -> HostVal { HostVal(0) }
-    fn const_duration(&mut self, _nanos: i64) -> HostVal { HostVal(0) }
-    fn val_add(&mut self, _a: HostVal, _b: HostVal) -> HostVal { HostVal(0) }
-    fn val_sub(&mut self, _a: HostVal, _b: HostVal) -> HostVal { HostVal(0) }
-    fn val_mul(&mut self, _a: HostVal, _b: HostVal) -> HostVal { HostVal(0) }
-    fn val_div(&mut self, _a: HostVal, _b: HostVal) -> HostVal { HostVal(0) }
-    fn val_sqrt(&mut self, _a: HostVal) -> HostVal { HostVal(0) }
-    fn val_eq(&mut self, _a: HostVal, _b: HostVal) -> i32 { 0 }
-    fn val_neq(&mut self, _a: HostVal, _b: HostVal) -> i32 { 0 }
-    fn val_lt(&mut self, _a: HostVal, _b: HostVal) -> i32 { 0 }
-    fn val_le(&mut self, _a: HostVal, _b: HostVal) -> i32 { 0 }
-    fn val_gt(&mut self, _a: HostVal, _b: HostVal) -> i32 { 0 }
-    fn val_ge(&mut self, _a: HostVal, _b: HostVal) -> i32 { 0 }
-    fn str_concat(&mut self, _a: HostVal, _b: HostVal) -> HostVal { HostVal(0) }
-    fn str_replace(&mut self, _s: HostVal, _old: HostVal, _new: HostVal, _count: HostVal) -> HostVal { HostVal(0) }
-    fn val_to_string(&mut self, _val: HostVal) -> HostVal { HostVal(0) }
+    fn const_number(&mut self, _n: i64) -> HostVal {
+        HostVal(0)
+    }
+    fn const_float(&mut self, _bits: i64) -> HostVal {
+        HostVal(0)
+    }
+    fn const_string(&mut self, _id: i32) -> HostVal {
+        HostVal(0)
+    }
+    fn const_name(&mut self, _id: i32) -> HostVal {
+        HostVal(0)
+    }
+    fn const_time(&mut self, _nanos: i64) -> HostVal {
+        HostVal(0)
+    }
+    fn const_duration(&mut self, _nanos: i64) -> HostVal {
+        HostVal(0)
+    }
+    fn val_add(&mut self, _a: HostVal, _b: HostVal) -> HostVal {
+        HostVal(0)
+    }
+    fn val_sub(&mut self, _a: HostVal, _b: HostVal) -> HostVal {
+        HostVal(0)
+    }
+    fn val_mul(&mut self, _a: HostVal, _b: HostVal) -> HostVal {
+        HostVal(0)
+    }
+    fn val_div(&mut self, _a: HostVal, _b: HostVal) -> HostVal {
+        HostVal(0)
+    }
+    fn val_sqrt(&mut self, _a: HostVal) -> HostVal {
+        HostVal(0)
+    }
+    fn val_eq(&mut self, _a: HostVal, _b: HostVal) -> i32 {
+        0
+    }
+    fn val_neq(&mut self, _a: HostVal, _b: HostVal) -> i32 {
+        0
+    }
+    fn val_lt(&mut self, _a: HostVal, _b: HostVal) -> i32 {
+        0
+    }
+    fn val_le(&mut self, _a: HostVal, _b: HostVal) -> i32 {
+        0
+    }
+    fn val_gt(&mut self, _a: HostVal, _b: HostVal) -> i32 {
+        0
+    }
+    fn val_ge(&mut self, _a: HostVal, _b: HostVal) -> i32 {
+        0
+    }
+    fn str_concat(&mut self, _a: HostVal, _b: HostVal) -> HostVal {
+        HostVal(0)
+    }
+    fn str_replace(
+        &mut self,
+        _s: HostVal,
+        _old: HostVal,
+        _new: HostVal,
+        _count: HostVal,
+    ) -> HostVal {
+        HostVal(0)
+    }
+    fn val_to_string(&mut self, _val: HostVal) -> HostVal {
+        HostVal(0)
+    }
     fn compound_begin(&mut self, _kind: i32) {}
     fn compound_push(&mut self, _val: HostVal) {}
-    fn compound_end(&mut self) -> HostVal { HostVal(0) }
-    fn compound_get(&mut self, _compound: HostVal, _key: HostVal) -> HostVal { HostVal(0) }
-    fn compound_len(&mut self, _compound: HostVal) -> HostVal { HostVal(0) }
-    fn pair_first(&mut self, _compound: HostVal) -> HostVal { HostVal(0) }
-    fn pair_second(&mut self, _compound: HostVal) -> HostVal { HostVal(0) }
+    fn compound_end(&mut self) -> HostVal {
+        HostVal(0)
+    }
+    fn compound_get(&mut self, _compound: HostVal, _key: HostVal) -> HostVal {
+        HostVal(0)
+    }
+    fn compound_len(&mut self, _compound: HostVal) -> HostVal {
+        HostVal(0)
+    }
+    fn pair_first(&mut self, _compound: HostVal) -> HostVal {
+        HostVal(0)
+    }
+    fn pair_second(&mut self, _compound: HostVal) -> HostVal {
+        HostVal(0)
+    }
     fn debuglog(&mut self, _val: HostVal) {}
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustc_hash::FxHashSet;
-    use mangle_analysis::{rewrite_unit, LoweringContext, Program};
+    use mangle_analysis::{LoweringContext, Program, rewrite_unit};
     use mangle_ast as ast;
     use mangle_codegen::{Codegen, WasmImportsBackend};
     use mangle_parse::Parser;
+    use rustc_hash::FxHashSet;
     use std::collections::HashMap;
 
     #[test]
@@ -709,7 +775,10 @@ mod tests {
 
         fn add_string_fact(&mut self, rel: &str, args: &[&str]) {
             let id = Self::hash_name(rel);
-            let hvs: Vec<HostVal> = args.iter().map(|s| self.alloc(Val::String(s.to_string()))).collect();
+            let hvs: Vec<HostVal> = args
+                .iter()
+                .map(|s| self.alloc(Val::String(s.to_string())))
+                .collect();
             self.data.entry(id).or_default().push(hvs);
         }
 
@@ -788,9 +857,15 @@ mod tests {
             }
             0
         }
-        fn merge_deltas(&mut self) -> i32 { 0 }
-        fn scan_aggregate_start(&mut self, _rel_id: i32, _desc: Vec<i32>) -> i32 { 0 }
-        fn scan_index_start(&mut self, _rel_id: i32, _col_idx: i32, _val: HostVal) -> i32 { 0 }
+        fn merge_deltas(&mut self) -> i32 {
+            0
+        }
+        fn scan_aggregate_start(&mut self, _rel_id: i32, _desc: Vec<i32>) -> i32 {
+            0
+        }
+        fn scan_index_start(&mut self, _rel_id: i32, _col_idx: i32, _val: HostVal) -> i32 {
+            0
+        }
 
         fn get_col(&mut self, ptr: i32, col_idx: i32) -> HostVal {
             let iter_id = ptr >> 16;
@@ -815,18 +890,34 @@ mod tests {
             self.data.entry(self.pending_rel).or_default().push(tuple);
         }
 
-        fn const_number(&mut self, n: i64) -> HostVal { self.alloc(Val::Number(n)) }
-        fn const_float(&mut self, bits: i64) -> HostVal { self.alloc(Val::Float(f64::from_bits(bits as u64))) }
+        fn const_number(&mut self, n: i64) -> HostVal {
+            self.alloc(Val::Number(n))
+        }
+        fn const_float(&mut self, bits: i64) -> HostVal {
+            self.alloc(Val::Float(f64::from_bits(bits as u64)))
+        }
         fn const_string(&mut self, id: i32) -> HostVal {
-            let s = self.strings.get((id - 1) as usize).cloned().unwrap_or_default();
+            let s = self
+                .strings
+                .get((id - 1) as usize)
+                .cloned()
+                .unwrap_or_default();
             self.alloc(Val::String(s))
         }
         fn const_name(&mut self, id: i32) -> HostVal {
-            let s = self.names.get((id - 1) as usize).cloned().unwrap_or_default();
+            let s = self
+                .names
+                .get((id - 1) as usize)
+                .cloned()
+                .unwrap_or_default();
             self.alloc(Val::Name(s))
         }
-        fn const_time(&mut self, nanos: i64) -> HostVal { self.alloc(Val::Time(nanos)) }
-        fn const_duration(&mut self, nanos: i64) -> HostVal { self.alloc(Val::Duration(nanos)) }
+        fn const_time(&mut self, nanos: i64) -> HostVal {
+            self.alloc(Val::Time(nanos))
+        }
+        fn const_duration(&mut self, nanos: i64) -> HostVal {
+            self.alloc(Val::Duration(nanos))
+        }
 
         fn val_add(&mut self, a: HostVal, b: HostVal) -> HostVal {
             let result = match (self.get_val(a), self.get_val(b)) {
@@ -915,7 +1006,13 @@ mod tests {
             let sb = self.val_to_str(b);
             self.alloc(Val::String(format!("{}{}", sa, sb)))
         }
-        fn str_replace(&mut self, s: HostVal, old: HostVal, new: HostVal, count: HostVal) -> HostVal {
+        fn str_replace(
+            &mut self,
+            s: HostVal,
+            old: HostVal,
+            new: HostVal,
+            count: HostVal,
+        ) -> HostVal {
             let s_str = self.val_to_str(s);
             let old_str = self.val_to_str(old);
             let new_str = self.val_to_str(new);
@@ -1006,44 +1103,132 @@ mod tests {
 
     macro_rules! delegate_host {
         () => {
-            fn scan_start(&mut self, rel_id: i32) -> i32 { self.inner.lock().unwrap().scan_start(rel_id) }
-            fn scan_delta_start(&mut self, rel_id: i32) -> i32 { self.inner.lock().unwrap().scan_delta_start(rel_id) }
-            fn scan_next(&mut self, iter_id: i32) -> i32 { self.inner.lock().unwrap().scan_next(iter_id) }
-            fn merge_deltas(&mut self) -> i32 { self.inner.lock().unwrap().merge_deltas() }
-            fn scan_aggregate_start(&mut self, rel_id: i32, desc: Vec<i32>) -> i32 { self.inner.lock().unwrap().scan_aggregate_start(rel_id, desc) }
-            fn scan_index_start(&mut self, rel_id: i32, col_idx: i32, val: HostVal) -> i32 { self.inner.lock().unwrap().scan_index_start(rel_id, col_idx, val) }
-            fn get_col(&mut self, ptr: i32, idx: i32) -> HostVal { self.inner.lock().unwrap().get_col(ptr, idx) }
-            fn insert_begin(&mut self, rel_id: i32) { self.inner.lock().unwrap().insert_begin(rel_id) }
-            fn insert_push(&mut self, val: HostVal) { self.inner.lock().unwrap().insert_push(val) }
-            fn insert_end(&mut self) { self.inner.lock().unwrap().insert_end() }
-            fn const_number(&mut self, n: i64) -> HostVal { self.inner.lock().unwrap().const_number(n) }
-            fn const_float(&mut self, bits: i64) -> HostVal { self.inner.lock().unwrap().const_float(bits) }
-            fn const_string(&mut self, id: i32) -> HostVal { self.inner.lock().unwrap().const_string(id) }
-            fn const_name(&mut self, id: i32) -> HostVal { self.inner.lock().unwrap().const_name(id) }
-            fn const_time(&mut self, nanos: i64) -> HostVal { self.inner.lock().unwrap().const_time(nanos) }
-            fn const_duration(&mut self, nanos: i64) -> HostVal { self.inner.lock().unwrap().const_duration(nanos) }
-            fn val_add(&mut self, a: HostVal, b: HostVal) -> HostVal { self.inner.lock().unwrap().val_add(a, b) }
-            fn val_sub(&mut self, a: HostVal, b: HostVal) -> HostVal { self.inner.lock().unwrap().val_sub(a, b) }
-            fn val_mul(&mut self, a: HostVal, b: HostVal) -> HostVal { self.inner.lock().unwrap().val_mul(a, b) }
-            fn val_div(&mut self, a: HostVal, b: HostVal) -> HostVal { self.inner.lock().unwrap().val_div(a, b) }
-            fn val_sqrt(&mut self, a: HostVal) -> HostVal { self.inner.lock().unwrap().val_sqrt(a) }
-            fn val_eq(&mut self, a: HostVal, b: HostVal) -> i32 { self.inner.lock().unwrap().val_eq(a, b) }
-            fn val_neq(&mut self, a: HostVal, b: HostVal) -> i32 { self.inner.lock().unwrap().val_neq(a, b) }
-            fn val_lt(&mut self, a: HostVal, b: HostVal) -> i32 { self.inner.lock().unwrap().val_lt(a, b) }
-            fn val_le(&mut self, a: HostVal, b: HostVal) -> i32 { self.inner.lock().unwrap().val_le(a, b) }
-            fn val_gt(&mut self, a: HostVal, b: HostVal) -> i32 { self.inner.lock().unwrap().val_gt(a, b) }
-            fn val_ge(&mut self, a: HostVal, b: HostVal) -> i32 { self.inner.lock().unwrap().val_ge(a, b) }
-            fn str_concat(&mut self, a: HostVal, b: HostVal) -> HostVal { self.inner.lock().unwrap().str_concat(a, b) }
-            fn str_replace(&mut self, s: HostVal, old: HostVal, new: HostVal, count: HostVal) -> HostVal { self.inner.lock().unwrap().str_replace(s, old, new, count) }
-            fn val_to_string(&mut self, val: HostVal) -> HostVal { self.inner.lock().unwrap().val_to_string(val) }
-            fn compound_begin(&mut self, kind: i32) { self.inner.lock().unwrap().compound_begin(kind) }
-            fn compound_push(&mut self, val: HostVal) { self.inner.lock().unwrap().compound_push(val) }
-            fn compound_end(&mut self) -> HostVal { self.inner.lock().unwrap().compound_end() }
-            fn compound_get(&mut self, compound: HostVal, key: HostVal) -> HostVal { self.inner.lock().unwrap().compound_get(compound, key) }
-            fn compound_len(&mut self, compound: HostVal) -> HostVal { self.inner.lock().unwrap().compound_len(compound) }
-            fn pair_first(&mut self, compound: HostVal) -> HostVal { self.inner.lock().unwrap().pair_first(compound) }
-            fn pair_second(&mut self, compound: HostVal) -> HostVal { self.inner.lock().unwrap().pair_second(compound) }
-            fn debuglog(&mut self, val: HostVal) { self.inner.lock().unwrap().debuglog(val) }
+            fn scan_start(&mut self, rel_id: i32) -> i32 {
+                self.inner.lock().unwrap().scan_start(rel_id)
+            }
+            fn scan_delta_start(&mut self, rel_id: i32) -> i32 {
+                self.inner.lock().unwrap().scan_delta_start(rel_id)
+            }
+            fn scan_next(&mut self, iter_id: i32) -> i32 {
+                self.inner.lock().unwrap().scan_next(iter_id)
+            }
+            fn merge_deltas(&mut self) -> i32 {
+                self.inner.lock().unwrap().merge_deltas()
+            }
+            fn scan_aggregate_start(&mut self, rel_id: i32, desc: Vec<i32>) -> i32 {
+                self.inner
+                    .lock()
+                    .unwrap()
+                    .scan_aggregate_start(rel_id, desc)
+            }
+            fn scan_index_start(&mut self, rel_id: i32, col_idx: i32, val: HostVal) -> i32 {
+                self.inner
+                    .lock()
+                    .unwrap()
+                    .scan_index_start(rel_id, col_idx, val)
+            }
+            fn get_col(&mut self, ptr: i32, idx: i32) -> HostVal {
+                self.inner.lock().unwrap().get_col(ptr, idx)
+            }
+            fn insert_begin(&mut self, rel_id: i32) {
+                self.inner.lock().unwrap().insert_begin(rel_id)
+            }
+            fn insert_push(&mut self, val: HostVal) {
+                self.inner.lock().unwrap().insert_push(val)
+            }
+            fn insert_end(&mut self) {
+                self.inner.lock().unwrap().insert_end()
+            }
+            fn const_number(&mut self, n: i64) -> HostVal {
+                self.inner.lock().unwrap().const_number(n)
+            }
+            fn const_float(&mut self, bits: i64) -> HostVal {
+                self.inner.lock().unwrap().const_float(bits)
+            }
+            fn const_string(&mut self, id: i32) -> HostVal {
+                self.inner.lock().unwrap().const_string(id)
+            }
+            fn const_name(&mut self, id: i32) -> HostVal {
+                self.inner.lock().unwrap().const_name(id)
+            }
+            fn const_time(&mut self, nanos: i64) -> HostVal {
+                self.inner.lock().unwrap().const_time(nanos)
+            }
+            fn const_duration(&mut self, nanos: i64) -> HostVal {
+                self.inner.lock().unwrap().const_duration(nanos)
+            }
+            fn val_add(&mut self, a: HostVal, b: HostVal) -> HostVal {
+                self.inner.lock().unwrap().val_add(a, b)
+            }
+            fn val_sub(&mut self, a: HostVal, b: HostVal) -> HostVal {
+                self.inner.lock().unwrap().val_sub(a, b)
+            }
+            fn val_mul(&mut self, a: HostVal, b: HostVal) -> HostVal {
+                self.inner.lock().unwrap().val_mul(a, b)
+            }
+            fn val_div(&mut self, a: HostVal, b: HostVal) -> HostVal {
+                self.inner.lock().unwrap().val_div(a, b)
+            }
+            fn val_sqrt(&mut self, a: HostVal) -> HostVal {
+                self.inner.lock().unwrap().val_sqrt(a)
+            }
+            fn val_eq(&mut self, a: HostVal, b: HostVal) -> i32 {
+                self.inner.lock().unwrap().val_eq(a, b)
+            }
+            fn val_neq(&mut self, a: HostVal, b: HostVal) -> i32 {
+                self.inner.lock().unwrap().val_neq(a, b)
+            }
+            fn val_lt(&mut self, a: HostVal, b: HostVal) -> i32 {
+                self.inner.lock().unwrap().val_lt(a, b)
+            }
+            fn val_le(&mut self, a: HostVal, b: HostVal) -> i32 {
+                self.inner.lock().unwrap().val_le(a, b)
+            }
+            fn val_gt(&mut self, a: HostVal, b: HostVal) -> i32 {
+                self.inner.lock().unwrap().val_gt(a, b)
+            }
+            fn val_ge(&mut self, a: HostVal, b: HostVal) -> i32 {
+                self.inner.lock().unwrap().val_ge(a, b)
+            }
+            fn str_concat(&mut self, a: HostVal, b: HostVal) -> HostVal {
+                self.inner.lock().unwrap().str_concat(a, b)
+            }
+            fn str_replace(
+                &mut self,
+                s: HostVal,
+                old: HostVal,
+                new: HostVal,
+                count: HostVal,
+            ) -> HostVal {
+                self.inner.lock().unwrap().str_replace(s, old, new, count)
+            }
+            fn val_to_string(&mut self, val: HostVal) -> HostVal {
+                self.inner.lock().unwrap().val_to_string(val)
+            }
+            fn compound_begin(&mut self, kind: i32) {
+                self.inner.lock().unwrap().compound_begin(kind)
+            }
+            fn compound_push(&mut self, val: HostVal) {
+                self.inner.lock().unwrap().compound_push(val)
+            }
+            fn compound_end(&mut self) -> HostVal {
+                self.inner.lock().unwrap().compound_end()
+            }
+            fn compound_get(&mut self, compound: HostVal, key: HostVal) -> HostVal {
+                self.inner.lock().unwrap().compound_get(compound, key)
+            }
+            fn compound_len(&mut self, compound: HostVal) -> HostVal {
+                self.inner.lock().unwrap().compound_len(compound)
+            }
+            fn pair_first(&mut self, compound: HostVal) -> HostVal {
+                self.inner.lock().unwrap().pair_first(compound)
+            }
+            fn pair_second(&mut self, compound: HostVal) -> HostVal {
+                self.inner.lock().unwrap().pair_second(compound)
+            }
+            fn debuglog(&mut self, val: HostVal) {
+                self.inner.lock().unwrap().debuglog(val)
+            }
         };
     }
 
@@ -1087,9 +1272,15 @@ mod tests {
             all_preds.insert(clause.head.sym);
             for premise in clause.premises {
                 match premise {
-                    ast::Term::Atom(atom) => { all_preds.insert(atom.sym); }
-                    ast::Term::NegAtom(atom) => { all_preds.insert(atom.sym); }
-                    ast::Term::TemporalAtom(atom, _) => { all_preds.insert(atom.sym); }
+                    ast::Term::Atom(atom) => {
+                        all_preds.insert(atom.sym);
+                    }
+                    ast::Term::NegAtom(atom) => {
+                        all_preds.insert(atom.sym);
+                    }
+                    ast::Term::TemporalAtom(atom, _) => {
+                        all_preds.insert(atom.sym);
+                    }
                     _ => {}
                 }
             }
@@ -1141,8 +1332,16 @@ mod tests {
         let host = run_host_wasm(&compiled, host)?;
         let results = host.get_number_facts("p");
 
-        assert!(results.iter().any(|t| t[0] == 10), "expected 10 in results: {:?}", results);
-        assert!(results.iter().any(|t| t[0] == 20), "expected 20 in results: {:?}", results);
+        assert!(
+            results.iter().any(|t| t[0] == 10),
+            "expected 10 in results: {:?}",
+            results
+        );
+        assert!(
+            results.iter().any(|t| t[0] == 20),
+            "expected 20 in results: {:?}",
+            results
+        );
 
         Ok(())
     }
@@ -1151,10 +1350,12 @@ mod tests {
 
     #[test]
     fn test_wasm_string_constant() -> Result<()> {
-        let host = run_wasm_program(r#"
+        let host = run_wasm_program(
+            r#"
             p("hello").
             q(X) :- p(X).
-        "#)?;
+        "#,
+        )?;
         let results = host.get_string_facts("q");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0][0], "hello");
@@ -1163,10 +1364,12 @@ mod tests {
 
     #[test]
     fn test_wasm_string_equality() -> Result<()> {
-        let host = run_wasm_program(r#"
+        let host = run_wasm_program(
+            r#"
             p("hello"). p("world").
             q(X) :- p(X), X = "hello".
-        "#)?;
+        "#,
+        )?;
         let results = host.get_string_facts("q");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0][0], "hello");
@@ -1175,10 +1378,12 @@ mod tests {
 
     #[test]
     fn test_wasm_string_concat() -> Result<()> {
-        let host = run_wasm_program(r#"
+        let host = run_wasm_program(
+            r#"
             p("hello", "world").
             q(R) :- p(A, B) |> let R = fn:string:concat(A, " ", B).
-        "#)?;
+        "#,
+        )?;
         let results = host.get_string_facts("q");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0][0], "hello world");
@@ -1187,10 +1392,12 @@ mod tests {
 
     #[test]
     fn test_wasm_string_replace() -> Result<()> {
-        let host = run_wasm_program(r#"
+        let host = run_wasm_program(
+            r#"
             p("foo-bar-baz").
             q(R) :- p(S) |> let R = fn:string:replace(S, "-", "_", -1).
-        "#)?;
+        "#,
+        )?;
         let results = host.get_string_facts("q");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0][0], "foo_bar_baz");
@@ -1199,10 +1406,12 @@ mod tests {
 
     #[test]
     fn test_wasm_number_to_string() -> Result<()> {
-        let host = run_wasm_program(r#"
+        let host = run_wasm_program(
+            r#"
             p(42).
             q(R) :- p(X) |> let R = fn:number:to_string(X).
-        "#)?;
+        "#,
+        )?;
         let results = host.get_string_facts("q");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0][0], "42");
@@ -1213,10 +1422,12 @@ mod tests {
 
     #[test]
     fn test_wasm_list_construction() -> Result<()> {
-        let host = run_wasm_program(r#"
+        let host = run_wasm_program(
+            r#"
             p(1, 2, 3).
             q(L) :- p(A, B, C) |> let L = fn:list(A, B, C).
-        "#)?;
+        "#,
+        )?;
         let results = host.get_val_facts("q");
         assert_eq!(results.len(), 1);
         if let Val::Compound(kind, elems) = &results[0][0] {
@@ -1230,12 +1441,14 @@ mod tests {
 
     #[test]
     fn test_wasm_pair_construction_and_access() -> Result<()> {
-        let host = run_wasm_program(r#"
+        let host = run_wasm_program(
+            r#"
             p(10, 20).
             mid(P) :- p(A, B) |> let P = fn:pair(A, B).
             q(F) :- mid(P) |> let F = fn:pair:first(P).
             r(S) :- mid(P) |> let S = fn:pair:second(P).
-        "#)?;
+        "#,
+        )?;
         let q_results = host.get_number_facts("q");
         let r_results = host.get_number_facts("r");
         assert_eq!(q_results.len(), 1);
@@ -1247,11 +1460,13 @@ mod tests {
 
     #[test]
     fn test_wasm_list_construction_and_len() -> Result<()> {
-        let host = run_wasm_program(r#"
+        let host = run_wasm_program(
+            r#"
             p(10, 20, 30).
             mid(L) :- p(A, B, C) |> let L = fn:list(A, B, C).
             q(N) :- mid(L) |> let N = fn:len(L).
-        "#)?;
+        "#,
+        )?;
         let results = host.get_number_facts("q");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0], vec![3]);
@@ -1260,11 +1475,13 @@ mod tests {
 
     #[test]
     fn test_wasm_list_get() -> Result<()> {
-        let host = run_wasm_program(r#"
+        let host = run_wasm_program(
+            r#"
             p(10, 20, 30).
             mid(L) :- p(A, B, C) |> let L = fn:list(A, B, C).
             q(E) :- mid(L) |> let E = fn:list:get(L, 1).
-        "#)?;
+        "#,
+        )?;
         let results = host.get_number_facts("q");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0], vec![20]);
@@ -1273,11 +1490,13 @@ mod tests {
 
     #[test]
     fn test_wasm_struct_construction_and_get() -> Result<()> {
-        let host = run_wasm_program(r#"
+        let host = run_wasm_program(
+            r#"
             p("alice", 30).
             mid(S) :- p(Name, Age) |> let S = fn:struct(/name, Name, /age, Age).
             q(V) :- mid(S) |> let V = fn:struct:get(S, /name).
-        "#)?;
+        "#,
+        )?;
         let results = host.get_string_facts("q");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0][0], "alice");

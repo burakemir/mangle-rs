@@ -59,13 +59,15 @@
 
 use anyhow::{Result, anyhow};
 use ast::Arena;
-use rustc_hash::FxHashSet;
-use mangle_analysis::{BoundsChecker, LoweringContext, Planner, Program, StratifiedProgram, rewrite_unit};
+use mangle_analysis::{
+    BoundsChecker, LoweringContext, Planner, Program, StratifiedProgram, rewrite_unit,
+};
 use mangle_ast as ast;
 use mangle_codegen::{Codegen, WasmImportsBackend};
 use mangle_interpreter::{Interpreter, Store};
 use mangle_ir::{Inst, InstId, Ir};
 use mangle_parse::Parser;
+use rustc_hash::FxHashSet;
 
 /// Compiles source code into the Mangle Intermediate Representation (IR).
 ///
@@ -89,7 +91,10 @@ pub fn compile<'a>(source: &str, arena: &'a Arena) -> Result<(Ir, StratifiedProg
 ///
 /// This enables multi-unit compilation where one unit can declare a `Package`
 /// and another can `Use` it with qualified predicate references.
-pub fn compile_units<'a>(sources: &[&str], arena: &'a Arena) -> Result<(Ir, StratifiedProgram<'a>)> {
+pub fn compile_units<'a>(
+    sources: &[&str],
+    arena: &'a Arena,
+) -> Result<(Ir, StratifiedProgram<'a>)> {
     // Parse and rename each source unit independently
     let mut all_decls: Vec<&'a ast::Decl<'a>> = Vec::new();
     let mut all_clauses: Vec<&'a ast::Clause<'a>> = Vec::new();
@@ -122,9 +127,15 @@ pub fn compile_units<'a>(sources: &[&str], arena: &'a Arena) -> Result<(Ir, Stra
         all_preds.insert(clause.head.sym);
         for premise in clause.premises {
             match premise {
-                ast::Term::Atom(atom) => { all_preds.insert(atom.sym); }
-                ast::Term::NegAtom(atom) => { all_preds.insert(atom.sym); }
-                ast::Term::TemporalAtom(atom, _) => { all_preds.insert(atom.sym); }
+                ast::Term::Atom(atom) => {
+                    all_preds.insert(atom.sym);
+                }
+                ast::Term::NegAtom(atom) => {
+                    all_preds.insert(atom.sym);
+                }
+                ast::Term::TemporalAtom(atom, _) => {
+                    all_preds.insert(atom.sym);
+                }
                 _ => {}
             }
         }
@@ -1224,7 +1235,11 @@ mod tests {
         assert_eq!(facts.len(), 2);
         // Both should be Time values
         for fact in &facts {
-            assert!(matches!(fact[0], Value::Time(_)), "expected Time, got {:?}", fact[0]);
+            assert!(
+                matches!(fact[0], Value::Time(_)),
+                "expected Time, got {:?}",
+                fact[0]
+            );
         }
         Ok(())
     }
@@ -1249,7 +1264,11 @@ mod tests {
             .collect();
         assert_eq!(facts.len(), 2);
         for fact in &facts {
-            assert!(matches!(fact[0], Value::Duration(_)), "expected Duration, got {:?}", fact[0]);
+            assert!(
+                matches!(fact[0], Value::Duration(_)),
+                "expected Duration, got {:?}",
+                fact[0]
+            );
         }
         Ok(())
     }
@@ -1354,11 +1373,19 @@ mod tests {
         let store = Box::new(MemStore::new());
         let interpreter = execute(&mut ir, &stratified, store)?;
 
-        let secs: Vec<_> = interpreter.store().scan("dur_seconds").expect("dur_seconds").collect();
+        let secs: Vec<_> = interpreter
+            .store()
+            .scan("dur_seconds")
+            .expect("dur_seconds")
+            .collect();
         assert_eq!(secs.len(), 1);
         assert_eq!(secs[0][0], Value::Float(90.0));
 
-        let nanos: Vec<_> = interpreter.store().scan("dur_nanos").expect("dur_nanos").collect();
+        let nanos: Vec<_> = interpreter
+            .store()
+            .scan("dur_nanos")
+            .expect("dur_nanos")
+            .collect();
         assert_eq!(nanos.len(), 1);
         assert_eq!(nanos[0][0], Value::Number(90_000_000_000));
         Ok(())
@@ -1786,11 +1813,21 @@ mod tests {
             .scan("link")
             .expect("relation link not found")
             .collect();
-        assert_eq!(facts.len(), 2, "expected 2 temporal link facts, got {:?}", facts);
+        assert_eq!(
+            facts.len(),
+            2,
+            "expected 2 temporal link facts, got {:?}",
+            facts
+        );
 
         // Each fact should have 4 columns (2 regular + 2 temporal)
         for fact in &facts {
-            assert_eq!(fact.len(), 4, "temporal fact should have 4 columns, got {:?}", fact);
+            assert_eq!(
+                fact.len(),
+                4,
+                "temporal fact should have 4 columns, got {:?}",
+                fact
+            );
         }
 
         Ok(())
@@ -2002,8 +2039,14 @@ mod tests {
         let mut pairs: Vec<(String, String)> = facts
             .iter()
             .map(|f| {
-                let from = match &f[0] { Value::Name(s) => s.clone(), v => panic!("{v:?}") };
-                let to = match &f[1] { Value::Name(s) => s.clone(), v => panic!("{v:?}") };
+                let from = match &f[0] {
+                    Value::Name(s) => s.clone(),
+                    v => panic!("{v:?}"),
+                };
+                let to = match &f[1] {
+                    Value::Name(s) => s.clone(),
+                    v => panic!("{v:?}"),
+                };
                 (from, to)
             })
             .collect();
@@ -2071,8 +2114,14 @@ mod tests {
         let mut pairs: Vec<(String, String)> = facts
             .iter()
             .map(|f| {
-                let from = match &f[0] { Value::Name(s) => s.clone(), v => panic!("{v:?}") };
-                let to = match &f[1] { Value::Name(s) => s.clone(), v => panic!("{v:?}") };
+                let from = match &f[0] {
+                    Value::Name(s) => s.clone(),
+                    v => panic!("{v:?}"),
+                };
+                let to = match &f[1] {
+                    Value::Name(s) => s.clone(),
+                    v => panic!("{v:?}"),
+                };
                 (from, to)
             })
             .collect();
@@ -2091,14 +2140,29 @@ mod tests {
             ("/b".to_string(), "/d".to_string()),
             ("/c".to_string(), "/d".to_string()),
         ];
-        assert_eq!(pairs, expected, "interval intersection reachability mismatch");
+        assert_eq!(
+            pairs, expected,
+            "interval intersection reachability mismatch"
+        );
 
         // Verify specific intervals for derived facts
         for f in &facts {
-            let from = match &f[0] { Value::Name(s) => s.as_str(), _ => "" };
-            let to = match &f[1] { Value::Name(s) => s.as_str(), _ => "" };
-            let start = match &f[2] { Value::Time(t) => *t, _ => 0 };
-            let end = match &f[3] { Value::Time(t) => *t, _ => 0 };
+            let from = match &f[0] {
+                Value::Name(s) => s.as_str(),
+                _ => "",
+            };
+            let to = match &f[1] {
+                Value::Name(s) => s.as_str(),
+                _ => "",
+            };
+            let start = match &f[2] {
+                Value::Time(t) => *t,
+                _ => 0,
+            };
+            let end = match &f[3] {
+                Value::Time(t) => *t,
+                _ => 0,
+            };
 
             if from == "/a" && to == "/c" {
                 // Intersection of [Jan1,Jan10] and [Jan5,Jan15] = [Jan5,Jan10]
@@ -2192,8 +2256,14 @@ mod tests {
         let mut pairs: Vec<(String, String)> = facts
             .iter()
             .map(|f| {
-                let from = match &f[0] { Value::Name(s) => s.clone(), v => panic!("{v:?}") };
-                let to = match &f[1] { Value::Name(s) => s.clone(), v => panic!("{v:?}") };
+                let from = match &f[0] {
+                    Value::Name(s) => s.clone(),
+                    v => panic!("{v:?}"),
+                };
+                let to = match &f[1] {
+                    Value::Name(s) => s.clone(),
+                    v => panic!("{v:?}"),
+                };
                 (from, to)
             })
             .collect();
@@ -2227,7 +2297,10 @@ mod tests {
         let mut got: Vec<i64> = interpreter
             .store()
             .scan("q")?
-            .map(|f| match &f[0] { Value::Number(n) => *n, v => panic!("{v:?}") })
+            .map(|f| match &f[0] {
+                Value::Number(n) => *n,
+                v => panic!("{v:?}"),
+            })
             .collect();
         got.sort();
         assert_eq!(got, vec![11, 12, 13]);
@@ -2249,7 +2322,10 @@ mod tests {
         let got: Vec<i64> = interpreter
             .store()
             .scan("only_two")?
-            .map(|f| match &f[0] { Value::Number(n) => *n, v => panic!("{v:?}") })
+            .map(|f| match &f[0] {
+                Value::Number(n) => *n,
+                v => panic!("{v:?}"),
+            })
             .collect();
         assert_eq!(got, vec![2]);
         Ok(())
@@ -2277,7 +2353,10 @@ mod tests {
 
         let mut values: Vec<String> = facts
             .iter()
-            .map(|f| match &f[0] { Value::Name(s) => s.clone(), v => panic!("{v:?}") })
+            .map(|f| match &f[0] {
+                Value::Name(s) => s.clone(),
+                v => panic!("{v:?}"),
+            })
             .collect();
         values.sort();
         assert_eq!(values, vec!["/b", "/c"]);

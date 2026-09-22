@@ -124,7 +124,11 @@ fn test_fingerprint_is_some() -> Result<()> {
 #[test]
 fn test_range_predicate_prunes_one_row_group() -> Result<()> {
     let (_dir, source) = setup()?;
-    let preds = vec![ColumnPredicate::new(1, PredicateOp::Gt, Value::Number(1000))];
+    let preds = vec![ColumnPredicate::new(
+        1,
+        PredicateOp::Gt,
+        Value::Number(1000),
+    )];
     let rows = source.scan_with_predicates("orders", &preds)?;
     assert_eq!(rows.len(), 1, "expected exactly 1 row > 1000");
     assert_eq!(rows[0][0], Value::Number(4));
@@ -174,7 +178,11 @@ fn test_string_equality_prunes_one_row_group() -> Result<()> {
 #[test]
 fn test_predicate_prunes_all_row_groups() -> Result<()> {
     let (_dir, source) = setup()?;
-    let preds = vec![ColumnPredicate::new(1, PredicateOp::Gt, Value::Number(999_999))];
+    let preds = vec![ColumnPredicate::new(
+        1,
+        PredicateOp::Gt,
+        Value::Number(999_999),
+    )];
     let rows = source.scan_with_predicates("orders", &preds)?;
     assert!(rows.is_empty(), "expected 0 rows");
     Ok(())
@@ -224,7 +232,11 @@ fn test_directory_of_files() -> Result<()> {
     assert_eq!(rows.len(), 4, "union of both files should be 4 rows");
 
     // Predicate pushdown still works across files.
-    let preds = vec![ColumnPredicate::new(1, PredicateOp::Gt, Value::Number(1000))];
+    let preds = vec![ColumnPredicate::new(
+        1,
+        PredicateOp::Gt,
+        Value::Number(1000),
+    )];
     let rows = source.scan_with_predicates("orders", &preds)?;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0][1], Value::Number(3000));

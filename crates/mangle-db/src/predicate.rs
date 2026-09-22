@@ -38,10 +38,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use rustc_hash::FxHashSet;
 use mangle_common::Value;
-use mangle_ir::physical::{CmpOp, Condition, DataSource, Op, Operand};
 use mangle_ir::Ir;
+use mangle_ir::physical::{CmpOp, Condition, DataSource, Op, Operand};
+use rustc_hash::FxHashSet;
 
 use crate::source::{ColumnPredicate, PredicateOp};
 
@@ -52,7 +52,11 @@ use crate::source::{ColumnPredicate, PredicateOp};
 ///
 /// Only extracts predicates from **immediate** filters on EDB scans — it does
 /// not attempt to push join predicates or predicates from nested iterations.
-pub fn extract_predicates(ir: &Ir, ops: &[Op], edb_relations: &HashSet<String>) -> HashMap<String, Vec<ColumnPredicate>> {
+pub fn extract_predicates(
+    ir: &Ir,
+    ops: &[Op],
+    edb_relations: &HashSet<String>,
+) -> HashMap<String, Vec<ColumnPredicate>> {
     let mut result: HashMap<String, Vec<ColumnPredicate>> = HashMap::new();
     for op in ops {
         extract_from_op(ir, op, edb_relations, &mut result);
@@ -124,21 +128,15 @@ fn extract_from_iterate(
             }
 
             // Build a mapping from variable NameId to column index
-            let var_to_col: HashMap<mangle_ir::NameId, usize> = vars
-                .iter()
-                .enumerate()
-                .map(|(i, v)| (*v, i))
-                .collect();
+            let var_to_col: HashMap<mangle_ir::NameId, usize> =
+                vars.iter().enumerate().map(|(i, v)| (*v, i)).collect();
 
             // Collect immediate filters on this scan's variables
             let mut predicates = Vec::new();
             collect_filters(ir, body, &var_to_col, &mut predicates);
 
             if !predicates.is_empty() {
-                result
-                    .entry(rel_name)
-                    .or_default()
-                    .extend(predicates);
+                result.entry(rel_name).or_default().extend(predicates);
             }
         }
         DataSource::ScanDelta { relation, vars } => {
@@ -293,9 +291,9 @@ fn cmp_to_pred_op(op: CmpOp) -> PredicateOp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mangle_analysis::Planner;
     use mangle_ast::Arena;
     use mangle_driver::compile;
-    use mangle_analysis::Planner;
     use mangle_ir::Inst;
     use std::collections::HashSet;
 
@@ -373,10 +371,7 @@ mod tests {
     fn test_extract_equality_constant() {
         // Rule: q(X) :- p(X, "hello").
         // The constant "hello" on column 1 should be extracted.
-        let preds = extract(
-            r#"q(X) :- p(X, "hello")."#,
-            &["p"],
-        );
+        let preds = extract(r#"q(X) :- p(X, "hello")."#, &["p"]);
         let p_preds = preds.get("p").unwrap();
         assert_eq!(p_preds.len(), 1);
         assert_eq!(p_preds[0].col_idx, 1);
@@ -388,14 +383,21 @@ mod tests {
     fn test_extract_comparison_predicate() {
         // Rule: q(X) :- p(X, Y), Y > 100.
         // The comparison Y > 100 on column 1 should be extracted.
-        let preds = extract(
-            r#"q(X) :- p(X, Y), Y > 100."#,
-            &["p"],
-        );
+        let preds = extract(r#"q(X) :- p(X, Y), Y > 100."#, &["p"]);
         let p_preds = preds.get("p").unwrap();
-        assert!(p_preds.len() >= 1, "expected at least 1 predicate, got {:?}", p_preds);
-        let gt_pred = p_preds.iter().find(|p| p.op == PredicateOp::Gt && p.col_idx == 1);
-        assert!(gt_pred.is_some(), "expected Gt predicate on col 1, got {:?}", p_preds);
+        assert!(
+            p_preds.len() >= 1,
+            "expected at least 1 predicate, got {:?}",
+            p_preds
+        );
+        let gt_pred = p_preds
+            .iter()
+            .find(|p| p.op == PredicateOp::Gt && p.col_idx == 1);
+        assert!(
+            gt_pred.is_some(),
+            "expected Gt predicate on col 1, got {:?}",
+            p_preds
+        );
         let gt_pred = gt_pred.unwrap();
         assert_eq!(gt_pred.value, Value::Number(100));
     }
@@ -409,16 +411,22 @@ mod tests {
         // not be a direct child of the Iterate depending on how the planner
         // structures the plan. We verify that at minimum the /region
         // equality is extracted.
-        let preds = extract(
-            r#"q(X) :- p(X, Y, /region, "US"), Y > 1000."#,
-            &["p"],
-        );
+        let preds = extract(r#"q(X) :- p(X, Y, /region, "US"), Y > 1000."#, &["p"]);
         let p_preds = preds.get("p").unwrap();
-        assert!(!p_preds.is_empty(), "expected at least 1 predicate, got none");
+        assert!(
+            !p_preds.is_empty(),
+            "expected at least 1 predicate, got none"
+        );
 
         // The /region name constant should always be extracted (as IndexLookup)
-        let region_pred = p_preds.iter().find(|p| p.col_idx == 2 && p.op == PredicateOp::Eq);
-        assert!(region_pred.is_some(), "expected Eq predicate on col 2 for /region, got {:?}", p_preds);
+        let region_pred = p_preds
+            .iter()
+            .find(|p| p.col_idx == 2 && p.op == PredicateOp::Eq);
+        assert!(
+            region_pred.is_some(),
+            "expected Eq predicate on col 2 for /region, got {:?}",
+            p_preds
+        );
     }
 
     #[test]
@@ -427,7 +435,7 @@ mod tests {
         // extracted for it since it's not a pure EDB source.
         let preds = extract(
             r#"p(1). q(X) :- p(X)."#,
-            &[],  // no EDB sources
+            &[], // no EDB sources
         );
         assert!(preds.is_empty());
     }
@@ -436,12 +444,14 @@ mod tests {
     fn test_extract_no_predicate_without_constant() {
         // Rule: q(X, Y) :- p(X, Y).
         // No predicates to push down — both are variables.
-        let preds = extract(
-            r#"q(X, Y) :- p(X, Y)."#,
-            &["p"],
-        );
+        let preds = extract(r#"q(X, Y) :- p(X, Y)."#, &["p"]);
         // May or may not have entries, but no predicates
         let p_preds = preds.get("p").map(|v| v.as_slice()).unwrap_or(&[]);
-        assert_eq!(p_preds.len(), 0, "expected no predicates, got {:?}", p_preds);
+        assert_eq!(
+            p_preds.len(),
+            0,
+            "expected no predicates, got {:?}",
+            p_preds
+        );
     }
 }

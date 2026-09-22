@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use rustc_hash::{FxHashMap, FxHashSet};
 use mangle_ast as ast;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 /// Rewrites a unit by prefixing local predicates with the package name.
 pub fn rewrite_unit<'a>(arena: &'a ast::Arena, unit: &'a ast::Unit<'a>) -> ast::Unit<'a> {
@@ -209,7 +209,11 @@ impl<'a> Renamer<'a> {
                     premises.push(&*self.arena.alloc(ast::Term::NegAtom(self.rewrite_atom(a)?)));
                 }
                 ast::Term::TemporalAtom(a, interval) => {
-                    premises.push(&*self.arena.alloc(ast::Term::TemporalAtom(self.rewrite_atom(a)?, *interval)));
+                    premises.push(
+                        &*self
+                            .arena
+                            .alloc(ast::Term::TemporalAtom(self.rewrite_atom(a)?, *interval)),
+                    );
                 }
                 _ => premises.push(premise),
             }

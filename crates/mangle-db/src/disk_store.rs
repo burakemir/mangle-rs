@@ -689,7 +689,11 @@ mod tests {
         // Float PartialEq on Value compares by bits, so NaN payload must match.
         assert_eq!(out, t);
         if let (Value::Float(a), Value::Float(b)) = (&out[4], &t[4]) {
-            assert_eq!(a.to_bits(), b.to_bits(), "NaN payload must roundtrip bit-exact");
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "NaN payload must roundtrip bit-exact"
+            );
         } else {
             panic!("expected Float at index 4");
         }
@@ -739,7 +743,10 @@ mod tests {
     #[test]
     fn test_tuple_roundtrip_nested_compound() {
         let inner = Value::Compound(CompoundKind::List, vec![Value::Number(1)]);
-        let t = vec![Value::Compound(CompoundKind::List, vec![inner.clone(), inner])];
+        let t = vec![Value::Compound(
+            CompoundKind::List,
+            vec![inner.clone(), inner],
+        )];
         assert_eq!(roundtrip(t.clone()), t);
     }
 
@@ -1052,19 +1059,19 @@ mod tests {
         store.merge_deltas();
 
         let in_all: Vec<_> = store.scan_index("r", 0, &Value::Number(1))?.collect();
-        assert_eq!(in_all.len(), 1, "stable row must be reachable via scan_index");
+        assert_eq!(
+            in_all.len(),
+            1,
+            "stable row must be reachable via scan_index"
+        );
 
-        let in_delta_only: Vec<_> = store
-            .scan_delta_index("r", 0, &Value::Number(1))?
-            .collect();
+        let in_delta_only: Vec<_> = store.scan_delta_index("r", 0, &Value::Number(1))?.collect();
         assert!(
             in_delta_only.is_empty(),
             "stable row must not surface in scan_delta_index"
         );
 
-        let delta_row: Vec<_> = store
-            .scan_delta_index("r", 0, &Value::Number(2))?
-            .collect();
+        let delta_row: Vec<_> = store.scan_delta_index("r", 0, &Value::Number(2))?.collect();
         assert_eq!(delta_row.len(), 1);
         Ok(())
     }
@@ -1093,10 +1100,7 @@ mod tests {
         );
 
         let still_there: Vec<_> = store.scan_index("r", 1, &Value::Number(20))?.collect();
-        assert_eq!(
-            still_there,
-            vec![vec![Value::Number(1), Value::Number(20)]]
-        );
+        assert_eq!(still_there, vec![vec![Value::Number(1), Value::Number(20)]]);
         Ok(())
     }
 
@@ -1109,10 +1113,26 @@ mod tests {
 
         // Three-column relation with deliberate value overlap across columns.
         let tuples = vec![
-            vec![Value::Number(1), Value::String("a".into()), Value::Number(7)],
-            vec![Value::Number(2), Value::String("a".into()), Value::Number(7)],
-            vec![Value::Number(2), Value::String("b".into()), Value::Number(8)],
-            vec![Value::Number(3), Value::String("b".into()), Value::Number(7)],
+            vec![
+                Value::Number(1),
+                Value::String("a".into()),
+                Value::Number(7),
+            ],
+            vec![
+                Value::Number(2),
+                Value::String("a".into()),
+                Value::Number(7),
+            ],
+            vec![
+                Value::Number(2),
+                Value::String("b".into()),
+                Value::Number(8),
+            ],
+            vec![
+                Value::Number(3),
+                Value::String("b".into()),
+                Value::Number(7),
+            ],
         ];
         for t in &tuples {
             store.insert("t", t.clone())?;
@@ -1120,7 +1140,11 @@ mod tests {
         store.merge_deltas();
         store.insert(
             "t",
-            vec![Value::Number(1), Value::String("b".into()), Value::Number(9)],
+            vec![
+                Value::Number(1),
+                Value::String("b".into()),
+                Value::Number(9),
+            ],
         )?;
         store.merge_deltas();
 

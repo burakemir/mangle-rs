@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use anyhow::{Result, anyhow};
-use rustc_hash::FxHashMap;
 use mangle_ir::{Inst, InstId, Ir, NameId};
+use rustc_hash::FxHashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {

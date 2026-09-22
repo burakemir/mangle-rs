@@ -188,15 +188,37 @@ impl Host for CsvHost {
     fn val_ge(&mut self, _a: HostVal, _b: HostVal) -> i32 {
         0
     }
-    fn str_concat(&mut self, _a: HostVal, _b: HostVal) -> HostVal { HostVal(0) }
-    fn str_replace(&mut self, _s: HostVal, _old: HostVal, _new: HostVal, _count: HostVal) -> HostVal { HostVal(0) }
-    fn val_to_string(&mut self, _val: HostVal) -> HostVal { HostVal(0) }
+    fn str_concat(&mut self, _a: HostVal, _b: HostVal) -> HostVal {
+        HostVal(0)
+    }
+    fn str_replace(
+        &mut self,
+        _s: HostVal,
+        _old: HostVal,
+        _new: HostVal,
+        _count: HostVal,
+    ) -> HostVal {
+        HostVal(0)
+    }
+    fn val_to_string(&mut self, _val: HostVal) -> HostVal {
+        HostVal(0)
+    }
     fn compound_begin(&mut self, _kind: i32) {}
     fn compound_push(&mut self, _val: HostVal) {}
-    fn compound_end(&mut self) -> HostVal { HostVal(0) }
-    fn compound_get(&mut self, _compound: HostVal, _key: HostVal) -> HostVal { HostVal(0) }
-    fn compound_len(&mut self, _compound: HostVal) -> HostVal { HostVal(0) }
-    fn pair_first(&mut self, _compound: HostVal) -> HostVal { HostVal(0) }
-    fn pair_second(&mut self, _compound: HostVal) -> HostVal { HostVal(0) }
+    fn compound_end(&mut self) -> HostVal {
+        HostVal(0)
+    }
+    fn compound_get(&mut self, _compound: HostVal, _key: HostVal) -> HostVal {
+        HostVal(0)
+    }
+    fn compound_len(&mut self, _compound: HostVal) -> HostVal {
+        HostVal(0)
+    }
+    fn pair_first(&mut self, _compound: HostVal) -> HostVal {
+        HostVal(0)
+    }
+    fn pair_second(&mut self, _compound: HostVal) -> HostVal {
+        HostVal(0)
+    }
     fn debuglog(&mut self, _val: HostVal) {}
 }

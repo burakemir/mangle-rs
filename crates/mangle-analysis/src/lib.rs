@@ -41,8 +41,8 @@ use mangle_ast as ast;
 mod type_check;
 pub use type_check::TypeChecker;
 
-pub mod type_expr;
 pub mod name_trie;
+pub mod type_expr;
 
 mod bounds_check;
 pub use bounds_check::BoundsChecker;

@@ -20,12 +20,12 @@ pub enum Token {
     Name { name: String },      // /foo/bar
     DotIdent { name: String },  // used for type syntax .List, name does not include `.`
     Ident { name: String },     // x
-    Int { decoded: i64 },           // 123
-    Float { decoded: f64 },         // 1.23e45
-    String { decoded: String },     // "foo" or 'foo' or '''foo''' or r'foo' or r"foo"
-    Bytes { decoded: Vec<u8> },     // b"foo", etc
-    Timestamp { nanos: i64 },       // 2024-01-15T10:30:00Z
-    Duration { nanos: i64 },        // 100s, 24h, 500ms
+    Int { decoded: i64 },       // 123
+    Float { decoded: f64 },     // 1.23e45
+    String { decoded: String }, // "foo" or 'foo' or '''foo''' or r'foo' or r"foo"
+    Bytes { decoded: Vec<u8> }, // b"foo", etc
+    Timestamp { nanos: i64 },   // 2024-01-15T10:30:00Z
+    Duration { nanos: i64 },    // 100s, 24h, 500ms
 
     Semi,                // ;
     Package,             // Package

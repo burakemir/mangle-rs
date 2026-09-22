@@ -333,9 +333,7 @@ impl<'a, B: Backend> Codegen<'a, B> {
         // T3: (i32) -> ()
         types.ty().function(vec![ValType::I32], vec![]);
         // T4: (externref) -> ()
-        types
-            .ty()
-            .function(vec![ValType::EXTERNREF], vec![]);
+        types.ty().function(vec![ValType::EXTERNREF], vec![]);
         // T5: () -> i32
         types.ty().function(vec![], vec![ValType::I32]);
         // T6: (i32, i32, externref) -> i32
@@ -381,11 +379,11 @@ impl<'a, B: Backend> Codegen<'a, B> {
             vec![ValType::EXTERNREF],
         );
         // T14: () -> externref
+        types.ty().function(vec![], vec![ValType::EXTERNREF]);
+        // T15: (i32, i32) -> () — hash_join_commit_build signature
         types
             .ty()
-            .function(vec![], vec![ValType::EXTERNREF]);
-        // T15: (i32, i32) -> () — hash_join_commit_build signature
-        types.ty().function(vec![ValType::I32, ValType::I32], vec![]);
+            .function(vec![ValType::I32, ValType::I32], vec![]);
         module.section(&types);
 
         // 2. Imports
@@ -395,13 +393,13 @@ impl<'a, B: Backend> Codegen<'a, B> {
             imports.import("env", "scan_next", EntityType::Function(TY_I32_I32));
             imports.import("env", "get_col", EntityType::Function(TY_I32_I32_EXTERNREF));
             imports.import("env", "insert_begin", EntityType::Function(TY_I32_VOID));
-            imports.import("env", "insert_push", EntityType::Function(TY_EXTERNREF_VOID));
-            imports.import("env", "insert_end", EntityType::Function(TY_VOID));
             imports.import(
                 "env",
-                "scan_delta_start",
-                EntityType::Function(TY_I32_I32),
+                "insert_push",
+                EntityType::Function(TY_EXTERNREF_VOID),
             );
+            imports.import("env", "insert_end", EntityType::Function(TY_VOID));
+            imports.import("env", "scan_delta_start", EntityType::Function(TY_I32_I32));
             imports.import("env", "merge_deltas", EntityType::Function(TY_VOID_I32));
             imports.import("env", "debuglog", EntityType::Function(TY_EXTERNREF_VOID));
             imports.import(
@@ -419,26 +417,14 @@ impl<'a, B: Backend> Codegen<'a, B> {
                 "const_number",
                 EntityType::Function(TY_I64_EXTERNREF),
             );
-            imports.import(
-                "env",
-                "const_float",
-                EntityType::Function(TY_I64_EXTERNREF),
-            );
+            imports.import("env", "const_float", EntityType::Function(TY_I64_EXTERNREF));
             imports.import(
                 "env",
                 "const_string",
                 EntityType::Function(TY_I32_EXTERNREF),
             );
-            imports.import(
-                "env",
-                "const_name",
-                EntityType::Function(TY_I32_EXTERNREF),
-            );
-            imports.import(
-                "env",
-                "const_time",
-                EntityType::Function(TY_I64_EXTERNREF),
-            );
+            imports.import("env", "const_name", EntityType::Function(TY_I32_EXTERNREF));
+            imports.import("env", "const_time", EntityType::Function(TY_I64_EXTERNREF));
             imports.import(
                 "env",
                 "const_duration",
@@ -456,21 +442,9 @@ impl<'a, B: Backend> Codegen<'a, B> {
             imports.import("env", "val_gt", EntityType::Function(TY_CMP));
             imports.import("env", "val_ge", EntityType::Function(TY_CMP));
             imports.import("env", "str_concat", EntityType::Function(TY_BINOP));
-            imports.import(
-                "env",
-                "str_replace",
-                EntityType::Function(TY_QUADOP),
-            );
-            imports.import(
-                "env",
-                "val_to_string",
-                EntityType::Function(TY_UNOP),
-            );
-            imports.import(
-                "env",
-                "compound_begin",
-                EntityType::Function(TY_I32_VOID),
-            );
+            imports.import("env", "str_replace", EntityType::Function(TY_QUADOP));
+            imports.import("env", "val_to_string", EntityType::Function(TY_UNOP));
+            imports.import("env", "compound_begin", EntityType::Function(TY_I32_VOID));
             imports.import(
                 "env",
                 "compound_push",
@@ -481,23 +455,11 @@ impl<'a, B: Backend> Codegen<'a, B> {
                 "compound_end",
                 EntityType::Function(TY_VOID_EXTERNREF),
             );
-            imports.import(
-                "env",
-                "compound_get",
-                EntityType::Function(TY_BINOP),
-            );
-            imports.import(
-                "env",
-                "compound_len",
-                EntityType::Function(TY_UNOP),
-            );
+            imports.import("env", "compound_get", EntityType::Function(TY_BINOP));
+            imports.import("env", "compound_len", EntityType::Function(TY_UNOP));
             imports.import("env", "pair_first", EntityType::Function(TY_UNOP));
             imports.import("env", "pair_second", EntityType::Function(TY_UNOP));
-            imports.import(
-                "env",
-                "hash_join_begin",
-                EntityType::Function(TY_I32_VOID),
-            );
+            imports.import("env", "hash_join_begin", EntityType::Function(TY_I32_VOID));
             imports.import(
                 "env",
                 "hash_join_push",
@@ -508,16 +470,8 @@ impl<'a, B: Backend> Codegen<'a, B> {
                 "hash_join_commit_build",
                 EntityType::Function(TY_I32_I32_VOID),
             );
-            imports.import(
-                "env",
-                "hash_join_probe",
-                EntityType::Function(TY_I32_I32),
-            );
-            imports.import(
-                "env",
-                "hash_join_end",
-                EntityType::Function(TY_I32_VOID),
-            );
+            imports.import("env", "hash_join_probe", EntityType::Function(TY_I32_I32));
+            imports.import("env", "hash_join_end", EntityType::Function(TY_I32_VOID));
         }
         module.section(&imports);
 

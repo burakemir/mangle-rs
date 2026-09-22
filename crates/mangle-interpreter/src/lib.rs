@@ -240,7 +240,10 @@ impl MemStore {
             for cells in table {
                 // Defensive: skip if logical column count doesn't match
                 if count_logical_values(cells) != n_cols {
-                    eprintln!("[mangle] coalesce_temporal: skipping malformed cells in '{relation}' (expected {n_cols} logical cols, got {})", count_logical_values(cells));
+                    eprintln!(
+                        "[mangle] coalesce_temporal: skipping malformed cells in '{relation}' (expected {n_cols} logical cols, got {})",
+                        count_logical_values(cells)
+                    );
                     continue;
                 }
                 all_facts.push(unflatten_tuple(cells, n_cols));
@@ -249,7 +252,10 @@ impl MemStore {
         if let Some(table) = self.delta.get(relation) {
             for cells in table {
                 if count_logical_values(cells) != n_cols {
-                    eprintln!("[mangle] coalesce_temporal: skipping malformed cells in delta '{relation}' (expected {n_cols} logical cols, got {})", count_logical_values(cells));
+                    eprintln!(
+                        "[mangle] coalesce_temporal: skipping malformed cells in delta '{relation}' (expected {n_cols} logical cols, got {})",
+                        count_logical_values(cells)
+                    );
                     continue;
                 }
                 all_facts.push(unflatten_tuple(cells, n_cols));
@@ -444,10 +450,7 @@ impl Store for MemStore {
             .stable
             .get(relation)
             .is_some_and(|v| v.contains(&cells))
-            || self
-                .delta
-                .get(relation)
-                .is_some_and(|v| v.contains(&cells))
+            || self.delta.get(relation).is_some_and(|v| v.contains(&cells))
             || self
                 .next_delta
                 .get(relation)
@@ -460,7 +463,10 @@ impl Store for MemStore {
         let existing_arity = self.arity.get(relation).copied();
         match existing_arity {
             Some(reg) if reg != n_cols => {
-                eprintln!("[mangle] ARITY MISMATCH in relation '{relation}': registered arity={reg}, inserting tuple with {n_cols} cols, cells.len()={}. Skipping.", cells.len());
+                eprintln!(
+                    "[mangle] ARITY MISMATCH in relation '{relation}': registered arity={reg}, inserting tuple with {n_cols} cols, cells.len()={}. Skipping.",
+                    cells.len()
+                );
                 return Ok(false);
             }
             None => {
@@ -485,17 +491,14 @@ impl Store for MemStore {
             for (i, cells) in tuples.drain(..).enumerate() {
                 // Defensive: skip tuples where logical arity doesn't match registered arity
                 if count_logical_values(&cells) != n_cols {
-                    eprintln!("[mangle] SKIP: relation '{rel_name}' arity={n_cols} but tuple[{i}] has {} logical cols. Skipping.", count_logical_values(&cells));
+                    eprintln!(
+                        "[mangle] SKIP: relation '{rel_name}' arity={n_cols} but tuple[{i}] has {} logical cols. Skipping.",
+                        count_logical_values(&cells)
+                    );
                     continue;
                 }
                 let row_idx = table.len();
-                index_cells(
-                    &mut self.stable_indexes,
-                    &rel_name,
-                    &cells,
-                    n_cols,
-                    row_idx,
-                );
+                index_cells(&mut self.stable_indexes, &rel_name, &cells, n_cols, row_idx);
                 table.push(cells);
             }
         }
@@ -508,16 +511,13 @@ impl Store for MemStore {
             for (row_idx, cells) in tuples.iter().enumerate() {
                 // Defensive: skip tuples where logical arity doesn't match registered arity
                 if count_logical_values(cells) != n_cols {
-                    eprintln!("[mangle] SKIP: relation '{rel_name}' arity={n_cols} but delta tuple[{row_idx}] has {} logical cols. Skipping.", count_logical_values(cells));
+                    eprintln!(
+                        "[mangle] SKIP: relation '{rel_name}' arity={n_cols} but delta tuple[{row_idx}] has {} logical cols. Skipping.",
+                        count_logical_values(cells)
+                    );
                     continue;
                 }
-                index_cells(
-                    &mut self.delta_indexes,
-                    rel_name,
-                    cells,
-                    n_cols,
-                    row_idx,
-                );
+                index_cells(&mut self.delta_indexes, rel_name, cells, n_cols, row_idx);
             }
         }
     }
@@ -540,15 +540,15 @@ impl Store for MemStore {
         };
 
         // Also remove from delta and next_delta
-        if let Some(table) = self.delta.get_mut(relation) {
-            if let Some(pos) = table.iter().position(|t| *t == cells) {
-                table.swap_remove(pos);
-            }
+        if let Some(table) = self.delta.get_mut(relation)
+            && let Some(pos) = table.iter().position(|t| *t == cells)
+        {
+            table.swap_remove(pos);
         }
-        if let Some(table) = self.next_delta.get_mut(relation) {
-            if let Some(pos) = table.iter().position(|t| *t == cells) {
-                table.swap_remove(pos);
-            }
+        if let Some(table) = self.next_delta.get_mut(relation)
+            && let Some(pos) = table.iter().position(|t| *t == cells)
+        {
+            table.swap_remove(pos);
         }
 
         if removed {
@@ -898,8 +898,10 @@ impl<'a> Interpreter<'a> {
             } => {
                 let rel_name = self.ir.resolve_name(*relation);
                 let key_val = self.eval_operand(key, env)?;
-                let tuples: Vec<_> =
-                    self.store.scan_index(rel_name, *col_idx, &key_val)?.collect();
+                let tuples: Vec<_> = self
+                    .store
+                    .scan_index(rel_name, *col_idx, &key_val)?
+                    .collect();
                 Ok((tuples, vars.clone()))
             }
         }
@@ -1403,23 +1405,41 @@ pub fn eval_function(fn_name: &str, vals: &[Value]) -> Result<Value> {
         }
         "fn:string:replace" => {
             if vals.len() != 4 {
-                return Err(anyhow!("fn:string:replace: requires 4 arguments (string, old, new, count)"));
+                return Err(anyhow!(
+                    "fn:string:replace: requires 4 arguments (string, old, new, count)"
+                ));
             }
             let s = match &vals[0] {
                 Value::String(s) => s,
-                v => return Err(anyhow!("fn:string:replace: first arg must be string, got {v}")),
+                v => {
+                    return Err(anyhow!(
+                        "fn:string:replace: first arg must be string, got {v}"
+                    ));
+                }
             };
             let old = match &vals[1] {
                 Value::String(s) => s,
-                v => return Err(anyhow!("fn:string:replace: second arg must be string, got {v}")),
+                v => {
+                    return Err(anyhow!(
+                        "fn:string:replace: second arg must be string, got {v}"
+                    ));
+                }
             };
             let new_s = match &vals[2] {
                 Value::String(s) => s,
-                v => return Err(anyhow!("fn:string:replace: third arg must be string, got {v}")),
+                v => {
+                    return Err(anyhow!(
+                        "fn:string:replace: third arg must be string, got {v}"
+                    ));
+                }
             };
             let count = match &vals[3] {
                 Value::Number(n) => *n,
-                v => return Err(anyhow!("fn:string:replace: fourth arg must be number, got {v}")),
+                v => {
+                    return Err(anyhow!(
+                        "fn:string:replace: fourth arg must be number, got {v}"
+                    ));
+                }
             };
             let result = if count < 0 {
                 s.replace(old.as_str(), new_s.as_str())
@@ -1471,11 +1491,17 @@ pub fn eval_function(fn_name: &str, vals: &[Value]) -> Result<Value> {
         }
         "fn:time:add" => {
             if vals.len() != 2 {
-                return Err(anyhow!("fn:time:add: requires 2 arguments (time, duration)"));
+                return Err(anyhow!(
+                    "fn:time:add: requires 2 arguments (time, duration)"
+                ));
             }
             match (&vals[0], &vals[1]) {
                 (Value::Time(t), Value::Duration(d)) => Ok(Value::Time(t + d)),
-                _ => Err(anyhow!("fn:time:add: expected (time, duration), got ({}, {})", vals[0], vals[1])),
+                _ => Err(anyhow!(
+                    "fn:time:add: expected (time, duration), got ({}, {})",
+                    vals[0],
+                    vals[1]
+                )),
             }
         }
         "fn:time:sub" => {
@@ -1485,7 +1511,9 @@ pub fn eval_function(fn_name: &str, vals: &[Value]) -> Result<Value> {
             match (&vals[0], &vals[1]) {
                 (Value::Time(t1), Value::Time(t2)) => Ok(Value::Duration(t1 - t2)),
                 (Value::Time(t), Value::Duration(d)) => Ok(Value::Time(t - d)),
-                _ => Err(anyhow!("fn:time:sub: expected (time, time) or (time, duration)")),
+                _ => Err(anyhow!(
+                    "fn:time:sub: expected (time, time) or (time, duration)"
+                )),
             }
         }
         "fn:time:year" => time_component(vals, |secs, _| {
@@ -1500,15 +1528,9 @@ pub fn eval_function(fn_name: &str, vals: &[Value]) -> Result<Value> {
             let (_, _, d) = civil_from_epoch_secs(secs);
             d as i64
         }),
-        "fn:time:hour" => time_component(vals, |secs, _| {
-            secs.rem_euclid(86400) / 3600
-        }),
-        "fn:time:minute" => time_component(vals, |secs, _| {
-            (secs.rem_euclid(86400) % 3600) / 60
-        }),
-        "fn:time:second" => time_component(vals, |secs, _| {
-            secs.rem_euclid(86400) % 60
-        }),
+        "fn:time:hour" => time_component(vals, |secs, _| secs.rem_euclid(86400) / 3600),
+        "fn:time:minute" => time_component(vals, |secs, _| (secs.rem_euclid(86400) % 3600) / 60),
+        "fn:time:second" => time_component(vals, |secs, _| secs.rem_euclid(86400) % 60),
         "fn:time:from_unix_nanos" => {
             if vals.len() != 1 {
                 return Err(anyhow!("fn:time:from_unix_nanos: requires 1 argument"));
@@ -1529,7 +1551,9 @@ pub fn eval_function(fn_name: &str, vals: &[Value]) -> Result<Value> {
         }
         "fn:time:trunc" => {
             if vals.len() != 2 {
-                return Err(anyhow!("fn:time:trunc: requires 2 arguments (time, unit_name)"));
+                return Err(anyhow!(
+                    "fn:time:trunc: requires 2 arguments (time, unit_name)"
+                ));
             }
             let t = match &vals[0] {
                 Value::Time(t) => *t,
@@ -1553,7 +1577,9 @@ pub fn eval_function(fn_name: &str, vals: &[Value]) -> Result<Value> {
         }
         "fn:time:format" => {
             if vals.len() != 2 {
-                return Err(anyhow!("fn:time:format: requires 2 arguments (time, precision)"));
+                return Err(anyhow!(
+                    "fn:time:format: requires 2 arguments (time, precision)"
+                ));
             }
             let t = match &vals[0] {
                 Value::Time(t) => *t,
@@ -1567,19 +1593,33 @@ pub fn eval_function(fn_name: &str, vals: &[Value]) -> Result<Value> {
         }
         "fn:time:format_civil" => {
             if vals.len() != 3 {
-                return Err(anyhow!("fn:time:format_civil: requires 3 arguments (time, timezone, precision)"));
+                return Err(anyhow!(
+                    "fn:time:format_civil: requires 3 arguments (time, timezone, precision)"
+                ));
             }
             let t = match &vals[0] {
                 Value::Time(t) => *t,
-                v => return Err(anyhow!("fn:time:format_civil: first arg must be time, got {v}")),
+                v => {
+                    return Err(anyhow!(
+                        "fn:time:format_civil: first arg must be time, got {v}"
+                    ));
+                }
             };
             let tz = match &vals[1] {
                 Value::String(s) => s.as_str(),
-                v => return Err(anyhow!("fn:time:format_civil: second arg must be string, got {v}")),
+                v => {
+                    return Err(anyhow!(
+                        "fn:time:format_civil: second arg must be string, got {v}"
+                    ));
+                }
             };
             let precision = match &vals[2] {
                 Value::String(s) => s.as_str(),
-                v => return Err(anyhow!("fn:time:format_civil: third arg must be name, got {v}")),
+                v => {
+                    return Err(anyhow!(
+                        "fn:time:format_civil: third arg must be name, got {v}"
+                    ));
+                }
             };
             let offset = parse_timezone_offset(tz)?;
             let adjusted = t + offset * 1_000_000_000;
@@ -1600,15 +1640,25 @@ pub fn eval_function(fn_name: &str, vals: &[Value]) -> Result<Value> {
         }
         "fn:time:parse_civil" => {
             if vals.len() != 2 {
-                return Err(anyhow!("fn:time:parse_civil: requires 2 arguments (string, timezone)"));
+                return Err(anyhow!(
+                    "fn:time:parse_civil: requires 2 arguments (string, timezone)"
+                ));
             }
             let s = match &vals[0] {
                 Value::String(s) => s.as_str(),
-                v => return Err(anyhow!("fn:time:parse_civil: first arg must be string, got {v}")),
+                v => {
+                    return Err(anyhow!(
+                        "fn:time:parse_civil: first arg must be string, got {v}"
+                    ));
+                }
             };
             let tz = match &vals[1] {
                 Value::String(s) => s.as_str(),
-                v => return Err(anyhow!("fn:time:parse_civil: second arg must be string, got {v}")),
+                v => {
+                    return Err(anyhow!(
+                        "fn:time:parse_civil: second arg must be string, got {v}"
+                    ));
+                }
             };
             let offset = parse_timezone_offset(tz)?;
             let nanos = parse_civil_datetime_to_nanos(s)?;
@@ -1633,12 +1683,20 @@ pub fn eval_function(fn_name: &str, vals: &[Value]) -> Result<Value> {
             match (&vals[0], &vals[1]) {
                 (Value::Duration(d), Value::Number(n)) => Ok(Value::Duration(d * n)),
                 (Value::Number(n), Value::Duration(d)) => Ok(Value::Duration(n * d)),
-                _ => Err(anyhow!("fn:duration:mult: expected (duration, number) or (number, duration)")),
+                _ => Err(anyhow!(
+                    "fn:duration:mult: expected (duration, number) or (number, duration)"
+                )),
             }
         }
-        "fn:duration:hours" => duration_component_float(vals, |nanos| nanos as f64 / (60.0 * 60.0 * 1_000_000_000.0)),
-        "fn:duration:minutes" => duration_component_float(vals, |nanos| nanos as f64 / (60.0 * 1_000_000_000.0)),
-        "fn:duration:seconds" => duration_component_float(vals, |nanos| nanos as f64 / 1_000_000_000.0),
+        "fn:duration:hours" => {
+            duration_component_float(vals, |nanos| nanos as f64 / (60.0 * 60.0 * 1_000_000_000.0))
+        }
+        "fn:duration:minutes" => {
+            duration_component_float(vals, |nanos| nanos as f64 / (60.0 * 1_000_000_000.0))
+        }
+        "fn:duration:seconds" => {
+            duration_component_float(vals, |nanos| nanos as f64 / 1_000_000_000.0)
+        }
         "fn:duration:nanos" => duration_component_int(vals, |nanos| nanos),
         "fn:duration:from_nanos" => {
             if vals.len() != 1 {
@@ -1675,7 +1733,7 @@ pub fn eval_function(fn_name: &str, vals: &[Value]) -> Result<Value> {
         }
         "fn:struct" => {
             // Args are interleaved: field_name, value, field_name, value, ...
-            if vals.len() % 2 != 0 {
+            if !vals.len().is_multiple_of(2) {
                 return Err(anyhow!(
                     "fn:struct: requires even number of arguments (field, value pairs)"
                 ));
@@ -1684,7 +1742,7 @@ pub fn eval_function(fn_name: &str, vals: &[Value]) -> Result<Value> {
         }
         "fn:map" => {
             // Args are interleaved: key, value, key, value, ...
-            if vals.len() % 2 != 0 {
+            if !vals.len().is_multiple_of(2) {
                 return Err(anyhow!(
                     "fn:map: requires even number of arguments (key, value pairs)"
                 ));
@@ -1700,10 +1758,9 @@ pub fn eval_function(fn_name: &str, vals: &[Value]) -> Result<Value> {
             match (&vals[0], &vals[1]) {
                 (Value::Compound(_, elems), Value::Number(idx)) => {
                     let i = *idx as usize;
-                    elems
-                        .get(i)
-                        .cloned()
-                        .ok_or_else(|| anyhow!("fn:list:get: index {i} out of bounds (len {})", elems.len()))
+                    elems.get(i).cloned().ok_or_else(|| {
+                        anyhow!("fn:list:get: index {i} out of bounds (len {})", elems.len())
+                    })
                 }
                 _ => Err(anyhow!("fn:list:get: expected (compound, number)")),
             }
@@ -1735,8 +1792,10 @@ pub fn eval_function(fn_name: &str, vals: &[Value]) -> Result<Value> {
                 return Err(anyhow!("fn:pair:first: requires 1 argument"));
             }
             match &vals[0] {
-                Value::Compound(_, elems) if elems.len() >= 1 => Ok(elems[0].clone()),
-                _ => Err(anyhow!("fn:pair:first: expected compound with at least 1 element")),
+                Value::Compound(_, elems) if !elems.is_empty() => Ok(elems[0].clone()),
+                _ => Err(anyhow!(
+                    "fn:pair:first: expected compound with at least 1 element"
+                )),
             }
         }
         "fn:pair:second" => {
@@ -1745,7 +1804,9 @@ pub fn eval_function(fn_name: &str, vals: &[Value]) -> Result<Value> {
             }
             match &vals[0] {
                 Value::Compound(_, elems) if elems.len() >= 2 => Ok(elems[1].clone()),
-                _ => Err(anyhow!("fn:pair:second: expected compound with at least 2 elements")),
+                _ => Err(anyhow!(
+                    "fn:pair:second: expected compound with at least 2 elements"
+                )),
             }
         }
         "fn:struct:get" | "fn:map:get" => {
@@ -1838,7 +1899,9 @@ fn duration_component_float(vals: &[Value], extract: impl Fn(i64) -> f64) -> Res
     }
     match &vals[0] {
         Value::Duration(nanos) => Ok(Value::Float(extract(*nanos))),
-        v => Err(anyhow!("duration component function: expected duration, got {v}")),
+        v => Err(anyhow!(
+            "duration component function: expected duration, got {v}"
+        )),
     }
 }
 
@@ -1848,7 +1911,9 @@ fn duration_component_int(vals: &[Value], extract: impl Fn(i64) -> i64) -> Resul
     }
     match &vals[0] {
         Value::Duration(nanos) => Ok(Value::Number(extract(*nanos))),
-        v => Err(anyhow!("duration component function: expected duration, got {v}")),
+        v => Err(anyhow!(
+            "duration component function: expected duration, got {v}"
+        )),
     }
 }
 
@@ -1878,22 +1943,32 @@ fn format_time_with_precision(nanos: i64, precision: &str) -> Result<String> {
         "/day" => Ok(format!("{y:04}-{m:02}-{d:02}")),
         "/hour" => Ok(format!("{y:04}-{m:02}-{d:02}T{hour:02}Z")),
         "/minute" => Ok(format!("{y:04}-{m:02}-{d:02}T{hour:02}:{minute:02}Z")),
-        "/second" => Ok(format!("{y:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}Z")),
+        "/second" => Ok(format!(
+            "{y:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}Z"
+        )),
         "/millisecond" => {
             let ms = sub_nanos / 1_000_000;
-            Ok(format!("{y:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}.{ms:03}Z"))
+            Ok(format!(
+                "{y:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}.{ms:03}Z"
+            ))
         }
         "/microsecond" => {
             let us = sub_nanos / 1_000;
-            Ok(format!("{y:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}.{us:06}Z"))
+            Ok(format!(
+                "{y:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}.{us:06}Z"
+            ))
         }
         "/nanosecond" => {
             if sub_nanos == 0 {
-                Ok(format!("{y:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}Z"))
+                Ok(format!(
+                    "{y:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}Z"
+                ))
             } else {
                 let ns_str = format!("{sub_nanos:09}");
                 let ns_trimmed = ns_str.trim_end_matches('0');
-                Ok(format!("{y:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}.{ns_trimmed}Z"))
+                Ok(format!(
+                    "{y:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}.{ns_trimmed}Z"
+                ))
             }
         }
         _ => Err(anyhow!("unknown time precision: {precision:?}")),
@@ -1912,11 +1987,17 @@ fn parse_timezone_offset(tz: &str) -> Result<i64> {
             if parts.len() != 2 {
                 return Err(anyhow!("invalid timezone offset: {tz:?}"));
             }
-            let hours: i64 = parts[0].parse().map_err(|_| anyhow!("invalid timezone: {tz:?}"))?;
-            let minutes: i64 = parts[1].parse().map_err(|_| anyhow!("invalid timezone: {tz:?}"))?;
+            let hours: i64 = parts[0]
+                .parse()
+                .map_err(|_| anyhow!("invalid timezone: {tz:?}"))?;
+            let minutes: i64 = parts[1]
+                .parse()
+                .map_err(|_| anyhow!("invalid timezone: {tz:?}"))?;
             Ok(sign * (hours * 3600 + minutes * 60))
         }
-        _ => Err(anyhow!("unsupported timezone: {tz:?} (use \"UTC\" or offset like \"+05:30\")")),
+        _ => Err(anyhow!(
+            "unsupported timezone: {tz:?} (use \"UTC\" or offset like \"+05:30\")"
+        )),
     }
 }
 
@@ -1926,9 +2007,15 @@ fn parse_rfc3339_to_nanos(s: &str) -> Result<i64> {
     if s.len() < 10 {
         return Err(anyhow!("fn:time:parse_rfc3339: string too short: {s:?}"));
     }
-    let year: i64 = s[0..4].parse().map_err(|_| anyhow!("invalid year in {s:?}"))?;
-    let month: u32 = s[5..7].parse().map_err(|_| anyhow!("invalid month in {s:?}"))?;
-    let day: u32 = s[8..10].parse().map_err(|_| anyhow!("invalid day in {s:?}"))?;
+    let year: i64 = s[0..4]
+        .parse()
+        .map_err(|_| anyhow!("invalid year in {s:?}"))?;
+    let month: u32 = s[5..7]
+        .parse()
+        .map_err(|_| anyhow!("invalid month in {s:?}"))?;
+    let day: u32 = s[8..10]
+        .parse()
+        .map_err(|_| anyhow!("invalid day in {s:?}"))?;
 
     let (hour, minute, second, frac_nanos) = if s.len() > 10 && s.as_bytes()[10] == b'T' {
         if s.len() < 19 {
@@ -2018,10 +2105,14 @@ fn parse_duration_string(s: &str) -> Result<i64> {
         rest = &rest[unit_len..];
 
         if num_str.contains('.') {
-            let val: f64 = num_str.parse().map_err(|_| anyhow!("fn:duration:parse: invalid number {num_str:?}"))?;
+            let val: f64 = num_str
+                .parse()
+                .map_err(|_| anyhow!("fn:duration:parse: invalid number {num_str:?}"))?;
             total_nanos += (val * unit_nanos as f64) as i64;
         } else {
-            let val: i64 = num_str.parse().map_err(|_| anyhow!("fn:duration:parse: invalid number {num_str:?}"))?;
+            let val: i64 = num_str
+                .parse()
+                .map_err(|_| anyhow!("fn:duration:parse: invalid number {num_str:?}"))?;
             total_nanos += val * unit_nanos;
         }
     }
@@ -2272,7 +2363,11 @@ mod tests {
     #[test]
     fn test_fn_plus_variadic() {
         assert_eq!(
-            eval_function("fn:plus", &[Value::Number(1), Value::Number(2), Value::Number(3)]).unwrap(),
+            eval_function(
+                "fn:plus",
+                &[Value::Number(1), Value::Number(2), Value::Number(3)]
+            )
+            .unwrap(),
             Value::Number(6)
         );
         // Zero args returns 0 (identity)
@@ -2293,7 +2388,11 @@ mod tests {
         );
         // Variadic: 100 - 10 - 20 = 70
         assert_eq!(
-            eval_function("fn:minus", &[Value::Number(100), Value::Number(10), Value::Number(20)]).unwrap(),
+            eval_function(
+                "fn:minus",
+                &[Value::Number(100), Value::Number(10), Value::Number(20)]
+            )
+            .unwrap(),
             Value::Number(70)
         );
         // Zero args is an error
@@ -2303,7 +2402,11 @@ mod tests {
     #[test]
     fn test_fn_mult_variadic() {
         assert_eq!(
-            eval_function("fn:mult", &[Value::Number(2), Value::Number(3), Value::Number(4)]).unwrap(),
+            eval_function(
+                "fn:mult",
+                &[Value::Number(2), Value::Number(3), Value::Number(4)]
+            )
+            .unwrap(),
             Value::Number(24)
         );
         // Zero args returns 1 (identity)
@@ -2350,8 +2453,13 @@ mod tests {
         assert_eq!(
             eval_function(
                 "fn:string:concat",
-                &[Value::String("a".into()), Value::String("b".into()), Value::String("c".into())]
-            ).unwrap(),
+                &[
+                    Value::String("a".into()),
+                    Value::String("b".into()),
+                    Value::String("c".into())
+                ]
+            )
+            .unwrap(),
             Value::String("abc".to_string())
         );
         // Mixed types
@@ -2359,7 +2467,8 @@ mod tests {
             eval_function(
                 "fn:string:concat",
                 &[Value::String("n=".into()), Value::Number(42)]
-            ).unwrap(),
+            )
+            .unwrap(),
             Value::String("n=42".to_string())
         );
     }
@@ -2370,16 +2479,28 @@ mod tests {
         assert_eq!(
             eval_function(
                 "fn:string:replace",
-                &[Value::String("a-b-c".into()), Value::String("-".into()), Value::String("_".into()), Value::Number(-1)]
-            ).unwrap(),
+                &[
+                    Value::String("a-b-c".into()),
+                    Value::String("-".into()),
+                    Value::String("_".into()),
+                    Value::Number(-1)
+                ]
+            )
+            .unwrap(),
             Value::String("a_b_c".to_string())
         );
         // Replace first only (1)
         assert_eq!(
             eval_function(
                 "fn:string:replace",
-                &[Value::String("a-b-c".into()), Value::String("-".into()), Value::String("_".into()), Value::Number(1)]
-            ).unwrap(),
+                &[
+                    Value::String("a-b-c".into()),
+                    Value::String("-".into()),
+                    Value::String("_".into()),
+                    Value::Number(1)
+                ]
+            )
+            .unwrap(),
             Value::String("a_b-c".to_string())
         );
     }
@@ -2419,8 +2540,11 @@ mod tests {
     }
 
     fn datetime_nanos(year: i64, month: u32, day: u32, h: u32, m: u32, s: u32, ns: i64) -> i64 {
-        date_nanos(year, month, day) + (h as i64) * 3_600_000_000_000
-            + (m as i64) * 60_000_000_000 + (s as i64) * 1_000_000_000 + ns
+        date_nanos(year, month, day)
+            + (h as i64) * 3_600_000_000_000
+            + (m as i64) * 60_000_000_000
+            + (s as i64) * 1_000_000_000
+            + ns
     }
 
     /// Go: TestTemporalStore_Coalesce - overlapping intervals merge into one
@@ -2434,16 +2558,42 @@ mod tests {
         let jan20 = date_nanos(2024, 1, 20);
         let jan31 = date_nanos(2024, 1, 31);
 
-        store.add_fact("active", vec![Value::String("/service".into()), Value::Time(jan1), Value::Time(jan15)]);
-        store.add_fact("active", vec![Value::String("/service".into()), Value::Time(jan10), Value::Time(jan25)]);
-        store.add_fact("active", vec![Value::String("/service".into()), Value::Time(jan20), Value::Time(jan31)]);
+        store.add_fact(
+            "active",
+            vec![
+                Value::String("/service".into()),
+                Value::Time(jan1),
+                Value::Time(jan15),
+            ],
+        );
+        store.add_fact(
+            "active",
+            vec![
+                Value::String("/service".into()),
+                Value::Time(jan10),
+                Value::Time(jan25),
+            ],
+        );
+        store.add_fact(
+            "active",
+            vec![
+                Value::String("/service".into()),
+                Value::Time(jan20),
+                Value::Time(jan31),
+            ],
+        );
 
         assert_eq!(store.get_facts("active").len(), 3);
 
         store.coalesce_temporal("active");
 
         let facts = store.get_facts("active");
-        assert_eq!(facts.len(), 1, "after coalesce: expected 1, got {:?}", facts);
+        assert_eq!(
+            facts.len(),
+            1,
+            "after coalesce: expected 1, got {:?}",
+            facts
+        );
         assert_eq!(facts[0][1], Value::Time(jan1), "start should be Jan 1");
         assert_eq!(facts[0][2], Value::Time(jan31), "end should be Jan 31");
     }
@@ -2457,8 +2607,22 @@ mod tests {
         let shift2_start = datetime_nanos(2024, 1, 1, 16, 0, 0, 1); // 1ns after
         let shift2_end = date_nanos(2024, 1, 2);
 
-        store.add_fact("shift", vec![Value::String("/worker".into()), Value::Time(shift1_start), Value::Time(shift1_end)]);
-        store.add_fact("shift", vec![Value::String("/worker".into()), Value::Time(shift2_start), Value::Time(shift2_end)]);
+        store.add_fact(
+            "shift",
+            vec![
+                Value::String("/worker".into()),
+                Value::Time(shift1_start),
+                Value::Time(shift1_end),
+            ],
+        );
+        store.add_fact(
+            "shift",
+            vec![
+                Value::String("/worker".into()),
+                Value::Time(shift2_start),
+                Value::Time(shift2_end),
+            ],
+        );
 
         store.coalesce_temporal("shift");
 
@@ -2477,13 +2641,31 @@ mod tests {
         let jun1 = date_nanos(2024, 6, 1);
         let jun14 = date_nanos(2024, 6, 14);
 
-        store.add_fact("vacation", vec![Value::String("/alice".into()), Value::Time(jan1), Value::Time(jan7)]);
-        store.add_fact("vacation", vec![Value::String("/alice".into()), Value::Time(jun1), Value::Time(jun14)]);
+        store.add_fact(
+            "vacation",
+            vec![
+                Value::String("/alice".into()),
+                Value::Time(jan1),
+                Value::Time(jan7),
+            ],
+        );
+        store.add_fact(
+            "vacation",
+            vec![
+                Value::String("/alice".into()),
+                Value::Time(jun1),
+                Value::Time(jun14),
+            ],
+        );
 
         store.coalesce_temporal("vacation");
 
         let facts = store.get_facts("vacation");
-        assert_eq!(facts.len(), 2, "non-overlapping intervals should stay separate");
+        assert_eq!(
+            facts.len(),
+            2,
+            "non-overlapping intervals should stay separate"
+        );
     }
 
     /// Go: TestTemporalStore_CoalesceMixedGranularity - sub-second precision
@@ -2500,9 +2682,30 @@ mod tests {
         let t3_start = datetime_nanos(2024, 1, 1, 10, 0, 6, 1);
         let t3_end = datetime_nanos(2024, 1, 1, 10, 0, 7, 0);
 
-        store.add_fact("event", vec![Value::String("/sensor".into()), Value::Time(t1_start), Value::Time(t1_end)]);
-        store.add_fact("event", vec![Value::String("/sensor".into()), Value::Time(t2_start), Value::Time(t2_end)]);
-        store.add_fact("event", vec![Value::String("/sensor".into()), Value::Time(t3_start), Value::Time(t3_end)]);
+        store.add_fact(
+            "event",
+            vec![
+                Value::String("/sensor".into()),
+                Value::Time(t1_start),
+                Value::Time(t1_end),
+            ],
+        );
+        store.add_fact(
+            "event",
+            vec![
+                Value::String("/sensor".into()),
+                Value::Time(t2_start),
+                Value::Time(t2_end),
+            ],
+        );
+        store.add_fact(
+            "event",
+            vec![
+                Value::String("/sensor".into()),
+                Value::Time(t3_start),
+                Value::Time(t3_end),
+            ],
+        );
 
         store.coalesce_temporal("event");
 
@@ -2522,16 +2725,42 @@ mod tests {
         let jan15 = date_nanos(2024, 1, 15);
 
         // Alice: two overlapping intervals
-        store.add_fact("employed", vec![Value::String("/alice".into()), Value::Time(jan1), Value::Time(jan10)]);
-        store.add_fact("employed", vec![Value::String("/alice".into()), Value::Time(jan5), Value::Time(jan15)]);
+        store.add_fact(
+            "employed",
+            vec![
+                Value::String("/alice".into()),
+                Value::Time(jan1),
+                Value::Time(jan10),
+            ],
+        );
+        store.add_fact(
+            "employed",
+            vec![
+                Value::String("/alice".into()),
+                Value::Time(jan5),
+                Value::Time(jan15),
+            ],
+        );
         // Bob: one interval
-        store.add_fact("employed", vec![Value::String("/bob".into()), Value::Time(jan1), Value::Time(jan15)]);
+        store.add_fact(
+            "employed",
+            vec![
+                Value::String("/bob".into()),
+                Value::Time(jan1),
+                Value::Time(jan15),
+            ],
+        );
 
         store.coalesce_temporal("employed");
 
         let facts = store.get_facts("employed");
         // Alice's 2 intervals merge to 1; Bob stays as 1
-        assert_eq!(facts.len(), 2, "expected 2 facts after coalesce, got {:?}", facts);
+        assert_eq!(
+            facts.len(),
+            2,
+            "expected 2 facts after coalesce, got {:?}",
+            facts
+        );
     }
 
     // --- HashJoin tests ---------------------------------------------------
@@ -2628,8 +2857,16 @@ mod tests {
     }
 
     /// Build an IR with the names needed for the two-way-join tests.
-    fn setup_two_way_ir()
-    -> (mangle_ir::Ir, NameId, NameId, NameId, NameId, NameId, NameId, NameId) {
+    fn setup_two_way_ir() -> (
+        mangle_ir::Ir,
+        NameId,
+        NameId,
+        NameId,
+        NameId,
+        NameId,
+        NameId,
+        NameId,
+    ) {
         let mut ir = mangle_ir::Ir::new();
         let a = ir.intern_name("a");
         let b = ir.intern_name("b");
@@ -2724,10 +2961,7 @@ mod tests {
             ("b", vec![Value::String("hello".into()), Value::Number(100)]),
             ("b", vec![Value::Name("/foo".into()), Value::Number(200)]),
             // An entry that must NOT match — Name vs String are distinct.
-            (
-                "b",
-                vec![Value::String("/foo".into()), Value::Number(999)],
-            ),
+            ("b", vec![Value::String("/foo".into()), Value::Number(999)]),
         ];
         let op = hash_join_two_way(a, b, result, x, k, y);
         let out = sorted(run_plan(&ir, &facts, &op));

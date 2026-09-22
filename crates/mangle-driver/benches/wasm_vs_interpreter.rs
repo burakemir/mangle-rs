@@ -161,9 +161,18 @@ impl Host for WasmMemHost {
     fn insert_end(&mut self) {
         let tuple = std::mem::take(&mut self.pending_tuple);
         let rel_id = self.pending_rel;
-        if self.stable.get(&rel_id).is_some_and(|v| self.tuple_exists_in(&tuple, v))
-            || self.delta.get(&rel_id).is_some_and(|v| self.tuple_exists_in(&tuple, v))
-            || self.next_delta.get(&rel_id).is_some_and(|v| self.tuple_exists_in(&tuple, v))
+        if self
+            .stable
+            .get(&rel_id)
+            .is_some_and(|v| self.tuple_exists_in(&tuple, v))
+            || self
+                .delta
+                .get(&rel_id)
+                .is_some_and(|v| self.tuple_exists_in(&tuple, v))
+            || self
+                .next_delta
+                .get(&rel_id)
+                .is_some_and(|v| self.tuple_exists_in(&tuple, v))
         {
             return;
         }
@@ -177,7 +186,9 @@ impl Host for WasmMemHost {
         self.delta = std::mem::take(&mut self.next_delta);
         changed
     }
-    fn scan_aggregate_start(&mut self, _rel_id: i32, _desc: Vec<i32>) -> i32 { 0 }
+    fn scan_aggregate_start(&mut self, _rel_id: i32, _desc: Vec<i32>) -> i32 {
+        0
+    }
     fn scan_index_start(&mut self, rel_id: i32, col_idx: i32, val: HostVal) -> i32 {
         let target_val = self.get_val(val).clone();
         let mut filtered = Vec::new();
@@ -197,58 +208,112 @@ impl Host for WasmMemHost {
         self.iters.insert(id, (temp_rel_id, 0, false));
         id
     }
-    fn const_number(&mut self, n: i64) -> HostVal { self.alloc(Val::Number(n)) }
-    fn const_float(&mut self, _bits: i64) -> HostVal { HostVal(0) }
-    fn const_string(&mut self, _id: i32) -> HostVal { HostVal(0) }
-    fn const_name(&mut self, _id: i32) -> HostVal { HostVal(0) }
-    fn const_time(&mut self, _nanos: i64) -> HostVal { HostVal(0) }
-    fn const_duration(&mut self, _nanos: i64) -> HostVal { HostVal(0) }
+    fn const_number(&mut self, n: i64) -> HostVal {
+        self.alloc(Val::Number(n))
+    }
+    fn const_float(&mut self, _bits: i64) -> HostVal {
+        HostVal(0)
+    }
+    fn const_string(&mut self, _id: i32) -> HostVal {
+        HostVal(0)
+    }
+    fn const_name(&mut self, _id: i32) -> HostVal {
+        HostVal(0)
+    }
+    fn const_time(&mut self, _nanos: i64) -> HostVal {
+        HostVal(0)
+    }
+    fn const_duration(&mut self, _nanos: i64) -> HostVal {
+        HostVal(0)
+    }
     fn val_add(&mut self, a: HostVal, b: HostVal) -> HostVal {
         match (self.get_val(a), self.get_val(b)) {
-            (Val::Number(a), Val::Number(b)) => { let r = Val::Number(a + b); self.alloc(r) }
+            (Val::Number(a), Val::Number(b)) => {
+                let r = Val::Number(a + b);
+                self.alloc(r)
+            }
         }
     }
     fn val_sub(&mut self, a: HostVal, b: HostVal) -> HostVal {
         match (self.get_val(a), self.get_val(b)) {
-            (Val::Number(a), Val::Number(b)) => { let r = Val::Number(a - b); self.alloc(r) }
+            (Val::Number(a), Val::Number(b)) => {
+                let r = Val::Number(a - b);
+                self.alloc(r)
+            }
         }
     }
     fn val_mul(&mut self, a: HostVal, b: HostVal) -> HostVal {
         match (self.get_val(a), self.get_val(b)) {
-            (Val::Number(a), Val::Number(b)) => { let r = Val::Number(a * b); self.alloc(r) }
+            (Val::Number(a), Val::Number(b)) => {
+                let r = Val::Number(a * b);
+                self.alloc(r)
+            }
         }
     }
     fn val_div(&mut self, a: HostVal, b: HostVal) -> HostVal {
         match (self.get_val(a), self.get_val(b)) {
-            (Val::Number(a), Val::Number(b)) if *b != 0 => { let r = Val::Number(a / b); self.alloc(r) }
+            (Val::Number(a), Val::Number(b)) if *b != 0 => {
+                let r = Val::Number(a / b);
+                self.alloc(r)
+            }
             _ => HostVal(0),
         }
     }
-    fn val_sqrt(&mut self, _a: HostVal) -> HostVal { HostVal(0) }
-    fn val_eq(&mut self, a: HostVal, b: HostVal) -> i32 { (self.get_val(a) == self.get_val(b)) as i32 }
-    fn val_neq(&mut self, a: HostVal, b: HostVal) -> i32 { (self.get_val(a) != self.get_val(b)) as i32 }
+    fn val_sqrt(&mut self, _a: HostVal) -> HostVal {
+        HostVal(0)
+    }
+    fn val_eq(&mut self, a: HostVal, b: HostVal) -> i32 {
+        (self.get_val(a) == self.get_val(b)) as i32
+    }
+    fn val_neq(&mut self, a: HostVal, b: HostVal) -> i32 {
+        (self.get_val(a) != self.get_val(b)) as i32
+    }
     fn val_lt(&mut self, a: HostVal, b: HostVal) -> i32 {
-        match (self.get_val(a), self.get_val(b)) { (Val::Number(a), Val::Number(b)) => (a < b) as i32 }
+        match (self.get_val(a), self.get_val(b)) {
+            (Val::Number(a), Val::Number(b)) => (a < b) as i32,
+        }
     }
     fn val_le(&mut self, a: HostVal, b: HostVal) -> i32 {
-        match (self.get_val(a), self.get_val(b)) { (Val::Number(a), Val::Number(b)) => (a <= b) as i32 }
+        match (self.get_val(a), self.get_val(b)) {
+            (Val::Number(a), Val::Number(b)) => (a <= b) as i32,
+        }
     }
     fn val_gt(&mut self, a: HostVal, b: HostVal) -> i32 {
-        match (self.get_val(a), self.get_val(b)) { (Val::Number(a), Val::Number(b)) => (a > b) as i32 }
+        match (self.get_val(a), self.get_val(b)) {
+            (Val::Number(a), Val::Number(b)) => (a > b) as i32,
+        }
     }
     fn val_ge(&mut self, a: HostVal, b: HostVal) -> i32 {
-        match (self.get_val(a), self.get_val(b)) { (Val::Number(a), Val::Number(b)) => (a >= b) as i32 }
+        match (self.get_val(a), self.get_val(b)) {
+            (Val::Number(a), Val::Number(b)) => (a >= b) as i32,
+        }
     }
-    fn str_concat(&mut self, _a: HostVal, _b: HostVal) -> HostVal { HostVal(0) }
-    fn str_replace(&mut self, _s: HostVal, _o: HostVal, _n: HostVal, _c: HostVal) -> HostVal { HostVal(0) }
-    fn val_to_string(&mut self, _val: HostVal) -> HostVal { HostVal(0) }
+    fn str_concat(&mut self, _a: HostVal, _b: HostVal) -> HostVal {
+        HostVal(0)
+    }
+    fn str_replace(&mut self, _s: HostVal, _o: HostVal, _n: HostVal, _c: HostVal) -> HostVal {
+        HostVal(0)
+    }
+    fn val_to_string(&mut self, _val: HostVal) -> HostVal {
+        HostVal(0)
+    }
     fn compound_begin(&mut self, _kind: i32) {}
     fn compound_push(&mut self, _val: HostVal) {}
-    fn compound_end(&mut self) -> HostVal { HostVal(0) }
-    fn compound_get(&mut self, _c: HostVal, _k: HostVal) -> HostVal { HostVal(0) }
-    fn compound_len(&mut self, _c: HostVal) -> HostVal { HostVal(0) }
-    fn pair_first(&mut self, _c: HostVal) -> HostVal { HostVal(0) }
-    fn pair_second(&mut self, _c: HostVal) -> HostVal { HostVal(0) }
+    fn compound_end(&mut self) -> HostVal {
+        HostVal(0)
+    }
+    fn compound_get(&mut self, _c: HostVal, _k: HostVal) -> HostVal {
+        HostVal(0)
+    }
+    fn compound_len(&mut self, _c: HostVal) -> HostVal {
+        HostVal(0)
+    }
+    fn pair_first(&mut self, _c: HostVal) -> HostVal {
+        HostVal(0)
+    }
+    fn pair_second(&mut self, _c: HostVal) -> HostVal {
+        HostVal(0)
+    }
     fn debuglog(&mut self, _val: HostVal) {}
 }
 
@@ -258,44 +323,126 @@ struct SharedHost {
 }
 
 impl Host for SharedHost {
-    fn scan_start(&mut self, rel_id: i32) -> i32 { self.inner.lock().unwrap().scan_start(rel_id) }
-    fn scan_delta_start(&mut self, rel_id: i32) -> i32 { self.inner.lock().unwrap().scan_delta_start(rel_id) }
-    fn scan_next(&mut self, iter_id: i32) -> i32 { self.inner.lock().unwrap().scan_next(iter_id) }
-    fn merge_deltas(&mut self) -> i32 { self.inner.lock().unwrap().merge_deltas() }
-    fn scan_aggregate_start(&mut self, rel_id: i32, desc: Vec<i32>) -> i32 { self.inner.lock().unwrap().scan_aggregate_start(rel_id, desc) }
-    fn scan_index_start(&mut self, rel_id: i32, col_idx: i32, val: HostVal) -> i32 { self.inner.lock().unwrap().scan_index_start(rel_id, col_idx, val) }
-    fn get_col(&mut self, ptr: i32, idx: i32) -> HostVal { self.inner.lock().unwrap().get_col(ptr, idx) }
-    fn insert_begin(&mut self, rel_id: i32) { self.inner.lock().unwrap().insert_begin(rel_id) }
-    fn insert_push(&mut self, val: HostVal) { self.inner.lock().unwrap().insert_push(val) }
-    fn insert_end(&mut self) { self.inner.lock().unwrap().insert_end() }
-    fn const_number(&mut self, n: i64) -> HostVal { self.inner.lock().unwrap().const_number(n) }
-    fn const_float(&mut self, bits: i64) -> HostVal { self.inner.lock().unwrap().const_float(bits) }
-    fn const_string(&mut self, id: i32) -> HostVal { self.inner.lock().unwrap().const_string(id) }
-    fn const_name(&mut self, id: i32) -> HostVal { self.inner.lock().unwrap().const_name(id) }
-    fn const_time(&mut self, nanos: i64) -> HostVal { self.inner.lock().unwrap().const_time(nanos) }
-    fn const_duration(&mut self, nanos: i64) -> HostVal { self.inner.lock().unwrap().const_duration(nanos) }
-    fn val_add(&mut self, a: HostVal, b: HostVal) -> HostVal { self.inner.lock().unwrap().val_add(a, b) }
-    fn val_sub(&mut self, a: HostVal, b: HostVal) -> HostVal { self.inner.lock().unwrap().val_sub(a, b) }
-    fn val_mul(&mut self, a: HostVal, b: HostVal) -> HostVal { self.inner.lock().unwrap().val_mul(a, b) }
-    fn val_div(&mut self, a: HostVal, b: HostVal) -> HostVal { self.inner.lock().unwrap().val_div(a, b) }
-    fn val_sqrt(&mut self, a: HostVal) -> HostVal { self.inner.lock().unwrap().val_sqrt(a) }
-    fn val_eq(&mut self, a: HostVal, b: HostVal) -> i32 { self.inner.lock().unwrap().val_eq(a, b) }
-    fn val_neq(&mut self, a: HostVal, b: HostVal) -> i32 { self.inner.lock().unwrap().val_neq(a, b) }
-    fn val_lt(&mut self, a: HostVal, b: HostVal) -> i32 { self.inner.lock().unwrap().val_lt(a, b) }
-    fn val_le(&mut self, a: HostVal, b: HostVal) -> i32 { self.inner.lock().unwrap().val_le(a, b) }
-    fn val_gt(&mut self, a: HostVal, b: HostVal) -> i32 { self.inner.lock().unwrap().val_gt(a, b) }
-    fn val_ge(&mut self, a: HostVal, b: HostVal) -> i32 { self.inner.lock().unwrap().val_ge(a, b) }
-    fn str_concat(&mut self, a: HostVal, b: HostVal) -> HostVal { self.inner.lock().unwrap().str_concat(a, b) }
-    fn str_replace(&mut self, s: HostVal, o: HostVal, n: HostVal, c: HostVal) -> HostVal { self.inner.lock().unwrap().str_replace(s, o, n, c) }
-    fn val_to_string(&mut self, val: HostVal) -> HostVal { self.inner.lock().unwrap().val_to_string(val) }
-    fn compound_begin(&mut self, kind: i32) { self.inner.lock().unwrap().compound_begin(kind) }
-    fn compound_push(&mut self, val: HostVal) { self.inner.lock().unwrap().compound_push(val) }
-    fn compound_end(&mut self) -> HostVal { self.inner.lock().unwrap().compound_end() }
-    fn compound_get(&mut self, c: HostVal, k: HostVal) -> HostVal { self.inner.lock().unwrap().compound_get(c, k) }
-    fn compound_len(&mut self, c: HostVal) -> HostVal { self.inner.lock().unwrap().compound_len(c) }
-    fn pair_first(&mut self, c: HostVal) -> HostVal { self.inner.lock().unwrap().pair_first(c) }
-    fn pair_second(&mut self, c: HostVal) -> HostVal { self.inner.lock().unwrap().pair_second(c) }
-    fn debuglog(&mut self, val: HostVal) { self.inner.lock().unwrap().debuglog(val) }
+    fn scan_start(&mut self, rel_id: i32) -> i32 {
+        self.inner.lock().unwrap().scan_start(rel_id)
+    }
+    fn scan_delta_start(&mut self, rel_id: i32) -> i32 {
+        self.inner.lock().unwrap().scan_delta_start(rel_id)
+    }
+    fn scan_next(&mut self, iter_id: i32) -> i32 {
+        self.inner.lock().unwrap().scan_next(iter_id)
+    }
+    fn merge_deltas(&mut self) -> i32 {
+        self.inner.lock().unwrap().merge_deltas()
+    }
+    fn scan_aggregate_start(&mut self, rel_id: i32, desc: Vec<i32>) -> i32 {
+        self.inner
+            .lock()
+            .unwrap()
+            .scan_aggregate_start(rel_id, desc)
+    }
+    fn scan_index_start(&mut self, rel_id: i32, col_idx: i32, val: HostVal) -> i32 {
+        self.inner
+            .lock()
+            .unwrap()
+            .scan_index_start(rel_id, col_idx, val)
+    }
+    fn get_col(&mut self, ptr: i32, idx: i32) -> HostVal {
+        self.inner.lock().unwrap().get_col(ptr, idx)
+    }
+    fn insert_begin(&mut self, rel_id: i32) {
+        self.inner.lock().unwrap().insert_begin(rel_id)
+    }
+    fn insert_push(&mut self, val: HostVal) {
+        self.inner.lock().unwrap().insert_push(val)
+    }
+    fn insert_end(&mut self) {
+        self.inner.lock().unwrap().insert_end()
+    }
+    fn const_number(&mut self, n: i64) -> HostVal {
+        self.inner.lock().unwrap().const_number(n)
+    }
+    fn const_float(&mut self, bits: i64) -> HostVal {
+        self.inner.lock().unwrap().const_float(bits)
+    }
+    fn const_string(&mut self, id: i32) -> HostVal {
+        self.inner.lock().unwrap().const_string(id)
+    }
+    fn const_name(&mut self, id: i32) -> HostVal {
+        self.inner.lock().unwrap().const_name(id)
+    }
+    fn const_time(&mut self, nanos: i64) -> HostVal {
+        self.inner.lock().unwrap().const_time(nanos)
+    }
+    fn const_duration(&mut self, nanos: i64) -> HostVal {
+        self.inner.lock().unwrap().const_duration(nanos)
+    }
+    fn val_add(&mut self, a: HostVal, b: HostVal) -> HostVal {
+        self.inner.lock().unwrap().val_add(a, b)
+    }
+    fn val_sub(&mut self, a: HostVal, b: HostVal) -> HostVal {
+        self.inner.lock().unwrap().val_sub(a, b)
+    }
+    fn val_mul(&mut self, a: HostVal, b: HostVal) -> HostVal {
+        self.inner.lock().unwrap().val_mul(a, b)
+    }
+    fn val_div(&mut self, a: HostVal, b: HostVal) -> HostVal {
+        self.inner.lock().unwrap().val_div(a, b)
+    }
+    fn val_sqrt(&mut self, a: HostVal) -> HostVal {
+        self.inner.lock().unwrap().val_sqrt(a)
+    }
+    fn val_eq(&mut self, a: HostVal, b: HostVal) -> i32 {
+        self.inner.lock().unwrap().val_eq(a, b)
+    }
+    fn val_neq(&mut self, a: HostVal, b: HostVal) -> i32 {
+        self.inner.lock().unwrap().val_neq(a, b)
+    }
+    fn val_lt(&mut self, a: HostVal, b: HostVal) -> i32 {
+        self.inner.lock().unwrap().val_lt(a, b)
+    }
+    fn val_le(&mut self, a: HostVal, b: HostVal) -> i32 {
+        self.inner.lock().unwrap().val_le(a, b)
+    }
+    fn val_gt(&mut self, a: HostVal, b: HostVal) -> i32 {
+        self.inner.lock().unwrap().val_gt(a, b)
+    }
+    fn val_ge(&mut self, a: HostVal, b: HostVal) -> i32 {
+        self.inner.lock().unwrap().val_ge(a, b)
+    }
+    fn str_concat(&mut self, a: HostVal, b: HostVal) -> HostVal {
+        self.inner.lock().unwrap().str_concat(a, b)
+    }
+    fn str_replace(&mut self, s: HostVal, o: HostVal, n: HostVal, c: HostVal) -> HostVal {
+        self.inner.lock().unwrap().str_replace(s, o, n, c)
+    }
+    fn val_to_string(&mut self, val: HostVal) -> HostVal {
+        self.inner.lock().unwrap().val_to_string(val)
+    }
+    fn compound_begin(&mut self, kind: i32) {
+        self.inner.lock().unwrap().compound_begin(kind)
+    }
+    fn compound_push(&mut self, val: HostVal) {
+        self.inner.lock().unwrap().compound_push(val)
+    }
+    fn compound_end(&mut self) -> HostVal {
+        self.inner.lock().unwrap().compound_end()
+    }
+    fn compound_get(&mut self, c: HostVal, k: HostVal) -> HostVal {
+        self.inner.lock().unwrap().compound_get(c, k)
+    }
+    fn compound_len(&mut self, c: HostVal) -> HostVal {
+        self.inner.lock().unwrap().compound_len(c)
+    }
+    fn pair_first(&mut self, c: HostVal) -> HostVal {
+        self.inner.lock().unwrap().pair_first(c)
+    }
+    fn pair_second(&mut self, c: HostVal) -> HostVal {
+        self.inner.lock().unwrap().pair_second(c)
+    }
+    fn debuglog(&mut self, val: HostVal) {
+        self.inner.lock().unwrap().debuglog(val)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -309,9 +456,8 @@ struct InterpInWasm {
 
 impl InterpInWasm {
     fn new() -> Self {
-        let wasm_bytes = include_bytes!(
-            "../../../target/wasm32-unknown-unknown/release/mangle_wasm.wasm"
-        );
+        let wasm_bytes =
+            include_bytes!("../../../target/wasm32-unknown-unknown/release/mangle_wasm.wasm");
         let engine = wasmtime::Engine::default();
         let module = wasmtime::Module::new(&engine, wasm_bytes)
             .expect("failed to compile mangle-wasm module");
@@ -320,8 +466,8 @@ impl InterpInWasm {
 
     fn run(&self, source: &str, facts_json: &str) {
         let mut store = wasmtime::Store::new(&self.engine, ());
-        let instance = wasmtime::Instance::new(&mut store, &self.module, &[])
-            .expect("failed to instantiate");
+        let instance =
+            wasmtime::Instance::new(&mut store, &self.module, &[]).expect("failed to instantiate");
 
         let memory = instance
             .get_memory(&mut store, "memory")
@@ -397,13 +543,9 @@ fn reachability_benchmark(c: &mut Criterion) {
         let source = reachability_source(n);
 
         // 1. Native interpreter
-        group.bench_with_input(
-            BenchmarkId::new("interpreter", n),
-            &source,
-            |b, source| {
-                b.iter(|| bench_interpreter(source));
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("interpreter", n), &source, |b, source| {
+            b.iter(|| bench_interpreter(source));
+        });
 
         // 2. Codegen WASM (server mode)
         let arena = Arena::new_with_global_interner();
@@ -412,9 +554,7 @@ fn reachability_benchmark(c: &mut Criterion) {
         let vm = Vm::new().expect("vm creation failed");
 
         group.bench_with_input(BenchmarkId::new("codegen-wasm", n), &n, |b, _n| {
-            b.iter(|| {
-                bench_codegen_wasm(&vm, &compiled.wasm, &compiled.strings, &compiled.names)
-            });
+            b.iter(|| bench_codegen_wasm(&vm, &compiled.wasm, &compiled.strings, &compiled.names));
         });
 
         // 3. Interpreter-in-WASM

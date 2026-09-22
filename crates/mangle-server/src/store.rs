@@ -54,6 +54,12 @@ pub(crate) fn parse_query_lenient(query: &str) -> Result<ParsedQuery> {
     })
 }
 
+impl Default for ProgramStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ProgramStore {
     pub fn new() -> Self {
         Self {

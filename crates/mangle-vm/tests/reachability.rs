@@ -313,16 +313,38 @@ impl Host for MemHost {
             (Val::Number(a), Val::Number(b)) => (a >= b) as i32,
         }
     }
-    fn str_concat(&mut self, _a: HostVal, _b: HostVal) -> HostVal { HostVal(0) }
-    fn str_replace(&mut self, _s: HostVal, _old: HostVal, _new: HostVal, _count: HostVal) -> HostVal { HostVal(0) }
-    fn val_to_string(&mut self, _val: HostVal) -> HostVal { HostVal(0) }
+    fn str_concat(&mut self, _a: HostVal, _b: HostVal) -> HostVal {
+        HostVal(0)
+    }
+    fn str_replace(
+        &mut self,
+        _s: HostVal,
+        _old: HostVal,
+        _new: HostVal,
+        _count: HostVal,
+    ) -> HostVal {
+        HostVal(0)
+    }
+    fn val_to_string(&mut self, _val: HostVal) -> HostVal {
+        HostVal(0)
+    }
     fn compound_begin(&mut self, _kind: i32) {}
     fn compound_push(&mut self, _val: HostVal) {}
-    fn compound_end(&mut self) -> HostVal { HostVal(0) }
-    fn compound_get(&mut self, _compound: HostVal, _key: HostVal) -> HostVal { HostVal(0) }
-    fn compound_len(&mut self, _compound: HostVal) -> HostVal { HostVal(0) }
-    fn pair_first(&mut self, _compound: HostVal) -> HostVal { HostVal(0) }
-    fn pair_second(&mut self, _compound: HostVal) -> HostVal { HostVal(0) }
+    fn compound_end(&mut self) -> HostVal {
+        HostVal(0)
+    }
+    fn compound_get(&mut self, _compound: HostVal, _key: HostVal) -> HostVal {
+        HostVal(0)
+    }
+    fn compound_len(&mut self, _compound: HostVal) -> HostVal {
+        HostVal(0)
+    }
+    fn pair_first(&mut self, _compound: HostVal) -> HostVal {
+        HostVal(0)
+    }
+    fn pair_second(&mut self, _compound: HostVal) -> HostVal {
+        HostVal(0)
+    }
     fn debuglog(&mut self, _val: HostVal) {}
 }
 
@@ -334,44 +356,132 @@ struct SharedMemHost {
 
 macro_rules! delegate_host {
     () => {
-        fn scan_start(&mut self, rel_id: i32) -> i32 { self.inner.lock().unwrap().scan_start(rel_id) }
-        fn scan_delta_start(&mut self, rel_id: i32) -> i32 { self.inner.lock().unwrap().scan_delta_start(rel_id) }
-        fn scan_next(&mut self, iter_id: i32) -> i32 { self.inner.lock().unwrap().scan_next(iter_id) }
-        fn merge_deltas(&mut self) -> i32 { self.inner.lock().unwrap().merge_deltas() }
-        fn scan_aggregate_start(&mut self, rel_id: i32, desc: Vec<i32>) -> i32 { self.inner.lock().unwrap().scan_aggregate_start(rel_id, desc) }
-        fn scan_index_start(&mut self, rel_id: i32, col_idx: i32, val: HostVal) -> i32 { self.inner.lock().unwrap().scan_index_start(rel_id, col_idx, val) }
-        fn get_col(&mut self, ptr: i32, idx: i32) -> HostVal { self.inner.lock().unwrap().get_col(ptr, idx) }
-        fn insert_begin(&mut self, rel_id: i32) { self.inner.lock().unwrap().insert_begin(rel_id) }
-        fn insert_push(&mut self, val: HostVal) { self.inner.lock().unwrap().insert_push(val) }
-        fn insert_end(&mut self) { self.inner.lock().unwrap().insert_end() }
-        fn const_number(&mut self, n: i64) -> HostVal { self.inner.lock().unwrap().const_number(n) }
-        fn const_float(&mut self, bits: i64) -> HostVal { self.inner.lock().unwrap().const_float(bits) }
-        fn const_string(&mut self, id: i32) -> HostVal { self.inner.lock().unwrap().const_string(id) }
-        fn const_name(&mut self, id: i32) -> HostVal { self.inner.lock().unwrap().const_name(id) }
-        fn const_time(&mut self, nanos: i64) -> HostVal { self.inner.lock().unwrap().const_time(nanos) }
-        fn const_duration(&mut self, nanos: i64) -> HostVal { self.inner.lock().unwrap().const_duration(nanos) }
-        fn val_add(&mut self, a: HostVal, b: HostVal) -> HostVal { self.inner.lock().unwrap().val_add(a, b) }
-        fn val_sub(&mut self, a: HostVal, b: HostVal) -> HostVal { self.inner.lock().unwrap().val_sub(a, b) }
-        fn val_mul(&mut self, a: HostVal, b: HostVal) -> HostVal { self.inner.lock().unwrap().val_mul(a, b) }
-        fn val_div(&mut self, a: HostVal, b: HostVal) -> HostVal { self.inner.lock().unwrap().val_div(a, b) }
-        fn val_sqrt(&mut self, a: HostVal) -> HostVal { self.inner.lock().unwrap().val_sqrt(a) }
-        fn val_eq(&mut self, a: HostVal, b: HostVal) -> i32 { self.inner.lock().unwrap().val_eq(a, b) }
-        fn val_neq(&mut self, a: HostVal, b: HostVal) -> i32 { self.inner.lock().unwrap().val_neq(a, b) }
-        fn val_lt(&mut self, a: HostVal, b: HostVal) -> i32 { self.inner.lock().unwrap().val_lt(a, b) }
-        fn val_le(&mut self, a: HostVal, b: HostVal) -> i32 { self.inner.lock().unwrap().val_le(a, b) }
-        fn val_gt(&mut self, a: HostVal, b: HostVal) -> i32 { self.inner.lock().unwrap().val_gt(a, b) }
-        fn val_ge(&mut self, a: HostVal, b: HostVal) -> i32 { self.inner.lock().unwrap().val_ge(a, b) }
-        fn str_concat(&mut self, a: HostVal, b: HostVal) -> HostVal { self.inner.lock().unwrap().str_concat(a, b) }
-        fn str_replace(&mut self, s: HostVal, old: HostVal, new: HostVal, count: HostVal) -> HostVal { self.inner.lock().unwrap().str_replace(s, old, new, count) }
-        fn val_to_string(&mut self, val: HostVal) -> HostVal { self.inner.lock().unwrap().val_to_string(val) }
-        fn compound_begin(&mut self, kind: i32) { self.inner.lock().unwrap().compound_begin(kind) }
-        fn compound_push(&mut self, val: HostVal) { self.inner.lock().unwrap().compound_push(val) }
-        fn compound_end(&mut self) -> HostVal { self.inner.lock().unwrap().compound_end() }
-        fn compound_get(&mut self, compound: HostVal, key: HostVal) -> HostVal { self.inner.lock().unwrap().compound_get(compound, key) }
-        fn compound_len(&mut self, compound: HostVal) -> HostVal { self.inner.lock().unwrap().compound_len(compound) }
-        fn pair_first(&mut self, compound: HostVal) -> HostVal { self.inner.lock().unwrap().pair_first(compound) }
-        fn pair_second(&mut self, compound: HostVal) -> HostVal { self.inner.lock().unwrap().pair_second(compound) }
-        fn debuglog(&mut self, val: HostVal) { self.inner.lock().unwrap().debuglog(val) }
+        fn scan_start(&mut self, rel_id: i32) -> i32 {
+            self.inner.lock().unwrap().scan_start(rel_id)
+        }
+        fn scan_delta_start(&mut self, rel_id: i32) -> i32 {
+            self.inner.lock().unwrap().scan_delta_start(rel_id)
+        }
+        fn scan_next(&mut self, iter_id: i32) -> i32 {
+            self.inner.lock().unwrap().scan_next(iter_id)
+        }
+        fn merge_deltas(&mut self) -> i32 {
+            self.inner.lock().unwrap().merge_deltas()
+        }
+        fn scan_aggregate_start(&mut self, rel_id: i32, desc: Vec<i32>) -> i32 {
+            self.inner
+                .lock()
+                .unwrap()
+                .scan_aggregate_start(rel_id, desc)
+        }
+        fn scan_index_start(&mut self, rel_id: i32, col_idx: i32, val: HostVal) -> i32 {
+            self.inner
+                .lock()
+                .unwrap()
+                .scan_index_start(rel_id, col_idx, val)
+        }
+        fn get_col(&mut self, ptr: i32, idx: i32) -> HostVal {
+            self.inner.lock().unwrap().get_col(ptr, idx)
+        }
+        fn insert_begin(&mut self, rel_id: i32) {
+            self.inner.lock().unwrap().insert_begin(rel_id)
+        }
+        fn insert_push(&mut self, val: HostVal) {
+            self.inner.lock().unwrap().insert_push(val)
+        }
+        fn insert_end(&mut self) {
+            self.inner.lock().unwrap().insert_end()
+        }
+        fn const_number(&mut self, n: i64) -> HostVal {
+            self.inner.lock().unwrap().const_number(n)
+        }
+        fn const_float(&mut self, bits: i64) -> HostVal {
+            self.inner.lock().unwrap().const_float(bits)
+        }
+        fn const_string(&mut self, id: i32) -> HostVal {
+            self.inner.lock().unwrap().const_string(id)
+        }
+        fn const_name(&mut self, id: i32) -> HostVal {
+            self.inner.lock().unwrap().const_name(id)
+        }
+        fn const_time(&mut self, nanos: i64) -> HostVal {
+            self.inner.lock().unwrap().const_time(nanos)
+        }
+        fn const_duration(&mut self, nanos: i64) -> HostVal {
+            self.inner.lock().unwrap().const_duration(nanos)
+        }
+        fn val_add(&mut self, a: HostVal, b: HostVal) -> HostVal {
+            self.inner.lock().unwrap().val_add(a, b)
+        }
+        fn val_sub(&mut self, a: HostVal, b: HostVal) -> HostVal {
+            self.inner.lock().unwrap().val_sub(a, b)
+        }
+        fn val_mul(&mut self, a: HostVal, b: HostVal) -> HostVal {
+            self.inner.lock().unwrap().val_mul(a, b)
+        }
+        fn val_div(&mut self, a: HostVal, b: HostVal) -> HostVal {
+            self.inner.lock().unwrap().val_div(a, b)
+        }
+        fn val_sqrt(&mut self, a: HostVal) -> HostVal {
+            self.inner.lock().unwrap().val_sqrt(a)
+        }
+        fn val_eq(&mut self, a: HostVal, b: HostVal) -> i32 {
+            self.inner.lock().unwrap().val_eq(a, b)
+        }
+        fn val_neq(&mut self, a: HostVal, b: HostVal) -> i32 {
+            self.inner.lock().unwrap().val_neq(a, b)
+        }
+        fn val_lt(&mut self, a: HostVal, b: HostVal) -> i32 {
+            self.inner.lock().unwrap().val_lt(a, b)
+        }
+        fn val_le(&mut self, a: HostVal, b: HostVal) -> i32 {
+            self.inner.lock().unwrap().val_le(a, b)
+        }
+        fn val_gt(&mut self, a: HostVal, b: HostVal) -> i32 {
+            self.inner.lock().unwrap().val_gt(a, b)
+        }
+        fn val_ge(&mut self, a: HostVal, b: HostVal) -> i32 {
+            self.inner.lock().unwrap().val_ge(a, b)
+        }
+        fn str_concat(&mut self, a: HostVal, b: HostVal) -> HostVal {
+            self.inner.lock().unwrap().str_concat(a, b)
+        }
+        fn str_replace(
+            &mut self,
+            s: HostVal,
+            old: HostVal,
+            new: HostVal,
+            count: HostVal,
+        ) -> HostVal {
+            self.inner.lock().unwrap().str_replace(s, old, new, count)
+        }
+        fn val_to_string(&mut self, val: HostVal) -> HostVal {
+            self.inner.lock().unwrap().val_to_string(val)
+        }
+        fn compound_begin(&mut self, kind: i32) {
+            self.inner.lock().unwrap().compound_begin(kind)
+        }
+        fn compound_push(&mut self, val: HostVal) {
+            self.inner.lock().unwrap().compound_push(val)
+        }
+        fn compound_end(&mut self) -> HostVal {
+            self.inner.lock().unwrap().compound_end()
+        }
+        fn compound_get(&mut self, compound: HostVal, key: HostVal) -> HostVal {
+            self.inner.lock().unwrap().compound_get(compound, key)
+        }
+        fn compound_len(&mut self, compound: HostVal) -> HostVal {
+            self.inner.lock().unwrap().compound_len(compound)
+        }
+        fn pair_first(&mut self, compound: HostVal) -> HostVal {
+            self.inner.lock().unwrap().pair_first(compound)
+        }
+        fn pair_second(&mut self, compound: HostVal) -> HostVal {
+            self.inner.lock().unwrap().pair_second(compound)
+        }
+        fn debuglog(&mut self, val: HostVal) {
+            self.inner.lock().unwrap().debuglog(val)
+        }
     };
 }
 

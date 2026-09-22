@@ -85,10 +85,10 @@ impl FileEdbSource {
             .collect();
         for retract_key in retract_keys {
             let base_name = &retract_key[retract_prefix.len()..];
-            if let Some(retractions) = tables.remove(&retract_key) {
-                if let Some(base_facts) = tables.get_mut(base_name) {
-                    base_facts.retain(|fact| !retractions.contains(fact));
-                }
+            if let Some(retractions) = tables.remove(&retract_key)
+                && let Some(base_facts) = tables.get_mut(base_name)
+            {
+                base_facts.retain(|fact| !retractions.contains(fact));
             }
         }
 

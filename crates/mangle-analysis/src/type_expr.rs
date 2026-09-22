@@ -25,8 +25,8 @@
 //! - TaggedUnion expansion
 
 use anyhow::{Result, anyhow, bail};
-use rustc_hash::{FxHashMap, FxHashSet};
 use mangle_ir::{Inst, InstId, Ir, NameId};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 // Type constructor names.
 pub const FN_STRUCT: &str = "fn:Struct";
@@ -48,7 +48,7 @@ pub const FN_EMPTY_TYPE: &str = "fn:EmptyType";
 // ---------------------------------------------------------------------------
 
 /// Returns the function name of an `ApplyFn` instruction, or `None`.
-pub fn apply_fn_name<'a>(ir: &'a Ir, id: InstId) -> Option<&'a str> {
+pub fn apply_fn_name(ir: &Ir, id: InstId) -> Option<&str> {
     if let Inst::ApplyFn { function, .. } = ir.get(id) {
         Some(ir.resolve_name(*function))
     } else {
@@ -66,7 +66,7 @@ pub fn apply_fn_args(ir: &Ir, id: InstId) -> Option<&[InstId]> {
 }
 
 /// Returns the name string of a `Name` instruction, or `None`.
-fn name_str<'a>(ir: &'a Ir, id: InstId) -> Option<&'a str> {
+fn name_str(ir: &Ir, id: InstId) -> Option<&str> {
     if let Inst::Name(n) = ir.get(id) {
         Some(ir.resolve_name(*n))
     } else {
@@ -97,10 +97,10 @@ pub fn is_any(ir: &Ir, id: InstId) -> bool {
 pub fn find_or_create_name(ir: &mut Ir, name: &str) -> InstId {
     if let Some(name_id) = ir.name_store.lookup(name) {
         for (idx, inst) in ir.insts.iter().enumerate() {
-            if let Inst::Name(n) = inst {
-                if *n == name_id {
-                    return InstId::new(idx);
-                }
+            if let Inst::Name(n) = inst
+                && *n == name_id
+            {
+                return InstId::new(idx);
             }
         }
     }
@@ -111,10 +111,11 @@ pub fn find_or_create_name(ir: &mut Ir, name: &str) -> InstId {
 /// Creates or finds the empty type sentinel `fn:EmptyType()`.
 pub fn empty_type(ir: &mut Ir) -> InstId {
     for (idx, inst) in ir.insts.iter().enumerate() {
-        if let Inst::ApplyFn { function, args } = inst {
-            if ir.resolve_name(*function) == FN_EMPTY_TYPE && args.is_empty() {
-                return InstId::new(idx);
-            }
+        if let Inst::ApplyFn { function, args } = inst
+            && ir.resolve_name(*function) == FN_EMPTY_TYPE
+            && args.is_empty()
+        {
+            return InstId::new(idx);
         }
     }
     let fn_name = ir.intern_name(FN_EMPTY_TYPE);
@@ -281,10 +282,10 @@ pub fn struct_type_fields(ir: &Ir, id: InstId) -> Vec<(InstId, InstId, bool)> {
     while i < args.len() {
         if is_opt_field(ir, args[i]) {
             // Optional field: fn:opt(field_name, field_type)
-            if let Some(opt_args) = apply_fn_args(ir, args[i]) {
-                if opt_args.len() == 2 {
-                    result.push((opt_args[0], opt_args[1], true));
-                }
+            if let Some(opt_args) = apply_fn_args(ir, args[i])
+                && opt_args.len() == 2
+            {
+                result.push((opt_args[0], opt_args[1], true));
             }
             i += 1;
         } else {
@@ -305,10 +306,10 @@ pub fn struct_type_field(ir: &Ir, type_id: InstId, field: NameId) -> Option<Inst
     }
     let field_name = ir.resolve_name(field);
     for (fname_id, ftype_id, _optional) in struct_type_fields(ir, type_id) {
-        if let Some(n) = name_str(ir, fname_id) {
-            if n == field_name {
-                return Some(ftype_id);
-            }
+        if let Some(n) = name_str(ir, fname_id)
+            && n == field_name
+        {
+            return Some(ftype_id);
         }
     }
     None
@@ -356,10 +357,9 @@ pub fn struct_type_field_deep(ir: &mut Ir, type_id: InstId, field: NameId) -> Op
         let args = union_type_args(ir, type_id)?.to_vec();
         let mut field_types = Vec::new();
         for alt in &args {
-            if let Some(ft) = struct_type_field_deep(ir, *alt, field) {
+            {
+                let ft = struct_type_field_deep(ir, *alt, field)?;
                 field_types.push(ft);
-            } else {
-                return None; // Field not present in all alternatives.
             }
         }
         if field_types.is_empty() {
@@ -410,8 +410,7 @@ pub fn expand_tagged_union_type(ir: &mut Ir, tu_id: InstId) -> Result<InstId> {
         });
 
         // Collect fields from variant struct
-        let variant_fields: Vec<InstId> =
-            apply_fn_args(ir, *struct_id).unwrap_or(&[]).to_vec();
+        let variant_fields: Vec<InstId> = apply_fn_args(ir, *struct_id).unwrap_or(&[]).to_vec();
 
         // Build new struct: [tag_field, Singleton(tag), ...variant_fields]
         let mut new_args = vec![tag_field_id, singleton];
@@ -459,8 +458,7 @@ pub fn expand_tagged_union_for_bounds(ir: &mut Ir, tu_id: InstId) -> Result<Inst
 
     let mut variant_structs = Vec::new();
     for (_tag_id, struct_id) in tags.iter().zip(structs.iter()) {
-        let variant_fields: Vec<InstId> =
-            apply_fn_args(ir, *struct_id).unwrap_or(&[]).to_vec();
+        let variant_fields: Vec<InstId> = apply_fn_args(ir, *struct_id).unwrap_or(&[]).to_vec();
 
         let mut new_args = vec![tag_field_id, name_type_id];
         new_args.extend_from_slice(&variant_fields);
@@ -501,10 +499,7 @@ pub fn wellformed_type(ir: &Ir, ctx: &TypeContext, id: InstId) -> Result<()> {
             if ctx.contains_key(v) {
                 Ok(())
             } else {
-                bail!(
-                    "type variable {} not in context",
-                    ir.resolve_name(*v)
-                )
+                bail!("type variable {} not in context", ir.resolve_name(*v))
             }
         }
         Inst::ApplyFn { function, args } => {
@@ -526,8 +521,12 @@ pub fn wellformed_type(ir: &Ir, ctx: &TypeContext, id: InstId) -> Result<()> {
                     }
                     // Argument must be a constant.
                     match ir.get(args[0]) {
-                        Inst::Name(_) | Inst::Number(_) | Inst::String(_)
-                        | Inst::Float(_) | Inst::Bool(_) | Inst::Time(_)
+                        Inst::Name(_)
+                        | Inst::Number(_)
+                        | Inst::String(_)
+                        | Inst::Float(_)
+                        | Inst::Bool(_)
+                        | Inst::Time(_)
                         | Inst::Duration(_) => Ok(()),
                         _ => bail!("fn:Singleton argument must be a constant"),
                     }
@@ -601,8 +600,7 @@ fn check_struct_type_expr(ir: &Ir, ctx: &TypeContext, args: &[InstId]) -> Result
     while i < args.len() {
         if is_opt_field(ir, args[i]) {
             // Optional field: fn:opt(field_name, field_type)
-            let opt_args = apply_fn_args(ir, args[i])
-                .ok_or_else(|| anyhow!("malformed fn:opt"))?;
+            let opt_args = apply_fn_args(ir, args[i]).ok_or_else(|| anyhow!("malformed fn:opt"))?;
             if opt_args.len() != 2 {
                 bail!("fn:opt requires 2 arguments");
             }
@@ -630,15 +628,11 @@ fn check_struct_type_expr(ir: &Ir, ctx: &TypeContext, args: &[InstId]) -> Result
     Ok(())
 }
 
-fn check_tagged_union_type_expr(
-    ir: &Ir,
-    ctx: &TypeContext,
-    args: &[InstId],
-) -> Result<()> {
+fn check_tagged_union_type_expr(ir: &Ir, ctx: &TypeContext, args: &[InstId]) -> Result<()> {
     if args.len() < 3 {
         bail!("fn:TaggedUnion requires at least 3 arguments (tag_field, tag, struct)");
     }
-    if args.len() % 2 == 0 {
+    if args.len().is_multiple_of(2) {
         bail!("fn:TaggedUnion requires odd number of arguments");
     }
 
@@ -667,14 +661,14 @@ fn check_tagged_union_type_expr(
 
         // Tag field must NOT appear in variant struct.
         for (fname_id, _ftype_id, _optional) in struct_type_fields(ir, variant) {
-            if let Some(n) = name_str(ir, fname_id) {
-                if n == tag_field_name {
-                    bail!(
-                        "fn:TaggedUnion tag field {} must not appear in variant struct for {}",
-                        tag_field_name,
-                        tag_name
-                    );
-                }
+            if let Some(n) = name_str(ir, fname_id)
+                && n == tag_field_name
+            {
+                bail!(
+                    "fn:TaggedUnion tag field {} must not appear in variant struct for {}",
+                    tag_field_name,
+                    tag_name
+                );
             }
         }
     }
@@ -769,24 +763,23 @@ pub fn type_conforms(ir: &Ir, ctx: &TypeContext, left: InstId, right: InstId) ->
     }
 
     // Singleton conformance: fn:Singleton(c) <: T if c has type T.
-    if is_singleton_type(ir, left) {
-        if let Some(args) = apply_fn_args(ir, left) {
-            if args.len() == 1 {
-                return const_has_base_type(ir, args[0], right);
-            }
-        }
+    if is_singleton_type(ir, left)
+        && let Some(args) = apply_fn_args(ir, left)
+        && args.len() == 1
+    {
+        return const_has_base_type(ir, args[0], right);
     }
 
     // Type variable: look up bound in context.
-    if let Inst::Var(v) = ir.get(left) {
-        if let Some(&bound) = ctx.get(v) {
-            return set_conforms(ir, ctx, bound, right);
-        }
+    if let Inst::Var(v) = ir.get(left)
+        && let Some(&bound) = ctx.get(v)
+    {
+        return set_conforms(ir, ctx, bound, right);
     }
-    if let Inst::Var(v) = ir.get(right) {
-        if let Some(&bound) = ctx.get(v) {
-            return set_conforms(ir, ctx, left, bound);
-        }
+    if let Inst::Var(v) = ir.get(right)
+        && let Some(&bound) = ctx.get(v)
+    {
+        return set_conforms(ir, ctx, left, bound);
     }
 
     let left_fn = apply_fn_name(ir, left);
@@ -873,12 +866,7 @@ pub fn type_conforms(ir: &Ir, ctx: &TypeContext, left: InstId, right: InstId) ->
 /// - All required fields of `right` are present in `left` with conforming types.
 /// - Optional fields of `right` may be absent in `left`.
 /// - `left` may have extra fields.
-fn struct_type_conforms(
-    ir: &Ir,
-    ctx: &TypeContext,
-    left: InstId,
-    right: InstId,
-) -> bool {
+fn struct_type_conforms(ir: &Ir, ctx: &TypeContext, left: InstId, right: InstId) -> bool {
     let left_fields = struct_type_fields(ir, left);
     let right_fields = struct_type_fields(ir, right);
 
@@ -911,12 +899,7 @@ fn struct_type_conforms(
 }
 
 /// Helper: checks whether a TaggedUnion on the left conforms to some right type.
-fn tagged_union_set_conforms_left(
-    ir: &Ir,
-    ctx: &TypeContext,
-    left: InstId,
-    right: InstId,
-) -> bool {
+fn tagged_union_set_conforms_left(ir: &Ir, ctx: &TypeContext, left: InstId, right: InstId) -> bool {
     // Each variant of the tagged union must conform to right.
     if let Some((tags, structs)) = tagged_union_variants(ir, left) {
         let tag_field = tagged_union_tag_field(ir, left).unwrap();
@@ -987,18 +970,19 @@ fn expanded_variant_conforms(
             if !ir_eq(ir, tag_field, r_tag_field) {
                 return false;
             }
-            return r_tags.iter().zip(r_structs.iter()).any(|(rt, rs)| {
-                ir_eq(ir, tag, *rt) && set_conforms(ir, ctx, variant_struct, *rs)
-            });
+            return r_tags
+                .iter()
+                .zip(r_structs.iter())
+                .any(|(rt, rs)| ir_eq(ir, tag, *rt) && set_conforms(ir, ctx, variant_struct, *rs));
         }
         return false;
     }
     // If right is a union, check that the expanded variant conforms to some alt.
     if let Some(alts) = union_type_args(ir, right) {
         let alts = alts.to_vec();
-        return alts.iter().any(|alt| {
-            expanded_variant_conforms(ir, ctx, tag_field, tag, variant_struct, *alt)
-        });
+        return alts
+            .iter()
+            .any(|alt| expanded_variant_conforms(ir, ctx, tag_field, tag, variant_struct, *alt));
     }
     false
 }
@@ -1205,9 +1189,7 @@ pub fn has_type(ir: &Ir, type_expr: InstId, value: InstId) -> bool {
     let args = apply_fn_args(ir, type_expr).unwrap();
 
     match fname {
-        FN_SINGLETON => {
-            args.len() == 1 && ir_eq(ir, value, args[0])
-        }
+        FN_SINGLETON => args.len() == 1 && ir_eq(ir, value, args[0]),
 
         FN_UNION => args.iter().any(|alt| has_type(ir, *alt, value)),
 
@@ -1266,10 +1248,10 @@ pub fn has_type(ir: &Ir, type_expr: InstId, value: InstId) -> bool {
                 return false;
             }
             // Option<T> matches T or /unit.
-            if let Some(n) = name_str(ir, value) {
-                if n == "/unit" {
-                    return true;
-                }
+            if let Some(n) = name_str(ir, value)
+                && n == "/unit"
+            {
+                return true;
             }
             has_type(ir, args[0], value)
         }
@@ -1640,10 +1622,7 @@ pub fn apply_subst(ir: &mut Ir, id: InstId, subst: &FxHashMap<NameId, InstId>) -
         Inst::ApplyFn { function, args } => {
             let function = *function;
             let args = args.clone();
-            let new_args: Vec<InstId> = args
-                .iter()
-                .map(|a| apply_subst(ir, *a, subst))
-                .collect();
+            let new_args: Vec<InstId> = args.iter().map(|a| apply_subst(ir, *a, subst)).collect();
             if new_args == args {
                 return id;
             }
@@ -1686,10 +1665,7 @@ mod tests {
 
     fn make_apply(ir: &mut Ir, fn_name: &str, args: Vec<InstId>) -> InstId {
         let n = ir.intern_name(fn_name);
-        ir.add_inst(Inst::ApplyFn {
-            function: n,
-            args,
-        })
+        ir.add_inst(Inst::ApplyFn { function: n, args })
     }
 
     // -- Wellformedness tests --
@@ -1784,11 +1760,7 @@ mod tests {
         let s1 = make_apply(&mut ir, FN_STRUCT, vec![]);
         let move2 = make_name(&mut ir, "/move");
         let s2 = make_apply(&mut ir, FN_STRUCT, vec![]);
-        let tu = make_apply(
-            &mut ir,
-            FN_TAGGED_UNION,
-            vec![kind, move_, s1, move2, s2],
-        );
+        let tu = make_apply(&mut ir, FN_TAGGED_UNION, vec![kind, move_, s1, move2, s2]);
         assert!(wellformed_type(&ir, &ctx, tu).is_err());
     }
 

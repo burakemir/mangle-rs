@@ -18,8 +18,8 @@
 //! via longest-prefix matching. Used by the bounds checker to infer types
 //! for name constants appearing in facts.
 
-use rustc_hash::FxHashMap;
 use mangle_ir::{Inst, InstId, Ir};
+use rustc_hash::FxHashMap;
 
 use crate::type_expr;
 
@@ -40,10 +40,7 @@ impl NameTrie {
         let parts = split_name(name);
         let mut node = self;
         for part in parts {
-            node = node
-                .children
-                .entry(part.to_string())
-                .or_default();
+            node = node.children.entry(part.to_string()).or_default();
         }
         node.is_terminal = true;
     }
@@ -126,9 +123,7 @@ impl NameTrie {
 
 /// Splits a name like "/foo/bar" into segments ["foo", "bar"].
 fn split_name(name: &str) -> Vec<&str> {
-    name.split('/')
-        .filter(|s| !s.is_empty())
-        .collect()
+    name.split('/').filter(|s| !s.is_empty()).collect()
 }
 
 #[cfg(test)]

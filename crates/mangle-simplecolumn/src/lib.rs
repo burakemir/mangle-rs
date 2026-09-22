@@ -400,38 +400,102 @@ pub mod host {
         fn insert_push(&mut self, _val: HostVal) {}
         fn insert_end(&mut self) {}
 
-        fn scan_delta_start(&mut self, _rel_id: i32) -> i32 { 0 }
-        fn scan_index_start(&mut self, _rel_id: i32, _col_idx: i32, _val: HostVal) -> i32 { 0 }
-        fn scan_aggregate_start(&mut self, _rel_id: i32, _description: Vec<i32>) -> i32 { 0 }
-        fn merge_deltas(&mut self) -> i32 { 0 }
+        fn scan_delta_start(&mut self, _rel_id: i32) -> i32 {
+            0
+        }
+        fn scan_index_start(&mut self, _rel_id: i32, _col_idx: i32, _val: HostVal) -> i32 {
+            0
+        }
+        fn scan_aggregate_start(&mut self, _rel_id: i32, _description: Vec<i32>) -> i32 {
+            0
+        }
+        fn merge_deltas(&mut self) -> i32 {
+            0
+        }
 
-        fn const_number(&mut self, n: i64) -> HostVal { self.alloc_number(n) }
-        fn const_float(&mut self, _bits: i64) -> HostVal { HostVal(0) }
-        fn const_string(&mut self, _id: i32) -> HostVal { HostVal(0) }
-        fn const_name(&mut self, _id: i32) -> HostVal { HostVal(0) }
-        fn const_time(&mut self, _nanos: i64) -> HostVal { HostVal(0) }
-        fn const_duration(&mut self, _nanos: i64) -> HostVal { HostVal(0) }
-        fn val_add(&mut self, _a: HostVal, _b: HostVal) -> HostVal { HostVal(0) }
-        fn val_sub(&mut self, _a: HostVal, _b: HostVal) -> HostVal { HostVal(0) }
-        fn val_mul(&mut self, _a: HostVal, _b: HostVal) -> HostVal { HostVal(0) }
-        fn val_div(&mut self, _a: HostVal, _b: HostVal) -> HostVal { HostVal(0) }
-        fn val_sqrt(&mut self, _a: HostVal) -> HostVal { HostVal(0) }
-        fn val_eq(&mut self, a: HostVal, b: HostVal) -> i32 { (self.get_number(a) == self.get_number(b)) as i32 }
-        fn val_neq(&mut self, a: HostVal, b: HostVal) -> i32 { (self.get_number(a) != self.get_number(b)) as i32 }
-        fn val_lt(&mut self, _a: HostVal, _b: HostVal) -> i32 { 0 }
-        fn val_le(&mut self, _a: HostVal, _b: HostVal) -> i32 { 0 }
-        fn val_gt(&mut self, _a: HostVal, _b: HostVal) -> i32 { 0 }
-        fn val_ge(&mut self, _a: HostVal, _b: HostVal) -> i32 { 0 }
-        fn str_concat(&mut self, _a: HostVal, _b: HostVal) -> HostVal { HostVal(0) }
-        fn str_replace(&mut self, _s: HostVal, _old: HostVal, _new: HostVal, _count: HostVal) -> HostVal { HostVal(0) }
-        fn val_to_string(&mut self, _val: HostVal) -> HostVal { HostVal(0) }
+        fn const_number(&mut self, n: i64) -> HostVal {
+            self.alloc_number(n)
+        }
+        fn const_float(&mut self, _bits: i64) -> HostVal {
+            HostVal(0)
+        }
+        fn const_string(&mut self, _id: i32) -> HostVal {
+            HostVal(0)
+        }
+        fn const_name(&mut self, _id: i32) -> HostVal {
+            HostVal(0)
+        }
+        fn const_time(&mut self, _nanos: i64) -> HostVal {
+            HostVal(0)
+        }
+        fn const_duration(&mut self, _nanos: i64) -> HostVal {
+            HostVal(0)
+        }
+        fn val_add(&mut self, _a: HostVal, _b: HostVal) -> HostVal {
+            HostVal(0)
+        }
+        fn val_sub(&mut self, _a: HostVal, _b: HostVal) -> HostVal {
+            HostVal(0)
+        }
+        fn val_mul(&mut self, _a: HostVal, _b: HostVal) -> HostVal {
+            HostVal(0)
+        }
+        fn val_div(&mut self, _a: HostVal, _b: HostVal) -> HostVal {
+            HostVal(0)
+        }
+        fn val_sqrt(&mut self, _a: HostVal) -> HostVal {
+            HostVal(0)
+        }
+        fn val_eq(&mut self, a: HostVal, b: HostVal) -> i32 {
+            (self.get_number(a) == self.get_number(b)) as i32
+        }
+        fn val_neq(&mut self, a: HostVal, b: HostVal) -> i32 {
+            (self.get_number(a) != self.get_number(b)) as i32
+        }
+        fn val_lt(&mut self, _a: HostVal, _b: HostVal) -> i32 {
+            0
+        }
+        fn val_le(&mut self, _a: HostVal, _b: HostVal) -> i32 {
+            0
+        }
+        fn val_gt(&mut self, _a: HostVal, _b: HostVal) -> i32 {
+            0
+        }
+        fn val_ge(&mut self, _a: HostVal, _b: HostVal) -> i32 {
+            0
+        }
+        fn str_concat(&mut self, _a: HostVal, _b: HostVal) -> HostVal {
+            HostVal(0)
+        }
+        fn str_replace(
+            &mut self,
+            _s: HostVal,
+            _old: HostVal,
+            _new: HostVal,
+            _count: HostVal,
+        ) -> HostVal {
+            HostVal(0)
+        }
+        fn val_to_string(&mut self, _val: HostVal) -> HostVal {
+            HostVal(0)
+        }
         fn compound_begin(&mut self, _kind: i32) {}
         fn compound_push(&mut self, _val: HostVal) {}
-        fn compound_end(&mut self) -> HostVal { HostVal(0) }
-        fn compound_get(&mut self, _compound: HostVal, _key: HostVal) -> HostVal { HostVal(0) }
-        fn compound_len(&mut self, _compound: HostVal) -> HostVal { HostVal(0) }
-        fn pair_first(&mut self, _compound: HostVal) -> HostVal { HostVal(0) }
-        fn pair_second(&mut self, _compound: HostVal) -> HostVal { HostVal(0) }
+        fn compound_end(&mut self) -> HostVal {
+            HostVal(0)
+        }
+        fn compound_get(&mut self, _compound: HostVal, _key: HostVal) -> HostVal {
+            HostVal(0)
+        }
+        fn compound_len(&mut self, _compound: HostVal) -> HostVal {
+            HostVal(0)
+        }
+        fn pair_first(&mut self, _compound: HostVal) -> HostVal {
+            HostVal(0)
+        }
+        fn pair_second(&mut self, _compound: HostVal) -> HostVal {
+            HostVal(0)
+        }
         fn debuglog(&mut self, _val: HostVal) {}
     }
 }

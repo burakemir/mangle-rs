@@ -92,10 +92,7 @@ impl ParquetEdbSource {
         } else if path.is_file() {
             vec![path.to_path_buf()]
         } else {
-            return Err(anyhow!(
-                "parquet path does not exist: {}",
-                path.display()
-            ));
+            return Err(anyhow!("parquet path does not exist: {}", path.display()));
         };
 
         Self::from_files(paths, relation_name)
@@ -110,11 +107,7 @@ impl ParquetEdbSource {
             return Err(anyhow!("no parquet files provided"));
         }
         let schema = read_schema(&paths[0])?;
-        let column_names: Vec<String> = schema
-            .fields()
-            .iter()
-            .map(|f| f.name().clone())
-            .collect();
+        let column_names: Vec<String> = schema.fields().iter().map(|f| f.name().clone()).collect();
 
         debug!(
             "Opened {} parquet file(s) as Mangle relation '{}': {} columns {:?}",
@@ -210,7 +203,11 @@ impl EdbSource for ParquetEdbSource {
             return self.scan(relation);
         }
 
-        let flat = self.schema.fields().iter().all(|f| !is_nested(f.data_type()));
+        let flat = self
+            .schema
+            .fields()
+            .iter()
+            .all(|f| !is_nested(f.data_type()));
 
         let mut out: Vec<Vec<Value>> = Vec::new();
         for path in &self.paths {
@@ -425,19 +422,21 @@ fn stats_to_value(bytes: &[u8], dt: &DataType) -> Option<Value> {
         DataType::Boolean => bytes
             .first()
             .map(|&b| Value::Number(if b != 0 { 1 } else { 0 })),
-        DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::UInt8 | DataType::UInt16
+        DataType::Int8
+        | DataType::Int16
+        | DataType::Int32
+        | DataType::UInt8
+        | DataType::UInt16
         | DataType::UInt32 => read_i32(bytes).map(|v| Value::Number(v as i64)),
         DataType::Int64 => read_i64(bytes).map(Value::Number),
         DataType::Float32 => read_f32(bytes).map(|v| Value::Float(v as f64)),
         DataType::Float64 => read_f64(bytes).map(Value::Float),
-        DataType::Utf8 | DataType::LargeUtf8 => {
-            std::str::from_utf8(bytes).ok().map(|s| Value::String(s.to_string()))
-        }
+        DataType::Utf8 | DataType::LargeUtf8 => std::str::from_utf8(bytes)
+            .ok()
+            .map(|s| Value::String(s.to_string())),
         DataType::Timestamp(unit, _) => read_i64(bytes).map(|v| Value::Time(scale_time(*unit, v))),
         DataType::Date32 => read_i32(bytes).map(|v| Value::Time(v as i64 * 86_400_000_000_000)),
-        DataType::Duration(unit) => {
-            read_i64(bytes).map(|v| Value::Duration(scale_time(*unit, v)))
-        }
+        DataType::Duration(unit) => read_i64(bytes).map(|v| Value::Duration(scale_time(*unit, v))),
         // Date64 physical encoding is ambiguous across writers; UInt64 would
         // truncate (see convert's fallback); decimals/binary/nested are not
         // supported for pruning. Fall back to reading the row group.

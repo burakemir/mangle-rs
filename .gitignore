@@ -4,4 +4,5 @@
 *.swn
 **.DS_Store
 /crates/mangle-wasm/playground/pkg/
+crates/**/Cargo.lock
 

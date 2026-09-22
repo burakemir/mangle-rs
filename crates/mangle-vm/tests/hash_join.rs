@@ -82,7 +82,10 @@ impl MemHost {
     }
 
     fn key_canonical(&self, tuple: &[HostVal]) -> Vec<Val> {
-        tuple.iter().map(|h| self.values[h.0 as usize].clone()).collect()
+        tuple
+            .iter()
+            .map(|h| self.values[h.0 as usize].clone())
+            .collect()
     }
 
     fn preload(&mut self, rel_id: i32, rows: Vec<Vec<i64>>) {

@@ -91,7 +91,9 @@ impl DeltaEdbSource {
     /// passing it). This constructor does not create its own Tokio runtime,
     /// so it can be called from within an async context.
     pub fn from_table(table: DeltaTable, relation_name: &str) -> Result<Self> {
-        let snapshot = table.snapshot().map_err(|e| anyhow!("table not initialized: {}", e))?;
+        let snapshot = table
+            .snapshot()
+            .map_err(|e| anyhow!("table not initialized: {}", e))?;
         let schema = snapshot.schema();
 
         // Get partition columns from the snapshot metadata
@@ -204,16 +206,20 @@ impl DeltaEdbSource {
                             PartitionValue::Equal(v) => format!("{} = '{}'", f.key, v),
                             PartitionValue::NotEqual(v) => format!("{} != '{}'", f.key, v),
                             PartitionValue::In(vals) => {
-                                let quoted: Vec<String> = vals.iter().map(|v| format!("'{}'", v)).collect();
+                                let quoted: Vec<String> =
+                                    vals.iter().map(|v| format!("'{}'", v)).collect();
                                 format!("{} IN ({})", f.key, quoted.join(", "))
                             }
                             PartitionValue::NotIn(vals) => {
-                                let quoted: Vec<String> = vals.iter().map(|v| format!("'{}'", v)).collect();
+                                let quoted: Vec<String> =
+                                    vals.iter().map(|v| format!("'{}'", v)).collect();
                                 format!("{} NOT IN ({})", f.key, quoted.join(", "))
                             }
                             PartitionValue::LessThanOrEqual(v) => format!("{} <= '{}'", f.key, v),
                             PartitionValue::LessThan(v) => format!("{} < '{}'", f.key, v),
-                            PartitionValue::GreaterThanOrEqual(v) => format!("{} >= '{}'", f.key, v),
+                            PartitionValue::GreaterThanOrEqual(v) => {
+                                format!("{} >= '{}'", f.key, v)
+                            }
                             PartitionValue::GreaterThan(v) => format!("{} > '{}'", f.key, v),
                         })
                         .collect();
@@ -237,7 +243,9 @@ impl DeltaEdbSource {
             })
         });
 
-        handle.join().map_err(|e| anyhow!("read thread panicked: {:?}", e))?
+        handle
+            .join()
+            .map_err(|e| anyhow!("read thread panicked: {:?}", e))?
     }
 }
 
@@ -247,7 +255,10 @@ impl EdbSource for DeltaEdbSource {
     }
 
     fn relations(&self) -> Result<Vec<RelationInfo>> {
-        let snapshot = self.table.snapshot().map_err(|e| anyhow!("table not loaded: {}", e))?;
+        let snapshot = self
+            .table
+            .snapshot()
+            .map_err(|e| anyhow!("table not loaded: {}", e))?;
         let estimated_rows = snapshot.log_data().num_files() * 100_000; // rough estimate
         Ok(vec![RelationInfo {
             name: self.relation_name.clone(),

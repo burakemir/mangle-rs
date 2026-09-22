@@ -27,11 +27,11 @@ async fn main() {
     if let Some(ref dir) = config.idb_cache_dir {
         program_store = program_store.with_idb_cache_dir(dir.clone());
     }
-    if let Some(ref edb_dir) = config.edb_dir {
-        if !config.persist_edb.is_empty() {
-            let log = MutationLog::new(edb_dir.clone(), config.persist_edb.clone());
-            program_store = program_store.with_mutation_log(log);
-        }
+    if let Some(ref edb_dir) = config.edb_dir
+        && !config.persist_edb.is_empty()
+    {
+        let log = MutationLog::new(edb_dir.clone(), config.persist_edb.clone());
+        program_store = program_store.with_mutation_log(log);
     }
     let state: AppState = Arc::new(RwLock::new(program_store));
 

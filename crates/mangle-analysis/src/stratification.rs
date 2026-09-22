@@ -13,9 +13,9 @@
 // limitations under the License.
 
 use crate::PredicateSet;
-use rustc_hash::{FxHashMap, FxHashSet};
 use mangle_ast as ast;
 use mangle_ast::Arena;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::fmt;
 
 /// Represents a Mangle program consisting of logic rules and declarations.
@@ -212,13 +212,13 @@ fn make_dep_graph<'p>(program: &Program<'p>) -> DepGraph {
                             dep.add_edge(*s, atom_pred.sym, true);
                         }
                     }
-                    ast::Term::TemporalAtom(atom_pred, _) => {
-                        if !program.extensional_preds().contains(&atom_pred.sym) {
-                            if clause.transform.is_empty() || clause.transform[0].var.is_some() {
-                                dep.add_edge(*s, atom_pred.sym, false);
-                            } else {
-                                dep.add_edge(*s, atom_pred.sym, true);
-                            }
+                    ast::Term::TemporalAtom(atom_pred, _)
+                        if !program.extensional_preds().contains(&atom_pred.sym) =>
+                    {
+                        if clause.transform.is_empty() || clause.transform[0].var.is_some() {
+                            dep.add_edge(*s, atom_pred.sym, false);
+                        } else {
+                            dep.add_edge(*s, atom_pred.sym, true);
                         }
                     }
                     _ => {}
@@ -317,7 +317,7 @@ impl DepGraphExt for DepGraph {
             }
         }
 
-        for (node, _) in self.iter() {
+        for node in self.keys() {
             visit(*node, self, &mut s, &mut seen);
         }
 

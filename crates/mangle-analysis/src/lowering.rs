@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use rustc_hash::FxHashMap;
 use mangle_ast as ast;
 use mangle_ir::{Inst, InstId, Ir};
+use rustc_hash::FxHashMap;
 
 pub struct LoweringContext<'a> {
     arena: &'a ast::Arena,
