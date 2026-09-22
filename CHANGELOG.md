@@ -4,6 +4,8 @@ All notable changes in mangle/rust will be documented in this file.
 
 ## Unreleased
 
+## [0.9.0] - 2026-09-22
+
 ### 🚀 Features
 
 - **Connect RPC API for `mangle-server`** (design:
