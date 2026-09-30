@@ -97,6 +97,19 @@ pub enum Op {
         var: NameId,
         body: Box<Op>,
     },
+
+    /// Iterate over the elements of a list value.
+    ///
+    /// Evaluates `source`. If the result is a List, executes `body` once per
+    /// element with `var` bound to that element. If the value is not a List
+    /// or the list is empty, the op silently produces no rows.
+    ///
+    /// Used to implement `:list:member(Elem, List)`.
+    IterateList {
+        source: Operand,
+        var: NameId,
+        body: Box<Op>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -1274,6 +1274,64 @@ mod tests {
     }
 
     #[test]
+    fn test_list_member_unbound() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            container(["a", "b", "c"]).
+            item(X) :- container(L), :list:member(X, L).
+        "#;
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("item")
+            .expect("relation item not found")
+            .collect();
+        assert_eq!(facts.len(), 3, "item: {:?}", facts);
+        Ok(())
+    }
+
+    #[test]
+    fn test_list_member_bound() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            container(["a", "b"]).
+            container(["x", "y"]).
+            has_b(L) :- container(L), :list:member("b", L).
+        "#;
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("has_b")
+            .expect("relation has_b not found")
+            .collect();
+        assert_eq!(facts.len(), 1, "has_b: {:?}", facts);
+        Ok(())
+    }
+
+    #[test]
+    fn test_list_member_empty() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            container([]).
+            item(X) :- container(L), :list:member(X, L).
+        "#;
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("item")
+            .expect("relation item not found")
+            .collect();
+        assert_eq!(facts.len(), 0, "item: {:?}", facts);
+        Ok(())
+    }
+
+    #[test]
     fn test_timestamp_literals() -> Result<()> {
         let arena = Arena::new_with_global_interner();
         let source = r#"

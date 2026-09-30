@@ -894,6 +894,18 @@ impl<'a> Interpreter<'a> {
                 }
                 Ok(count)
             }
+            Op::IterateList { source, var, body } => {
+                let list_val = self.eval_operand(source, env)?;
+                let mut count = 0;
+                if let Value::Compound(CompoundKind::List, elems) = list_val {
+                    for elem in elems {
+                        env.vars.insert(*var, elem);
+                        count += self.exec_op(body, env)?;
+                    }
+                    env.vars.remove(var);
+                }
+                Ok(count)
+            }
         }
     }
 

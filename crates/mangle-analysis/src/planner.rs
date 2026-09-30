@@ -498,6 +498,49 @@ impl<'a> Planner<'a> {
                     })
                 }
             }
+            Inst::Atom { predicate, args }
+                if self.ir.resolve_name(predicate) == ":list:member" =>
+            {
+                if args.len() != 2 {
+                    return Err(anyhow!(":list:member requires exactly 2 arguments"));
+                }
+                // Binding mode only when args[0] is an unbound variable.
+                let unbound_elem_var = match self.ir.get(args[0]) {
+                    Inst::Var(v) if !bound_vars.contains(v) => Some(*v),
+                    _ => None,
+                };
+                if let Some(elem_var) = unbound_elem_var {
+                    bound_vars.insert(elem_var);
+                    let body = self.plan_join_sequence(premises, bound_vars, continuation)?;
+                    self.with_eval(args[1], |_this, list_op| {
+                        Ok(Op::IterateList {
+                            source: list_op,
+                            var: elem_var,
+                            body: Box::new(body),
+                        })
+                    })
+                } else {
+                    // Constant or already-bound var: membership test via equality filter.
+                    let fresh = self.fresh_var("listmem");
+                    let body = self.plan_join_sequence(premises, bound_vars, continuation)?;
+                    self.with_eval(args[1], |this, list_op| {
+                        this.with_eval(args[0], |_this, elem_op| {
+                            Ok(Op::IterateList {
+                                source: list_op,
+                                var: fresh,
+                                body: Box::new(Op::Filter {
+                                    cond: Condition::Cmp {
+                                        op: CmpOp::Eq,
+                                        left: Operand::Var(fresh),
+                                        right: elem_op,
+                                    },
+                                    body: Box::new(body),
+                                }),
+                            })
+                        })
+                    })
+                }
+            }
             Inst::Atom { predicate, args } => {
                 // Fast path: emit HashJoin when the env var
                 // `MANGLE_HASHJOIN=1` is set, neither side is the delta
