@@ -449,6 +449,55 @@ impl<'a> Planner<'a> {
                     })
                 })
             }
+            Inst::Atom { predicate, args }
+                if self.ir.resolve_name(predicate) == ":match_field" =>
+            {
+                if args.len() != 3 {
+                    return Err(anyhow!(":match_field requires exactly 3 arguments"));
+                }
+                let field_name_id = match self.ir.get(args[1]) {
+                    Inst::Name(n) => *n,
+                    _ => return Err(anyhow!(":match_field second argument must be a name constant")),
+                };
+                // Binding mode only when args[2] is an unbound variable.
+                let unbound_var = match self.ir.get(args[2]) {
+                    Inst::Var(v) if !bound_vars.contains(v) => Some(*v),
+                    _ => None,
+                };
+                if let Some(out_var) = unbound_var {
+                    bound_vars.insert(out_var);
+                    let body = self.plan_join_sequence(premises, bound_vars, continuation)?;
+                    self.with_eval(args[0], |_this, struct_op| {
+                        Ok(Op::MatchField {
+                            struct_op,
+                            field: field_name_id,
+                            var: out_var,
+                            body: Box::new(body),
+                        })
+                    })
+                } else {
+                    // Constant or already-bound var: extract into a fresh var, filter for equality.
+                    let fresh = self.fresh_var("mf");
+                    let body = self.plan_join_sequence(premises, bound_vars, continuation)?;
+                    self.with_eval(args[0], |this, struct_op| {
+                        this.with_eval(args[2], |_this, expected_op| {
+                            Ok(Op::MatchField {
+                                struct_op,
+                                field: field_name_id,
+                                var: fresh,
+                                body: Box::new(Op::Filter {
+                                    cond: Condition::Cmp {
+                                        op: CmpOp::Eq,
+                                        left: Operand::Var(fresh),
+                                        right: expected_op,
+                                    },
+                                    body: Box::new(body),
+                                }),
+                            })
+                        })
+                    })
+                }
+            }
             Inst::Atom { predicate, args } => {
                 // Fast path: emit HashJoin when the env var
                 // `MANGLE_HASHJOIN=1` is set, neither side is the delta

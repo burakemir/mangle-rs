@@ -83,6 +83,20 @@ pub enum Op {
         join_keys: Vec<NameId>,
         body: Box<Op>,
     },
+
+    /// Extract a named field from a struct value.
+    ///
+    /// Evaluates `struct_op`. If the result is a Struct containing `field`,
+    /// binds `var` to the field value and executes `body`. If the field is
+    /// absent or the value is not a Struct, the op silently produces no rows.
+    ///
+    /// Used to implement `:match_field(Struct, /FieldName, Var)`.
+    MatchField {
+        struct_op: Operand,
+        field: NameId,
+        var: NameId,
+        body: Box<Op>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

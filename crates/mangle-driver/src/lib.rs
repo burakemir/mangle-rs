@@ -1215,6 +1215,65 @@ mod tests {
     }
 
     #[test]
+    fn test_match_field_unbound() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            data({/name: "alice", /age: 30}).
+            result(Name) :- data(X), :match_field(X, /name, Name).
+        "#;
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("result")
+            .expect("relation result not found")
+            .collect();
+        assert_eq!(facts.len(), 1, "result: {:?}", facts);
+        assert_eq!(facts[0][0], Value::String("alice".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn test_match_field_bound_filter() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            data({/color: "red", /name: "r1"}).
+            data({/color: "blue", /name: "b1"}).
+            result(X) :- data(X), :match_field(X, /color, "red").
+        "#;
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("result")
+            .expect("relation result not found")
+            .collect();
+        assert_eq!(facts.len(), 1, "result: {:?}", facts);
+        Ok(())
+    }
+
+    #[test]
+    fn test_match_field_missing() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            data({/name: "alice"}).
+            result(Name) :- data(X), :match_field(X, /missing, Name).
+        "#;
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("result")
+            .expect("relation result not found")
+            .collect();
+        assert_eq!(facts.len(), 0, "result: {:?}", facts);
+        Ok(())
+    }
+
+    #[test]
     fn test_timestamp_literals() -> Result<()> {
         let arena = Arena::new_with_global_interner();
         let source = r#"

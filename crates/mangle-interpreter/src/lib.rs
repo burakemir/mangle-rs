@@ -868,6 +868,32 @@ impl<'a> Interpreter<'a> {
                 }
                 Ok(count)
             }
+            Op::MatchField {
+                struct_op,
+                field,
+                var,
+                body,
+            } => {
+                let struct_val = self.eval_operand(struct_op, env)?;
+                let field_name = self.ir.resolve_name(*field).to_string();
+                let found = match &struct_val {
+                    Value::Compound(CompoundKind::Struct, pairs) => {
+                        let key = Value::Name(field_name);
+                        pairs
+                            .chunks_exact(2)
+                            .find(|chunk| chunk[0] == key)
+                            .map(|chunk| chunk[1].clone())
+                    }
+                    _ => None,
+                };
+                let mut count = 0;
+                if let Some(val) = found {
+                    env.vars.insert(*var, val);
+                    count += self.exec_op(body, env)?;
+                    env.vars.remove(var);
+                }
+                Ok(count)
+            }
         }
     }
 
