@@ -449,15 +449,17 @@ impl<'a> Planner<'a> {
                     })
                 })
             }
-            Inst::Atom { predicate, args }
-                if self.ir.resolve_name(predicate) == ":match_field" =>
-            {
+            Inst::Atom { predicate, args } if self.ir.resolve_name(predicate) == ":match_field" => {
                 if args.len() != 3 {
                     return Err(anyhow!(":match_field requires exactly 3 arguments"));
                 }
                 let field_name_id = match self.ir.get(args[1]) {
                     Inst::Name(n) => *n,
-                    _ => return Err(anyhow!(":match_field second argument must be a name constant")),
+                    _ => {
+                        return Err(anyhow!(
+                            ":match_field second argument must be a name constant"
+                        ));
+                    }
                 };
                 // Binding mode only when args[2] is an unbound variable.
                 let unbound_var = match self.ir.get(args[2]) {
@@ -498,9 +500,7 @@ impl<'a> Planner<'a> {
                     })
                 }
             }
-            Inst::Atom { predicate, args }
-                if self.ir.resolve_name(predicate) == ":list:member" =>
-            {
+            Inst::Atom { predicate, args } if self.ir.resolve_name(predicate) == ":list:member" => {
                 if args.len() != 2 {
                     return Err(anyhow!(":list:member requires exactly 2 arguments"));
                 }
@@ -699,6 +699,121 @@ impl<'a> Planner<'a> {
             Inst::NegAtom(inner) => {
                 let inner_inst = self.ir.get(inner).clone();
                 if let Inst::Atom { predicate, args } = inner_inst {
+                    // Built-in predicates need dedicated negated forms: the
+                    // generic path below would look them up as (never-populated)
+                    // relations in the store and the negation would always
+                    // succeed, silently producing wrong results.
+                    let pred_name = self.ir.resolve_name(predicate).to_string();
+                    match pred_name.as_str() {
+                        ":list:member" => {
+                            if args.len() != 2 {
+                                return Err(anyhow!(":list:member requires exactly 2 arguments"));
+                            }
+                            self.require_bound_args(&args, bound_vars, "!:list:member")?;
+                            let body =
+                                self.plan_join_sequence(premises, bound_vars, continuation)?;
+                            return self.with_eval(args[0], |this, elem_op| {
+                                this.with_eval(args[1], |_this, list_op| {
+                                    Ok(Op::Filter {
+                                        cond: Condition::Not(Box::new(Condition::Call {
+                                            function: predicate,
+                                            args: vec![elem_op, list_op],
+                                        })),
+                                        body: Box::new(body),
+                                    })
+                                })
+                            });
+                        }
+                        ":match_field" => {
+                            if args.len() != 3 {
+                                return Err(anyhow!(":match_field requires exactly 3 arguments"));
+                            }
+                            let field_id = match self.ir.get(args[1]) {
+                                Inst::Name(n) => *n,
+                                _ => {
+                                    return Err(anyhow!(
+                                        ":match_field second argument must be a name constant"
+                                    ));
+                                }
+                            };
+                            self.require_bound_args(&args, bound_vars, "!:match_field")?;
+                            let field_op = Operand::Const(physical::Constant::Name(field_id));
+                            let body =
+                                self.plan_join_sequence(premises, bound_vars, continuation)?;
+                            return self.with_eval(args[0], |this, struct_op| {
+                                this.with_eval(args[2], |_this, value_op| {
+                                    Ok(Op::Filter {
+                                        cond: Condition::Not(Box::new(Condition::Call {
+                                            function: predicate,
+                                            args: vec![struct_op, field_op.clone(), value_op],
+                                        })),
+                                        body: Box::new(body),
+                                    })
+                                })
+                            });
+                        }
+                        ":match_prefix"
+                        | ":string:starts_with"
+                        | ":string:ends_with"
+                        | ":string:contains" => {
+                            if args.len() != 2 {
+                                return Err(anyhow!(
+                                    "Built-in predicate requires exactly 2 arguments"
+                                ));
+                            }
+                            self.require_bound_args(&args, bound_vars, &format!("!{pred_name}"))?;
+                            let body =
+                                self.plan_join_sequence(premises, bound_vars, continuation)?;
+                            return self.with_eval(args[0], |this, left_op| {
+                                this.with_eval(args[1], |_this, right_op| {
+                                    Ok(Op::Filter {
+                                        cond: Condition::Not(Box::new(Condition::Call {
+                                            function: predicate,
+                                            args: vec![left_op.clone(), right_op],
+                                        })),
+                                        body: Box::new(body),
+                                    })
+                                })
+                            });
+                        }
+                        ":lt" | ":le" | ":gt" | ":ge" | ":time:lt" | ":time:le" | ":time:gt"
+                        | ":time:ge" | ":duration:lt" | ":duration:le" | ":duration:gt"
+                        | ":duration:ge" => {
+                            if args.len() != 2 {
+                                return Err(anyhow!(
+                                    "Comparison predicate requires exactly 2 arguments"
+                                ));
+                            }
+                            let cmp_op = match pred_name.as_str() {
+                                ":lt" | ":time:lt" | ":duration:lt" => CmpOp::Lt,
+                                ":le" | ":time:le" | ":duration:le" => CmpOp::Le,
+                                ":gt" | ":time:gt" | ":duration:gt" => CmpOp::Gt,
+                                ":ge" | ":time:ge" | ":duration:ge" => CmpOp::Ge,
+                                _ => unreachable!(),
+                            };
+                            self.require_bound_args(&args, bound_vars, &format!("!{pred_name}"))?;
+                            let body =
+                                self.plan_join_sequence(premises, bound_vars, continuation)?;
+                            return self.with_eval(args[0], |this, left_op| {
+                                this.with_eval(args[1], |_this, right_op| {
+                                    Ok(Op::Filter {
+                                        cond: Condition::Not(Box::new(Condition::Cmp {
+                                            op: cmp_op,
+                                            left: left_op.clone(),
+                                            right: right_op,
+                                        })),
+                                        body: Box::new(body),
+                                    })
+                                })
+                            });
+                        }
+                        other if other.starts_with(':') => {
+                            return Err(anyhow!(
+                                "negation of built-in predicate '{other}' is not supported"
+                            ));
+                        }
+                        _ => {}
+                    }
                     let body = self.plan_join_sequence(premises, bound_vars, continuation)?;
                     let mut neg_args = Vec::new();
                     for arg in &args {
@@ -739,6 +854,27 @@ impl<'a> Planner<'a> {
             }
             _ => Err(anyhow!("Unsupported premise type: {:?}", inst)),
         }
+    }
+
+    /// Negated built-in predicates cannot bind variables: every variable
+    /// argument must already be bound by an earlier premise. Negation-as-
+    /// failure with unbound arguments is unsafe (and meaningless).
+    fn require_bound_args(
+        &self,
+        args: &[InstId],
+        bound_vars: &FxHashSet<NameId>,
+        context: &str,
+    ) -> Result<()> {
+        for arg in args {
+            if let Inst::Var(v) = self.ir.get(*arg)
+                && !bound_vars.contains(v)
+            {
+                return Err(anyhow!(
+                    "{context}: all arguments must be bound by earlier premises"
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn apply_constraints(

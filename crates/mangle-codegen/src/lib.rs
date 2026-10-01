@@ -894,7 +894,12 @@ impl<'a, B: Backend> Codegen<'a, B> {
                 join_keys,
                 body,
             } => self.emit_hash_join(func, build_source, probe_source, join_keys, body, ctx),
-            _ => {}
+            Op::Nop => {}
+            // These ops would need dedicated WASM emission; skipping them
+            // silently would produce wrong results, so fail loudly instead.
+            Op::MatchField { .. } | Op::IterateList { .. } => {
+                panic!("WASM codegen does not yet support :match_field / :list:member")
+            }
         }
     }
 
@@ -1063,8 +1068,11 @@ impl<'a, B: Backend> Codegen<'a, B> {
                 };
                 func.instruction(&Instruction::Call(import_idx));
             }
-            _ => {
-                func.instruction(&Instruction::I32Const(1));
+            // These conditions would need dedicated WASM emission; emitting
+            // a constant `true` (as the previous catch-all did) silently
+            // produces wrong results, so fail loudly instead.
+            Condition::Negation { .. } | Condition::Call { .. } | Condition::Not(_) => {
+                panic!("WASM codegen does not yet support condition: {:?}", cond);
             }
         }
     }

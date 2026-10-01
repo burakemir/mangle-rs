@@ -1332,6 +1332,293 @@ mod tests {
     }
 
     #[test]
+    fn test_list_member_negation_non_member() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        // "z" is not a member of either list, so the negation succeeds.
+        let source = r#"
+            word("z").
+            container(["a", "b"]).
+            container(["x", "y"]).
+            clean(X) :- word(X), container(L), !:list:member(X, L).
+        "#;
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("clean")
+            .expect("relation clean not found")
+            .collect();
+        assert_eq!(facts.len(), 1, "clean: {:?}", facts);
+        assert_eq!(facts[0][0], Value::String("z".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn test_list_member_negation_member() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        // "a" IS a member, so the negation must fail and produce no rows.
+        let source = r#"
+            word("a").
+            container(["a", "b"]).
+            banned(X) :- word(X), container(L), !:list:member(X, L).
+        "#;
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("banned")
+            .expect("relation banned not found")
+            .collect();
+        assert_eq!(facts.len(), 0, "banned: {:?}", facts);
+        Ok(())
+    }
+
+    #[test]
+    fn test_list_member_negation_empty_list() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        // Nothing is a member of the empty list: negation always succeeds.
+        let source = r#"
+            word("a").
+            container([]).
+            clean(X) :- word(X), container(L), !:list:member(X, L).
+        "#;
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("clean")
+            .expect("relation clean not found")
+            .collect();
+        assert_eq!(facts.len(), 1, "clean: {:?}", facts);
+        Ok(())
+    }
+
+    #[test]
+    fn test_match_field_negation_absent() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        // The struct has no /missing field, so the negation succeeds.
+        let source = r#"
+            data({/name: "alice"}).
+            missing(X) :- data(X), !:match_field(X, /missing, "x").
+        "#;
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("missing")
+            .expect("relation missing not found")
+            .collect();
+        assert_eq!(facts.len(), 1, "missing: {:?}", facts);
+        Ok(())
+    }
+
+    #[test]
+    fn test_match_field_negation_present_equal() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        // The field is present and equal: the negation must fail.
+        let source = r#"
+            data({/name: "alice"}).
+            mismatch(X) :- data(X), !:match_field(X, /name, "alice").
+        "#;
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("mismatch")
+            .expect("relation mismatch not found")
+            .collect();
+        assert_eq!(facts.len(), 0, "mismatch: {:?}", facts);
+        Ok(())
+    }
+
+    #[test]
+    fn test_match_field_negation_present_different() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        // The field is present but has a different value: negation succeeds.
+        let source = r#"
+            data({/name: "alice"}).
+            not_bob(X) :- data(X), !:match_field(X, /name, "bob").
+        "#;
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("not_bob")
+            .expect("relation not_bob not found")
+            .collect();
+        assert_eq!(facts.len(), 1, "not_bob: {:?}", facts);
+        Ok(())
+    }
+
+    #[test]
+    fn test_negated_builtin_unbound_arg_rejected() {
+        let arena = Arena::new_with_global_interner();
+        // Negation cannot bind variables: X is unbound at the negation.
+        let source = r#"
+            container(["a", "b"]).
+            foo(X) :- container(L), !:list:member(X, L).
+        "#;
+        let result = compile(source, &arena).and_then(|(mut ir, stratified)| {
+            execute(&mut ir, &stratified, Box::new(MemStore::new())).map(|_| ())
+        });
+        assert!(
+            result.is_err(),
+            "expected compile error for unbound argument in negated builtin"
+        );
+    }
+
+    #[test]
+    fn test_negated_string_builtin_unbound_arg_rejected() {
+        let arena = Arena::new_with_global_interner();
+        // Negation cannot bind variables: X is unbound at the negation.
+        let source = r#"
+            pattern("an").
+            foo(X) :- pattern(P), !:string:contains(X, P).
+        "#;
+        let result = compile(source, &arena).and_then(|(mut ir, stratified)| {
+            execute(&mut ir, &stratified, Box::new(MemStore::new())).map(|_| ())
+        });
+        assert!(
+            result.is_err(),
+            "expected compile error for unbound argument in negated string builtin"
+        );
+    }
+
+    #[test]
+    fn test_negated_time_comparison() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            event(2024-01-15T10:30:00Z).
+            event(2024-06-01T00:00:00Z).
+            later(X) :- event(X), !:time:lt(X, 2024-06-01T00:00:00Z).
+        "#;
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("later")
+            .expect("relation later not found")
+            .collect();
+        assert_eq!(facts.len(), 1, "later: {:?}", facts);
+        Ok(())
+    }
+
+    #[test]
+    fn test_negated_comparison() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        // !:lt(X, 3) succeeds exactly for X >= 3.
+        let source = r#"
+            num(1). num(2). num(3). num(5).
+            big(X) :- num(X), !:lt(X, 3).
+        "#;
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("big")
+            .expect("relation big not found")
+            .collect();
+        let mut xs: Vec<_> = facts.iter().map(|f| f[0].clone()).collect();
+        xs.sort();
+        assert_eq!(xs.len(), 2, "big: {:?}", facts);
+        assert_eq!(xs[0], Value::Number(3));
+        assert_eq!(xs[1], Value::Number(5));
+        Ok(())
+    }
+
+    #[test]
+    fn test_negated_comparison_constants() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        // Both arguments bound: !:le(X, Y) must fail when X <= Y holds.
+        let source = r#"
+            pair(1, 2). pair(5, 3).
+            dec(X, Y) :- pair(X, Y), !:le(X, Y).
+        "#;
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("dec")
+            .expect("relation dec not found")
+            .collect();
+        assert_eq!(facts.len(), 1, "dec: {:?}", facts);
+        assert_eq!(facts[0][0], Value::Number(5));
+        Ok(())
+    }
+
+    #[test]
+    fn test_negated_string_contains() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            word("apple"). word("banana"). word("cherry").
+            clean(X) :- word(X), !:string:contains(X, "an").
+        "#;
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("clean")
+            .expect("relation clean not found")
+            .collect();
+        assert_eq!(facts.len(), 2, "clean: {:?}", facts);
+        let mut words: Vec<_> = facts.iter().map(|f| f[0].clone()).collect();
+        words.sort();
+        assert_eq!(words[0], Value::String("apple".to_string()));
+        assert_eq!(words[1], Value::String("cherry".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn test_negated_string_starts_with_and_ends_with() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            word("alpha"). word("beta"). word("gamma").
+            mid(X) :- word(X), !:string:starts_with(X, "al"), !:string:ends_with(X, "ma").
+        "#;
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("mid")
+            .expect("relation mid not found")
+            .collect();
+        assert_eq!(facts.len(), 1, "mid: {:?}", facts);
+        assert_eq!(facts[0][0], Value::String("beta".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn test_negated_match_prefix() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        let source = r#"
+            tag(/alpha_one). tag(/beta_two).
+            other(X) :- tag(X), !:match_prefix(X, /alpha).
+        "#;
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("other")
+            .expect("relation other not found")
+            .collect();
+        assert_eq!(facts.len(), 1, "other: {:?}", facts);
+        assert_eq!(facts[0][0], Value::Name("/beta_two".to_string()));
+        Ok(())
+    }
+
+    #[test]
     fn test_timestamp_literals() -> Result<()> {
         let arena = Arena::new_with_global_interner();
         let source = r#"

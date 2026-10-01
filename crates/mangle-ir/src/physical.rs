@@ -170,6 +170,11 @@ pub enum Condition {
         function: NameId,
         args: Vec<Operand>,
     },
+    /// Logical negation of an inner condition.
+    ///
+    /// Used for negated built-in predicates (e.g. `!:list:member(E, L)`),
+    /// which cannot be evaluated by looking up a relation in the store.
+    Not(Box<Condition>),
 }
 
 #[derive(Debug, Clone, PartialEq)]

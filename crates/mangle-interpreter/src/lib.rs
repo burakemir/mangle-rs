@@ -1208,6 +1208,7 @@ impl<'a> Interpreter<'a> {
                 }
                 Ok(true) // No match found
             }
+            Condition::Not(inner) => Ok(!self.eval_cond(inner, env)?),
             Condition::Call { function, args } => {
                 let fn_name = self.ir.resolve_name(*function);
                 let mut vals = Vec::new();
@@ -1238,6 +1239,25 @@ impl<'a> Interpreter<'a> {
                     Ok(name.starts_with(prefix.as_str()) && name.len() > prefix.len())
                 }
                 _ => Err(anyhow!(":match_prefix: expected name arguments")),
+            },
+            // Check-mode for :list:member(Elem, List): true iff Elem is an
+            // element of List. Used for the negated form `!:list:member`.
+            // A non-list second argument yields false, mirroring the
+            // silent no-rows behavior of the positive `IterateList` op.
+            ":list:member" => match &vals[1] {
+                Value::Compound(CompoundKind::List, elems) => Ok(elems.contains(&vals[0])),
+                _ => Ok(false),
+            },
+            // Check-mode for :match_field(Struct, Field, Value): true iff
+            // Struct has the field and its value equals Value. Used for the
+            // negated form `!:match_field`. A non-struct scrutinee or an
+            // absent field yields false, mirroring the positive `MatchField`
+            // op (so the negation succeeds).
+            ":match_field" => match (&vals[0], &vals[1]) {
+                (Value::Compound(CompoundKind::Struct, pairs), Value::Name(field)) => Ok(pairs
+                    .chunks_exact(2)
+                    .any(|chunk| chunk[0] == Value::Name(field.clone()) && chunk[1] == vals[2])),
+                _ => Ok(false),
             },
             _ => Err(anyhow!("Unknown built-in predicate: {name}")),
         }

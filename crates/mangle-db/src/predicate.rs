@@ -100,6 +100,14 @@ fn extract_from_op(
         Op::HashJoin { body, .. } => {
             extract_from_op(ir, body, edb_relations, result);
         }
+        // Neither op introduces an EDB scan, but their bodies may contain
+        // nested iterations over EDB relations, so recurse. (Predicates on
+        // the vars these ops bind are not EDB column predicates; the
+        // immediate-filter collection in extract_from_iterate correctly
+        // stops at these nodes.)
+        Op::MatchField { body, .. } | Op::IterateList { body, .. } => {
+            extract_from_op(ir, body, edb_relations, result);
+        }
     }
 }
 
@@ -219,7 +227,7 @@ fn condition_to_predicate(
             }
             None
         }
-        Condition::Negation { .. } | Condition::Call { .. } => None,
+        Condition::Negation { .. } | Condition::Call { .. } | Condition::Not(_) => None,
     }
 }
 
