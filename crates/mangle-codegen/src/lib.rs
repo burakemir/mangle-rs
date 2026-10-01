@@ -26,7 +26,7 @@ use mangle_ir::physical::{CmpOp, Condition, Constant, DataSource, Expr, Op, Oper
 use mangle_ir::{Inst, InstId, Ir, NameId};
 use wasm_encoder::{
     CodeSection, EntityType, ExportKind, ExportSection, Function, FunctionSection, HeapType,
-    ImportSection, Instruction, MemorySection, Module, TypeSection, ValType,
+    ImportSection, Instruction, MemArg, MemorySection, Module, TypeSection, ValType,
 };
 
 // --- Import indices ---
@@ -352,6 +352,11 @@ struct FuncContext {
     /// so host-side tables don't collide when multiple joins appear in the
     /// same run() function.
     next_join_id: u32,
+    /// Byte offset in linear memory for the next `Op::GroupBy` aggregate
+    /// description. Each GroupBy writes its desc (a small array of i32s)
+    /// before calling scan_aggregate_start, which copies it out; offsets
+    /// never collide because they only ever grow.
+    next_desc_offset: u32,
 }
 
 impl<'a, B: Backend> Codegen<'a, B> {
@@ -722,6 +727,7 @@ impl<'a, B: Backend> Codegen<'a, B> {
             iter_base: 0,
             iter_offset: 0,
             next_join_id: 0,
+            next_desc_offset: 0,
         };
 
         // Pass 1: Collect vars and count iterators
@@ -828,6 +834,9 @@ impl<'a, B: Backend> Codegen<'a, B> {
                 aggregates,
                 ..
             } => {
+                // One host-side group iterator (consumed via
+                // scan_next / get_col).
+                count += 1;
                 for v in vars {
                     if !ctx.var_map.contains_key(v) {
                         ctx.var_map.insert(*v, ctx.next_local);
@@ -966,13 +975,13 @@ impl<'a, B: Backend> Codegen<'a, B> {
                     }
                 }
             }
-            // GroupBy would need dedicated WASM emission (the host-side
-            // scan_aggregate_start protocol is stubbed but unused); emitting
-            // nothing silently produces wrong results, so fail loudly
-            // instead.
-            Op::GroupBy { .. } => {
-                panic!("WASM codegen does not yet support aggregation (GroupBy)")
-            }
+            Op::GroupBy {
+                source,
+                vars,
+                keys,
+                aggregates,
+                body,
+            } => self.emit_group_by(func, op, ctx),
             Op::Filter { cond, body } => {
                 self.emit_condition(func, cond, ctx);
                 func.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
@@ -1228,6 +1237,126 @@ impl<'a, B: Backend> Codegen<'a, B> {
 
         // --- Tear down table ---
         self.backend.emit_hash_join_end(func, join_id);
+    }
+
+    /// Emit WASM for `Op::GroupBy`. See the `scan_aggregate_start` doc in
+    /// `mangle-common`'s `Host` trait for the description format.
+    ///
+    /// 1. Build the description (key column indices + aggregate specs) in
+    ///    linear memory at a fresh offset via i32.store.
+    /// 2. `scan_aggregate_start(rel_id, ptr, len)` -> iter_id.
+    /// 3. Standard scan_next / get_col loop; each yielded row binds the key
+    ///    vars first, then the aggregate vars (that is exactly what the
+    ///    interpreter binds per group).
+    fn emit_group_by(&self, func: &mut Function, op: &Op, ctx: &mut FuncContext) {
+        let Op::GroupBy {
+            source,
+            vars,
+            keys,
+            aggregates,
+            body,
+        } = op
+        else {
+            unreachable!("emit_group_by on non-GroupBy op");
+        };
+        // --- Build the description ---
+        let mut desc: Vec<i32> = Vec::with_capacity(2 + keys.len() + 2 * aggregates.len());
+        desc.push(keys.len() as i32);
+        for key in keys {
+            let col = vars
+                .iter()
+                .position(|v| v == key)
+                .unwrap_or_else(|| panic!("GroupBy key not found in source vars"));
+            desc.push(col as i32);
+        }
+        desc.push(aggregates.len() as i32);
+        for agg in aggregates {
+            let func_name = self.ir.resolve_name(agg.func);
+            let code = match func_name {
+                "fn:count" => 0,
+                "fn:sum" => 1,
+                "fn:max" => 2,
+                "fn:min" => 3,
+                "fn:collect" => 4,
+                "fn:collect_distinct" => 5,
+                "fn:float:sum" => 6,
+                "fn:float:max" => 7,
+                "fn:float:min" => 8,
+                other => panic!("WASM codegen does not yet support aggregate: {other}"),
+            };
+            desc.push(code);
+            // The aggregate's argument must be a source column. fn:count
+            // ignores its argument, so a constant is tolerated there (-1).
+            let arg_col = match agg.args.first() {
+                Some(Operand::Var(v)) => {
+                    let col = vars.iter().position(|sv| sv == v).unwrap_or_else(|| {
+                        panic!("WASM codegen: aggregate argument must be a source column")
+                    });
+                    col as i32
+                }
+                _ if func_name == "fn:count" => -1,
+                _ => panic!("WASM codegen: aggregate argument must be a source column"),
+            };
+            desc.push(arg_col);
+        }
+
+        // --- Write the description into linear memory ---
+        let desc_offset = ctx.next_desc_offset;
+        ctx.next_desc_offset += (desc.len() as u32) * 4;
+        for (i, word) in desc.iter().enumerate() {
+            let addr = (desc_offset + (i as u32) * 4) as i32;
+            func.instruction(&Instruction::I32Const(addr));
+            func.instruction(&Instruction::I32Const(*word));
+            func.instruction(&Instruction::I32Store(MemArg {
+                offset: 0,
+                align: 2,
+                memory_index: 0,
+            }));
+        }
+
+        // --- Start the aggregation scan ---
+        let iter_local = ctx.iter_base + ctx.iter_offset;
+        ctx.iter_offset += 1;
+        let rel_name = self.ir.resolve_name(*source);
+        self.backend.emit_scan_aggregate_start(
+            func,
+            rel_name,
+            desc_offset as i32,
+            desc.len() as i32,
+        );
+        func.instruction(&Instruction::LocalSet(iter_local));
+
+        // --- Iterate groups ---
+        func.instruction(&Instruction::Block(wasm_encoder::BlockType::Empty));
+        func.instruction(&Instruction::Loop(wasm_encoder::BlockType::Empty));
+
+        self.backend.emit_scan_next(func, iter_local);
+        func.instruction(&Instruction::LocalTee(1));
+
+        func.instruction(&Instruction::I32Eqz);
+        func.instruction(&Instruction::BrIf(1));
+
+        // Row layout: keys first, then aggregates. Bind exactly those —
+        // mirroring the interpreter, which binds only the key vars and the
+        // aggregate vars per group.
+        for (i, key) in keys.iter().enumerate() {
+            if let Some(&local_idx) = ctx.var_map.get(key) {
+                self.backend.emit_get_col(func, 1, i as u32);
+                func.instruction(&Instruction::LocalSet(local_idx));
+            }
+        }
+        for (j, agg) in aggregates.iter().enumerate() {
+            if let Some(&local_idx) = ctx.var_map.get(&agg.var) {
+                self.backend.emit_get_col(func, 1, (keys.len() + j) as u32);
+                func.instruction(&Instruction::LocalSet(local_idx));
+            }
+        }
+
+        self.emit_op(func, body, ctx);
+
+        func.instruction(&Instruction::Br(0));
+        func.instruction(&Instruction::End);
+        func.instruction(&Instruction::End);
     }
 
     fn emit_condition(&self, func: &mut Function, cond: &Condition, ctx: &FuncContext) {

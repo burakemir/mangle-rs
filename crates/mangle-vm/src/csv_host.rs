@@ -131,7 +131,10 @@ impl Host for CsvHost {
         0
     }
     fn scan_aggregate_start(&mut self, _rel_id: i32, _description: Vec<i32>) -> i32 {
-        0
+        // CsvHost streams from files without materializing tuples, so it
+        // cannot compute group-by aggregates. Fail loudly rather than
+        // silently producing no groups.
+        unimplemented!("CsvHost does not support aggregation (scan_aggregate_start)");
     }
     fn merge_deltas(&mut self) -> i32 {
         0

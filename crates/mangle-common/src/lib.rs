@@ -369,7 +369,7 @@ pub trait Store {
 /// Opaque handle to a value in the host's value store.
 /// In WASM, these are represented as `externref`.
 #[cfg(feature = "server")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct HostVal(pub u32);
 
 /// Trait for the host environment that provides storage and data access (Server Mode).
@@ -385,6 +385,27 @@ pub trait Host {
     fn scan_next(&mut self, iter_id: i32) -> i32;
     /// Merges deltas and returns 1 if changes occurred, 0 otherwise.
     fn merge_deltas(&mut self) -> i32;
+    /// Starts an aggregation scan (Op::GroupBy): groups the relation's
+    /// tuples by the given key columns, computes the requested aggregates
+    /// per group, and returns an iter_id yielding one row per group via the
+    /// existing `scan_next` / `get_col` protocol.
+    ///
+    /// `desc` layout (all i32s):
+    /// ```text
+    /// [n_keys, key_col_0, ..., key_col_{n_keys-1},
+    ///  n_aggs, func_0, arg_col_0, ..., func_{m-1}, arg_col_{m-1}]
+    /// ```
+    /// - `key_col_i`: column index in the source relation of the i-th group
+    ///   key (groups are formed by value equality over these columns).
+    /// - `func_j`: aggregate function code:
+    ///   0 = fn:count, 1 = fn:sum, 2 = fn:max, 3 = fn:min, 4 = fn:collect,
+    ///   5 = fn:collect_distinct, 6 = fn:float:sum, 7 = fn:float:max,
+    ///   8 = fn:float:min.
+    /// - `arg_col_j`: column index the aggregate is computed over, or -1
+    ///   when the argument is irrelevant (e.g. fn:count with a constant
+    ///   argument).
+    ///
+    /// Each yielded row is `[key_0, ..., key_{n_keys-1}, agg_0, ..., agg_{m-1}]`.
     fn scan_aggregate_start(&mut self, rel_id: i32, description: Vec<i32>) -> i32;
     fn scan_index_start(&mut self, rel_id: i32, col_idx: i32, val: HostVal) -> i32;
 

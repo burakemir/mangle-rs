@@ -774,7 +774,7 @@ mod tests {
 
     // --- Value-aware MemHost ---
 
-    #[derive(Debug, Clone, PartialEq)]
+    #[derive(Debug, Clone, PartialEq, PartialOrd)]
     enum Val {
         Number(i64),
         Float(f64),
@@ -794,6 +794,9 @@ mod tests {
         iters: HashMap<i32, (i32, usize)>,
         /// List-element iterators (Op::IterateList): iter_id -> (elements, cursor)
         list_iters: HashMap<i32, (Vec<HostVal>, usize)>,
+        /// Group rows yielded by aggregation scans (Op::GroupBy):
+        /// iter_id -> (rows, cursor)
+        group_iters: HashMap<i32, (Vec<Vec<HostVal>>, usize)>,
         next_iter_id: i32,
         /// Pending multi-column insert
         pending_rel: i32,
@@ -816,6 +819,7 @@ mod tests {
                 data: HashMap::new(),
                 iters: HashMap::new(),
                 list_iters: HashMap::new(),
+                group_iters: HashMap::new(),
                 next_iter_id: 1,
                 pending_rel: 0,
                 pending_tuple: Vec::new(),
@@ -844,6 +848,103 @@ mod tests {
 
         fn get_val(&self, hv: HostVal) -> &Val {
             &self.values[hv.0 as usize]
+        }
+
+        /// Compute one aggregate (by function code, see the Host trait doc)
+        /// over a group's tuples. Mirrors the interpreter's eval_aggregate:
+        /// sum/max/min require integers, float variants coerce via
+        /// Number -> f64, collect builds a List, count ignores its arg.
+        fn eval_group_aggregate(
+            &mut self,
+            code: i32,
+            arg_col: i32,
+            group: &[Vec<HostVal>],
+        ) -> HostVal {
+            let arg = |row: &Vec<HostVal>| -> HostVal { row[arg_col as usize] };
+            match code {
+                // fn:count
+                0 => self.alloc(Val::Number(group.len() as i64)),
+                // fn:sum
+                1 => {
+                    let mut sum: i64 = 0;
+                    for row in group {
+                        match self.get_val(arg(row)) {
+                            Val::Number(n) => sum += n,
+                            v => panic!("fn:sum: expected integer, got {v:?}"),
+                        }
+                    }
+                    self.alloc(Val::Number(sum))
+                }
+                // fn:max / fn:min
+                2 | 3 => {
+                    let mut best: Option<&Val> = None;
+                    for row in group {
+                        let v = self.get_val(arg(row));
+                        best = Some(match best {
+                            None => v,
+                            Some(m) => {
+                                if (code == 2 && v > m) || (code == 3 && v < m) {
+                                    v
+                                } else {
+                                    m
+                                }
+                            }
+                        });
+                    }
+                    let owned = best.expect("fn:max/min on empty group").clone();
+                    self.alloc(owned)
+                }
+                // fn:collect / fn:collect_distinct
+                4 | 5 => {
+                    let mut out: Vec<HostVal> = Vec::with_capacity(group.len());
+                    for row in group {
+                        let hv = row[arg_col as usize];
+                        if code == 5 && out.iter().any(|e| self.get_val(*e) == self.get_val(hv)) {
+                            continue;
+                        }
+                        out.push(hv);
+                    }
+                    self.alloc(Val::Compound(0, out))
+                }
+                // fn:float:sum
+                6 => {
+                    let mut sum = 0.0f64;
+                    for row in group {
+                        let v = self.get_val(arg(row));
+                        let f = match v {
+                            Val::Float(f) => *f,
+                            Val::Number(n) => *n as f64,
+                            v => panic!("fn:float:sum: expected number, got {v:?}"),
+                        };
+                        sum += f;
+                    }
+                    self.alloc(Val::Float(sum))
+                }
+                // fn:float:max / fn:float:min
+                7 | 8 => {
+                    let mut best: Option<f64> = None;
+                    for row in group {
+                        let v = self.get_val(arg(row));
+                        let f = match v {
+                            Val::Float(f) => *f,
+                            Val::Number(n) => *n as f64,
+                            v => panic!("fn:float:max/min: expected number, got {v:?}"),
+                        };
+                        best = Some(match best {
+                            None => f,
+                            Some(m) => {
+                                if code == 7 {
+                                    f.max(m)
+                                } else {
+                                    f.min(m)
+                                }
+                            }
+                        });
+                    }
+                    self.alloc(Val::Float(best.expect("fn:float:max/min on empty group")))
+                }
+                other => panic!("unknown aggregate function code: {other}"),
+            }
         }
 
         fn val_to_str(&self, hv: HostVal) -> String {
@@ -938,6 +1039,14 @@ mod tests {
             self.scan_start(rel_id)
         }
         fn scan_next(&mut self, iter_id: i32) -> i32 {
+            // Group rows from aggregation scans (Op::GroupBy).
+            if let Some((rows, idx)) = self.group_iters.get_mut(&iter_id)
+                && *idx < rows.len()
+            {
+                let ptr = (iter_id << 16) | (*idx as i32 + 1);
+                *idx += 1;
+                return ptr;
+            }
             // List-element iterators (Op::IterateList).
             if let Some((elems, idx)) = self.list_iters.get_mut(&iter_id)
                 && *idx < elems.len()
@@ -959,8 +1068,65 @@ mod tests {
         fn merge_deltas(&mut self) -> i32 {
             0
         }
-        fn scan_aggregate_start(&mut self, _rel_id: i32, _desc: Vec<i32>) -> i32 {
-            0
+        /// Aggregation scan (Op::GroupBy). See the `scan_aggregate_start`
+        /// doc in `mangle-common`'s `Host` trait for the desc format.
+        /// Groups are formed by value equality over the key columns
+        /// (mirroring the interpreter); aggregates are computed over the
+        /// group's rows in insertion order.
+        fn scan_aggregate_start(&mut self, rel_id: i32, desc: Vec<i32>) -> i32 {
+            if desc.len() < 2 {
+                return 0;
+            }
+            let n_keys = desc[0] as usize;
+            if desc.len() < 2 + n_keys + 1 {
+                return 0;
+            }
+            let key_cols: Vec<usize> = desc[1..=n_keys].iter().map(|&c| c as usize).collect();
+            let n_aggs = desc[1 + n_keys] as usize;
+            // Layout: [n_keys, key_cols..., n_aggs, (func, arg_col)...]
+            if desc.len() != 2 + n_keys + 2 * n_aggs {
+                return 0;
+            }
+            let agg_specs: Vec<(i32, i32)> = desc[2 + n_keys..]
+                .chunks_exact(2)
+                .map(|c| (c[0], c[1]))
+                .collect();
+
+            let tuples: Vec<Vec<HostVal>> = self.data.get(&rel_id).cloned().unwrap_or_default();
+
+            // Group by value equality over the key columns (linear search:
+            // HostVals are indices, and equal values allocated at different
+            // times get different handles, so hashing on handles is wrong).
+            let mut groups: Vec<(Vec<HostVal>, Vec<Vec<HostVal>>)> = Vec::new();
+            for tuple in tuples {
+                let key: Vec<HostVal> = key_cols.iter().map(|&c| tuple[c]).collect();
+                let key_matches = |k: &[HostVal], key: &[HostVal]| {
+                    k.len() == key.len()
+                        && k.iter()
+                            .zip(key.iter())
+                            .all(|(a, b)| self.get_val(*a) == self.get_val(*b))
+                };
+                match groups.iter_mut().find(|(k, _)| key_matches(k, &key)) {
+                    Some((_, group)) => group.push(tuple),
+                    None => groups.push((key, vec![tuple])),
+                }
+            }
+
+            // Compute aggregates per group; rows are [keys..., aggs...].
+            let mut rows: Vec<Vec<HostVal>> = Vec::with_capacity(groups.len());
+            for (key, group) in groups {
+                let mut row = key.clone();
+                for &(code, arg_col) in &agg_specs {
+                    let val = self.eval_group_aggregate(code, arg_col, &group);
+                    row.push(val);
+                }
+                rows.push(row);
+            }
+
+            let id = self.next_iter_id;
+            self.next_iter_id += 1;
+            self.group_iters.insert(id, (rows, 0));
+            id
         }
         fn scan_index_start(&mut self, _rel_id: i32, _col_idx: i32, _val: HostVal) -> i32 {
             0
@@ -969,6 +1135,10 @@ mod tests {
         fn get_col(&mut self, ptr: i32, col_idx: i32) -> HostVal {
             let iter_id = ptr >> 16;
             let tuple_idx = (ptr & 0xFFFF) - 1;
+            // Group rows: column index selects within the row.
+            if let Some((rows, _)) = self.group_iters.get(&iter_id) {
+                return rows[tuple_idx as usize][col_idx as usize];
+            }
             // List-element iterators: column 0 is the element.
             if let Some((elems, _)) = self.list_iters.get(&iter_id) {
                 return elems[tuple_idx as usize];
@@ -2091,6 +2261,102 @@ mod tests {
         assert_eq!(results.len(), 2, "nm: {:?}", results);
         assert_eq!(results[0][0], "alice");
         assert_eq!(results[1][0], "bob");
+        Ok(())
+    }
+
+    #[test]
+    fn test_wasm_group_by_sum_e2e() -> Result<()> {
+        let host = run_wasm_program(
+            r#"
+            p(1, 10). p(1, 20). p(2, 30).
+            q(K, S) :- p(K, V) |> do fn:group_by(K); let S = fn:sum(V).
+        "#,
+        )?;
+        let mut results = host.get_number_facts("q");
+        results.sort();
+        assert_eq!(results, vec![vec![1, 30], vec![2, 30]], "q: {:?}", results);
+        Ok(())
+    }
+
+    #[test]
+    fn test_wasm_group_by_count_e2e() -> Result<()> {
+        let host = run_wasm_program(
+            r#"
+            p(1, 10). p(1, 20). p(2, 30).
+            q(K, C) :- p(K, V) |> do fn:group_by(K); let C = fn:count(V).
+        "#,
+        )?;
+        let mut results = host.get_number_facts("q");
+        results.sort();
+        assert_eq!(results, vec![vec![1, 2], vec![2, 1]], "q: {:?}", results);
+        Ok(())
+    }
+
+    #[test]
+    fn test_wasm_group_by_max_min_e2e() -> Result<()> {
+        let host = run_wasm_program(
+            r#"
+            p(1, 10). p(1, 20). p(1, 15).
+            mx(K, M) :- p(K, V) |> do fn:group_by(K); let M = fn:max(V).
+            mn(K, M) :- p(K, V) |> do fn:group_by(K); let M = fn:min(V).
+        "#,
+        )?;
+        let mx = host.get_number_facts("mx");
+        let mn = host.get_number_facts("mn");
+        assert_eq!(mx, vec![vec![1, 20]], "mx: {:?}", mx);
+        assert_eq!(mn, vec![vec![1, 10]], "mn: {:?}", mn);
+        Ok(())
+    }
+
+    #[test]
+    fn test_wasm_group_by_collect_e2e() -> Result<()> {
+        // fn:collect produces a List; verify its contents by iterating it
+        // with :list:member in a follow-up rule.
+        let host = run_wasm_program(
+            r#"
+            p(1, 10). p(1, 20). p(2, 30).
+            q(K, L) :- p(K, V) |> do fn:group_by(K); let L = fn:collect(V).
+            r(K, X) :- q(K, L), :list:member(X, L).
+        "#,
+        )?;
+        let mut results = host.get_number_facts("r");
+        results.sort();
+        assert_eq!(
+            results,
+            vec![vec![1, 10], vec![1, 20], vec![2, 30]],
+            "r: {:?}",
+            results
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_wasm_group_by_multi_key_e2e() -> Result<()> {
+        let host = run_wasm_program(
+            r#"
+            p(1, "a", 10). p(1, "a", 20). p(1, "b", 30).
+            q(K, T, S) :- p(K, T, V) |> do fn:group_by(K, T); let S = fn:sum(V).
+        "#,
+        )?;
+        let mut results: Vec<Vec<String>> = host
+            .get_val_facts("q")
+            .iter()
+            .map(|t| {
+                t.iter()
+                    .map(|v| match v {
+                        Val::Number(n) => n.to_string(),
+                        Val::String(s) => s.clone(),
+                        other => format!("{other:?}"),
+                    })
+                    .collect()
+            })
+            .collect();
+        results.sort();
+        let expected: Vec<Vec<String>> = vec![vec!["1", "a", "30"], vec!["1", "b", "30"]]
+            .into_iter()
+            .map(|r| r.into_iter().map(|s| s.to_string()).collect())
+            .collect();
+        assert_eq!(results, expected, "q: {:?}", results);
         Ok(())
     }
 }

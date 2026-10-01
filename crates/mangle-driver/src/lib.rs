@@ -2784,6 +2784,17 @@ mod tests {
         Compound(i32, Vec<HostVal>),
     }
 
+    impl std::cmp::PartialOrd for TVal {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            use std::cmp::Ordering;
+            match (self, other) {
+                (TVal::Number(a), TVal::Number(b)) => Some(a.cmp(b)),
+                (TVal::Str(a), TVal::Str(b)) | (TVal::Name(a), TVal::Name(b)) => Some(a.cmp(b)),
+                _ => panic!("TestHost: cannot compare {self:?} with {other:?}"),
+            }
+        }
+    }
+
     #[derive(Clone)]
     struct TestHost {
         inner: std::sync::Arc<std::sync::Mutex<TestHostInner>>,
@@ -2795,6 +2806,8 @@ mod tests {
         iters: std::collections::HashMap<i32, (i32, usize)>,
         /// List-element iterators (Op::IterateList).
         list_iters: std::collections::HashMap<i32, (Vec<HostVal>, usize)>,
+        /// Group rows yielded by aggregation scans (Op::GroupBy).
+        group_iters: std::collections::HashMap<i32, (Vec<Vec<HostVal>>, usize)>,
         next_iter_id: i32,
         pending_rel: i32,
         pending_tuple: Vec<HostVal>,
@@ -2823,6 +2836,7 @@ mod tests {
                     data: std::collections::HashMap::new(),
                     iters: std::collections::HashMap::new(),
                     list_iters: std::collections::HashMap::new(),
+                    group_iters: std::collections::HashMap::new(),
                     next_iter_id: 1,
                     pending_rel: 0,
                     pending_tuple: Vec::new(),
@@ -2883,6 +2897,16 @@ mod tests {
         }
         fn scan_next(&mut self, iter_id: i32) -> i32 {
             let mut inner = self.inner.lock().unwrap();
+            // Group rows from aggregation scans (Op::GroupBy).
+            if let Some(&(ref rows, idx)) = inner.group_iters.get(&iter_id) {
+                if idx < rows.len() {
+                    let ptr = (iter_id << 16) | (idx as i32 + 1);
+                    let rows = rows.clone();
+                    inner.group_iters.insert(iter_id, (rows, idx + 1));
+                    return ptr;
+                }
+                return 0;
+            }
             // List-element iterators (Op::IterateList).
             if let Some(&(ref elems, idx)) = inner.list_iters.get(&iter_id) {
                 if idx < elems.len() {
@@ -2907,8 +2931,108 @@ mod tests {
         fn merge_deltas(&mut self) -> i32 {
             0
         }
-        fn scan_aggregate_start(&mut self, _rel_id: i32, _desc: Vec<i32>) -> i32 {
-            0
+        fn scan_aggregate_start(&mut self, rel_id: i32, desc: Vec<i32>) -> i32 {
+            // See the scan_aggregate_start doc in mangle-common's Host trait
+            // for the desc format. Grouping is value-based, mirroring the
+            // interpreter.
+            let mut inner = self.inner.lock().unwrap();
+            if desc.len() < 2 {
+                return 0;
+            }
+            let n_keys = desc[0] as usize;
+            if desc.len() < 2 + n_keys + 1 {
+                return 0;
+            }
+            let key_cols: Vec<usize> = desc[1..=n_keys].iter().map(|&c| c as usize).collect();
+            let n_aggs = desc[1 + n_keys] as usize;
+            // Layout: [n_keys, key_cols..., n_aggs, (func, arg_col)...]
+            if desc.len() != 2 + n_keys + 2 * n_aggs {
+                return 0;
+            }
+            let agg_specs: Vec<(i32, i32)> = desc[2 + n_keys..]
+                .chunks_exact(2)
+                .map(|c| (c[0], c[1]))
+                .collect();
+
+            let tuples: Vec<Vec<HostVal>> = inner.data.get(&rel_id).cloned().unwrap_or_default();
+
+            let vals_eq = |inner: &TestHostInner, a: HostVal, b: HostVal| {
+                inner.values[a.0 as usize] == inner.values[b.0 as usize]
+            };
+            let mut groups: Vec<(Vec<HostVal>, Vec<Vec<HostVal>>)> = Vec::new();
+            for tuple in tuples {
+                let key: Vec<HostVal> = key_cols.iter().map(|&c| tuple[c]).collect();
+                let found = groups.iter().position(|(k, _)| {
+                    k.len() == key.len()
+                        && k.iter()
+                            .zip(key.iter())
+                            .all(|(a, b)| vals_eq(&inner, *a, *b))
+                });
+                match found {
+                    Some(i) => groups[i].1.push(tuple),
+                    None => groups.push((key, vec![tuple])),
+                }
+            }
+
+            let mut rows: Vec<Vec<HostVal>> = Vec::with_capacity(groups.len());
+            for (key, group) in groups {
+                let mut row = key.clone();
+                for &(code, arg_col) in &agg_specs {
+                    let val = {
+                        let arg = |row: &Vec<HostVal>| -> HostVal { row[arg_col as usize] };
+                        let v: TVal = match code {
+                            0 => TVal::Number(group.len() as i64),
+                            1 => {
+                                let mut sum: i64 = 0;
+                                for row in &group {
+                                    match &inner.values[arg(row).0 as usize] {
+                                        TVal::Number(n) => sum += n,
+                                        v => panic!("fn:sum: expected integer, got {v:?}"),
+                                    }
+                                }
+                                TVal::Number(sum)
+                            }
+                            2 | 3 => {
+                                let mut best: Option<&TVal> = None;
+                                for row in &group {
+                                    let v = &inner.values[arg(row).0 as usize];
+                                    best = Some(match best {
+                                        None => v,
+                                        Some(m) => {
+                                            if (code == 2 && v > m) || (code == 3 && v < m) {
+                                                v
+                                            } else {
+                                                m
+                                            }
+                                        }
+                                    });
+                                }
+                                best.expect("fn:max/min on empty group").clone()
+                            }
+                            4 | 5 => {
+                                let mut out: Vec<HostVal> = Vec::with_capacity(group.len());
+                                for row in &group {
+                                    let hv = arg(row);
+                                    if code == 5 && out.iter().any(|e| vals_eq(&inner, *e, hv)) {
+                                        continue;
+                                    }
+                                    out.push(hv);
+                                }
+                                TVal::Compound(0, out)
+                            }
+                            _ => panic!("aggregate code {code} not supported in TestHost"),
+                        };
+                        v
+                    };
+                    row.push(Self::alloc(&mut inner, val));
+                }
+                rows.push(row);
+            }
+
+            let id = inner.next_iter_id;
+            inner.next_iter_id += 1;
+            inner.group_iters.insert(id, (rows, 0));
+            id
         }
         fn scan_index_start(&mut self, _rel_id: i32, _col_idx: i32, _val: HostVal) -> i32 {
             0
@@ -2917,6 +3041,10 @@ mod tests {
             let inner = self.inner.lock().unwrap();
             let iter_id = ptr >> 16;
             let tuple_idx = ((ptr & 0xFFFF) - 1) as usize;
+            // Group rows: column index selects within the row.
+            if let Some((rows, _)) = inner.group_iters.get(&iter_id) {
+                return rows[tuple_idx][col_idx as usize];
+            }
             // List-element iterators: column 0 is the element.
             if let Some((elems, _)) = inner.list_iters.get(&iter_id) {
                 return elems[tuple_idx];
@@ -3374,6 +3502,48 @@ mod tests {
                 r#"
                     people([{/name: "alice"}, {/name: "bob"}]).
                     result(X) :- people(P), :list:member(S, P), :match_field(S, /name, X).
+                "#,
+                "result",
+            ),
+            (
+                // Aggregation: fn:sum over a group-by key.
+                r#"
+                    p(1, 10). p(1, 20). p(2, 30).
+                    result(K, S) :- p(K, V) |> do fn:group_by(K); let S = fn:sum(V).
+                "#,
+                "result",
+            ),
+            (
+                // Aggregation: fn:count.
+                r#"
+                    p(1, 10). p(1, 20). p(2, 30).
+                    result(K, C) :- p(K, V) |> do fn:group_by(K); let C = fn:count(V).
+                "#,
+                "result",
+            ),
+            (
+                // Aggregation: fn:max and fn:min in one rule.
+                r#"
+                    p(1, 10). p(1, 20). p(1, 15).
+                    result(K, M, N) :- p(K, V) |> do fn:group_by(K); let M = fn:max(V); let N = fn:min(V).
+                "#,
+                "result",
+            ),
+            (
+                // Aggregation over strings, multiple keys.
+                r#"
+                    p(1, "a", 10). p(1, "a", 20). p(1, "b", 30).
+                    result(K, T, S) :- p(K, T, V) |> do fn:group_by(K, T); let S = fn:sum(V).
+                "#,
+                "result",
+            ),
+            (
+                // Aggregation: fn:collect, projected through :list:member
+                // so the comparison works on scalars.
+                r#"
+                    p(1, 10). p(1, 20). p(2, 30).
+                    mid(K, L) :- p(K, V) |> do fn:group_by(K); let L = fn:collect(V).
+                    result(K, X) :- mid(K, L), :list:member(X, L).
                 "#,
                 "result",
             ),
