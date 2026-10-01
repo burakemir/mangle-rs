@@ -494,6 +494,74 @@ impl Vm {
             },
         )?;
 
+        // 43: negation_begin(i32) -> ()
+        linker.func_wrap(
+            "env",
+            "negation_begin",
+            |mut caller: wasmtime::Caller<'_, HostWrapper<H>>, rel_id: i32| {
+                caller.data_mut().host.negation_begin(rel_id);
+            },
+        )?;
+
+        // 44: negation_push(externref) -> ()
+        linker.func_wrap(
+            "env",
+            "negation_push",
+            |mut caller: wasmtime::Caller<'_, HostWrapper<H>>, val: Option<Rooted<ExternRef>>| {
+                let hv = extract_hv(&val, &caller);
+                caller.data_mut().host.negation_push(hv);
+            },
+        )?;
+
+        // 45: negation_end() -> i32
+        linker.func_wrap(
+            "env",
+            "negation_end",
+            |mut caller: wasmtime::Caller<'_, HostWrapper<H>>| -> i32 {
+                caller.data_mut().host.negation_end()
+            },
+        )?;
+
+        // 46-51: built-in predicate checks.
+        // Binary checks: (externref, externref) -> i32.
+        macro_rules! predop {
+            ($name:expr, $method:ident) => {
+                linker.func_wrap(
+                    "env",
+                    $name,
+                    |mut caller: wasmtime::Caller<'_, HostWrapper<H>>,
+                     a: Option<Rooted<ExternRef>>,
+                     b: Option<Rooted<ExternRef>>|
+                     -> i32 {
+                        let a_hv = extract_hv(&a, &caller);
+                        let b_hv = extract_hv(&b, &caller);
+                        caller.data_mut().host.$method(a_hv, b_hv)
+                    },
+                )?;
+            };
+        }
+        predop!("str_starts_with", str_starts_with);
+        predop!("str_ends_with", str_ends_with);
+        predop!("str_contains", str_contains);
+        predop!("match_prefix", match_prefix);
+        predop!("list_member", list_member);
+
+        // 51: match_field (externref, externref, externref) -> i32
+        linker.func_wrap(
+            "env",
+            "match_field",
+            |mut caller: wasmtime::Caller<'_, HostWrapper<H>>,
+             s: Option<Rooted<ExternRef>>,
+             f: Option<Rooted<ExternRef>>,
+             v: Option<Rooted<ExternRef>>|
+             -> i32 {
+                let s_hv = extract_hv(&s, &caller);
+                let f_hv = extract_hv(&f, &caller);
+                let v_hv = extract_hv(&v, &caller);
+                caller.data_mut().host.match_field(s_hv, f_hv, v_hv)
+            },
+        )?;
+
         let instance = linker.instantiate(&mut store, &module)?;
         let run = instance.get_typed_func::<(), ()>(&mut store, "run")?;
         run.call(&mut store, ())?;
@@ -716,6 +784,9 @@ mod tests {
         /// Pending compound build
         compound_kind: i32,
         compound_elems: Vec<HostVal>,
+        /// Pending negation check tuple
+        negation_rel: i32,
+        negation_tuple: Vec<HostVal>,
         /// String/name tables from compiled module
         strings: Vec<String>,
         names: Vec<String>,
@@ -732,6 +803,8 @@ mod tests {
                 pending_tuple: Vec::new(),
                 compound_kind: 0,
                 compound_elems: Vec::new(),
+                negation_rel: 0,
+                negation_tuple: Vec::new(),
                 strings,
                 names,
             }
@@ -886,8 +959,22 @@ mod tests {
             self.pending_tuple.push(val);
         }
         fn insert_end(&mut self) {
+            // Relations are sets: skip duplicates. The comparison is
+            // value-based because equal values allocated at different
+            // times get different HostVal indices.
+            let rel = self.pending_rel;
             let tuple = std::mem::take(&mut self.pending_tuple);
-            self.data.entry(self.pending_rel).or_default().push(tuple);
+            let already = self.data.get(&rel).is_some_and(|tuples| {
+                tuples.iter().any(|t| {
+                    t.len() == tuple.len()
+                        && t.iter()
+                            .zip(tuple.iter())
+                            .all(|(a, b)| self.get_val(*a) == self.get_val(*b))
+                })
+            });
+            if !already {
+                self.data.entry(rel).or_default().push(tuple);
+            }
         }
 
         fn const_number(&mut self, n: i64) -> HostVal {
@@ -1090,6 +1177,87 @@ mod tests {
         fn debuglog(&mut self, val: HostVal) {
             eprintln!("WASM LOG: {:?}", self.get_val(val));
         }
+
+        // Negation check: a tuple matches when its arity equals the check
+        // tuple's and every column compares equal (mirroring the
+        // interpreter's Condition::Negation evaluation). The negation
+        // holds iff no stored tuple matches.
+        fn negation_begin(&mut self, rel_id: i32) {
+            self.negation_rel = rel_id;
+            self.negation_tuple.clear();
+        }
+        fn negation_push(&mut self, val: HostVal) {
+            self.negation_tuple.push(val);
+        }
+        fn negation_end(&mut self) -> i32 {
+            let rel = self.negation_rel;
+            let check = std::mem::take(&mut self.negation_tuple);
+            let found = self
+                .data
+                .get(&rel)
+                .map(|tuples| {
+                    tuples.iter().any(|tuple| {
+                        tuple.len() == check.len()
+                            && tuple
+                                .iter()
+                                .zip(check.iter())
+                                .all(|(a, b)| self.get_val(*a) == self.get_val(*b))
+                    })
+                })
+                .unwrap_or(false);
+            (!found) as i32
+        }
+
+        // --- Built-in predicate checks (mirror the interpreter's
+        // eval_builtin_predicate semantics). ---
+
+        fn str_starts_with(&mut self, s: HostVal, prefix: HostVal) -> i32 {
+            match (self.get_val(s), self.get_val(prefix)) {
+                (Val::String(s), Val::String(p)) => s.starts_with(p.as_str()) as i32,
+                _ => panic!("str_starts_with: expected string arguments"),
+            }
+        }
+        fn str_ends_with(&mut self, s: HostVal, suffix: HostVal) -> i32 {
+            match (self.get_val(s), self.get_val(suffix)) {
+                (Val::String(s), Val::String(p)) => s.ends_with(p.as_str()) as i32,
+                _ => panic!("str_ends_with: expected string arguments"),
+            }
+        }
+        fn str_contains(&mut self, s: HostVal, sub: HostVal) -> i32 {
+            match (self.get_val(s), self.get_val(sub)) {
+                (Val::String(s), Val::String(p)) => s.contains(p.as_str()) as i32,
+                _ => panic!("str_contains: expected string arguments"),
+            }
+        }
+        fn match_prefix(&mut self, name: HostVal, prefix: HostVal) -> i32 {
+            match (self.get_val(name), self.get_val(prefix)) {
+                (Val::Name(n), Val::Name(p)) => {
+                    (n.starts_with(p.as_str()) && n.len() > p.len()) as i32
+                }
+                _ => panic!("match_prefix: expected name arguments"),
+            }
+        }
+        fn list_member(&mut self, elem: HostVal, list: HostVal) -> i32 {
+            match self.get_val(list).clone() {
+                // Non-list: false, mirroring the interpreter's check mode
+                // (and the positive IterateList op's silent no-rows).
+                Val::Compound(0, elems) => {
+                    elems.iter().any(|e| self.get_val(*e) == self.get_val(elem)) as i32
+                }
+                _ => 0,
+            }
+        }
+        fn match_field(&mut self, struct_val: HostVal, field: HostVal, value: HostVal) -> i32 {
+            match self.get_val(struct_val).clone() {
+                // Non-struct or absent field: false, mirroring the
+                // interpreter's check mode (and the positive MatchField op).
+                Val::Compound(3, pairs) => pairs.chunks_exact(2).any(|c| {
+                    self.get_val(c[0]) == self.get_val(field)
+                        && self.get_val(c[1]) == self.get_val(value)
+                }) as i32,
+                _ => 0,
+            }
+        }
     }
 
     // --- SharedMemHost wrapper for thread-safety ---
@@ -1228,6 +1396,33 @@ mod tests {
             }
             fn debuglog(&mut self, val: HostVal) {
                 self.inner.lock().unwrap().debuglog(val)
+            }
+            fn negation_begin(&mut self, rel_id: i32) {
+                self.inner.lock().unwrap().negation_begin(rel_id)
+            }
+            fn negation_push(&mut self, val: HostVal) {
+                self.inner.lock().unwrap().negation_push(val)
+            }
+            fn negation_end(&mut self) -> i32 {
+                self.inner.lock().unwrap().negation_end()
+            }
+            fn str_starts_with(&mut self, s: HostVal, prefix: HostVal) -> i32 {
+                self.inner.lock().unwrap().str_starts_with(s, prefix)
+            }
+            fn str_ends_with(&mut self, s: HostVal, suffix: HostVal) -> i32 {
+                self.inner.lock().unwrap().str_ends_with(s, suffix)
+            }
+            fn str_contains(&mut self, s: HostVal, sub: HostVal) -> i32 {
+                self.inner.lock().unwrap().str_contains(s, sub)
+            }
+            fn match_prefix(&mut self, name: HostVal, prefix: HostVal) -> i32 {
+                self.inner.lock().unwrap().match_prefix(name, prefix)
+            }
+            fn list_member(&mut self, elem: HostVal, list: HostVal) -> i32 {
+                self.inner.lock().unwrap().list_member(elem, list)
+            }
+            fn match_field(&mut self, s: HostVal, f: HostVal, v: HostVal) -> i32 {
+                self.inner.lock().unwrap().match_field(s, f, v)
             }
         };
     }
@@ -1500,6 +1695,231 @@ mod tests {
         let results = host.get_string_facts("q");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0][0], "alice");
+        Ok(())
+    }
+
+    #[test]
+    fn test_wasm_negation_e2e() -> Result<()> {
+        // Negation over an IDB relation defined in an earlier stratum:
+        // banned facts are fully derived before allowed's rule runs.
+        let host = run_wasm_program(
+            r#"
+            num(1). num(2). num(3). num(4).
+            banned(2). banned(4).
+            allowed(X) :- num(X), !banned(X).
+        "#,
+        )?;
+        let results = host.get_number_facts("allowed");
+        let mut xs: Vec<i64> = results.iter().map(|t| t[0]).collect();
+        xs.sort();
+        assert_eq!(xs, vec![1, 3]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_wasm_negation_multi_column_with_constant() -> Result<()> {
+        // The negated atom mixes a bound variable and a constant.
+        let host = run_wasm_program(
+            r#"
+            pair(1, 5). pair(2, 5). pair(3, 5).
+            blocked(2, 5).
+            open(X) :- pair(X, Y), !blocked(X, 5).
+        "#,
+        )?;
+        let results = host.get_number_facts("open");
+        let mut xs: Vec<i64> = results.iter().map(|t| t[0]).collect();
+        xs.sort();
+        assert_eq!(xs, vec![1, 3]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_wasm_negation_all_blocked() -> Result<()> {
+        // Every candidate is blocked: the negation must fail everywhere.
+        let host = run_wasm_program(
+            r#"
+            num(1). num(2).
+            banned(1). banned(2).
+            allowed(X) :- num(X), !banned(X).
+        "#,
+        )?;
+        let results = host.get_number_facts("allowed");
+        assert_eq!(results.len(), 0, "expected no results: {:?}", results);
+        Ok(())
+    }
+
+    #[test]
+    fn test_wasm_negation_string_values() -> Result<()> {
+        let host = run_wasm_program(
+            r#"
+            word("apple"). word("banana").
+            stop("banana").
+            keep(X) :- word(X), !stop(X).
+        "#,
+        )?;
+        let results = host.get_string_facts("keep");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0][0], "apple");
+        Ok(())
+    }
+
+    #[test]
+    fn test_wasm_string_contains_e2e() -> Result<()> {
+        // Positive built-in string predicate.
+        let host = run_wasm_program(
+            r#"
+            word("apple"). word("banana"). word("cherry").
+            has_an(X) :- word(X), :string:contains(X, "an").
+        "#,
+        )?;
+        let results = host.get_string_facts("has_an");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0][0], "banana");
+        Ok(())
+    }
+
+    #[test]
+    fn test_wasm_negated_string_contains_e2e() -> Result<()> {
+        // Negated built-in string predicate.
+        let host = run_wasm_program(
+            r#"
+            word("apple"). word("banana"). word("cherry").
+            clean(X) :- word(X), !:string:contains(X, "an").
+        "#,
+        )?;
+        let mut results = host.get_string_facts("clean");
+        results.sort();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0][0], "apple");
+        assert_eq!(results[1][0], "cherry");
+        Ok(())
+    }
+
+    #[test]
+    fn test_wasm_negated_string_starts_with_ends_with_e2e() -> Result<()> {
+        let host = run_wasm_program(
+            r#"
+            word("alpha"). word("beta"). word("gamma").
+            mid(X) :- word(X), !:string:starts_with(X, "al"), !:string:ends_with(X, "ma").
+        "#,
+        )?;
+        let results = host.get_string_facts("mid");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0][0], "beta");
+        Ok(())
+    }
+
+    #[test]
+    fn test_wasm_match_prefix_e2e() -> Result<()> {
+        // Positive :match_prefix on name constants.
+        let host = run_wasm_program(
+            r#"
+            tag(/alpha_one). tag(/alpha_two). tag(/beta_three).
+            alphaish(X) :- tag(X), :match_prefix(X, /alpha).
+        "#,
+        )?;
+        let mut results: Vec<String> = host
+            .get_val_facts("alphaish")
+            .iter()
+            .map(|t| match &t[0] {
+                Val::Name(n) => n.clone(),
+                other => format!("{other:?}"),
+            })
+            .collect();
+        results.sort();
+        assert_eq!(results.len(), 2, "alphaish: {:?}", results);
+        assert_eq!(results[0], "/alpha_one");
+        assert_eq!(results[1], "/alpha_two");
+        Ok(())
+    }
+
+    #[test]
+    fn test_wasm_negated_match_prefix_e2e() -> Result<()> {
+        let host = run_wasm_program(
+            r#"
+            tag(/alpha_one). tag(/beta_two).
+            other(X) :- tag(X), !:match_prefix(X, /alpha).
+        "#,
+        )?;
+        let results = host.get_val_facts("other");
+        assert_eq!(results.len(), 1, "other: {:?}", results);
+        assert_eq!(results[0][0], Val::Name("/beta_two".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn test_wasm_negated_list_member_e2e() -> Result<()> {
+        // "z" is not a member of either list: negation succeeds.
+        let host = run_wasm_program(
+            r#"
+            word("z").
+            container(["a", "b"]).
+            container(["x", "y"]).
+            clean(X) :- word(X), container(L), !:list:member(X, L).
+        "#,
+        )?;
+        let results = host.get_string_facts("clean");
+        assert_eq!(results.len(), 1, "clean: {:?}", results);
+        assert_eq!(results[0][0], "z");
+        Ok(())
+    }
+
+    #[test]
+    fn test_wasm_negated_list_member_member_e2e() -> Result<()> {
+        // "a" IS a member: the negation must fail.
+        let host = run_wasm_program(
+            r#"
+            word("a").
+            container(["a", "b"]).
+            banned(X) :- word(X), container(L), !:list:member(X, L).
+        "#,
+        )?;
+        let results = host.get_string_facts("banned");
+        assert_eq!(results.len(), 0, "banned: {:?}", results);
+        Ok(())
+    }
+
+    #[test]
+    fn test_wasm_negated_match_field_e2e() -> Result<()> {
+        // Absent field: the check is false, so the negation succeeds.
+        let host = run_wasm_program(
+            r#"
+            data({/name: "alice"}).
+            missing(1) :- data(X), !:match_field(X, /missing, "x").
+        "#,
+        )?;
+        let results = host.get_number_facts("missing");
+        assert_eq!(results.len(), 1, "missing: {:?}", results);
+        Ok(())
+    }
+
+    #[test]
+    fn test_wasm_negated_match_field_present_e2e() -> Result<()> {
+        // Field present with the given value: the negation must fail.
+        let host = run_wasm_program(
+            r#"
+            data({/name: "alice"}).
+            mismatch(1) :- data(X), !:match_field(X, /name, "alice").
+        "#,
+        )?;
+        let results = host.get_number_facts("mismatch");
+        assert_eq!(results.len(), 0, "mismatch: {:?}", results);
+        Ok(())
+    }
+
+    #[test]
+    fn test_wasm_negated_comparison_e2e() -> Result<()> {
+        // !:lt(X, 3) succeeds exactly for X >= 3.
+        let host = run_wasm_program(
+            r#"
+            num(1). num(2). num(3). num(5).
+            big(X) :- num(X), !:lt(X, 3).
+        "#,
+        )?;
+        let results = host.get_number_facts("big");
+        let mut xs: Vec<i64> = results.iter().map(|t| t[0]).collect();
+        xs.sort();
+        assert_eq!(xs, vec![3, 5]);
         Ok(())
     }
 }

@@ -374,6 +374,7 @@ enum StratumPlan {
 mod tests {
     use super::*;
     use mangle_interpreter::{MemStore, Value};
+    use mangle_vm::HostVal;
 
     #[test]
     fn test_driver_e2e() -> Result<()> {
@@ -2765,6 +2766,488 @@ mod tests {
         values.sort();
         assert_eq!(values, vec!["/b", "/c"]);
 
+        Ok(())
+    }
+
+    // --- WASM vs interpreter parity: negation ---
+
+    /// Minimal WASM host for parity tests: stores number/string facts,
+    /// supports scans, inserts, and the negation-check protocol. State is
+    /// shared behind an Arc so results remain readable after the host is
+    /// moved into `Vm::execute`.
+    #[derive(Debug, Clone, PartialEq)]
+    enum TVal {
+        Number(i64),
+        Str(String),
+    }
+
+    #[derive(Clone)]
+    struct TestHost {
+        inner: std::sync::Arc<std::sync::Mutex<TestHostInner>>,
+    }
+
+    struct TestHostInner {
+        values: Vec<TVal>,
+        data: std::collections::HashMap<i32, Vec<Vec<HostVal>>>,
+        iters: std::collections::HashMap<i32, (i32, usize)>,
+        next_iter_id: i32,
+        pending_rel: i32,
+        pending_tuple: Vec<HostVal>,
+        negation_rel: i32,
+        negation_tuple: Vec<HostVal>,
+        strings: Vec<String>,
+    }
+
+    fn host_hash_name(name: &str) -> i32 {
+        let mut hash: u32 = 5381;
+        for c in name.bytes() {
+            hash = ((hash << 5).wrapping_add(hash)).wrapping_add(c as u32);
+        }
+        hash as i32
+    }
+
+    impl TestHost {
+        fn new(strings: Vec<String>) -> Self {
+            Self {
+                inner: std::sync::Arc::new(std::sync::Mutex::new(TestHostInner {
+                    values: Vec::new(),
+                    data: std::collections::HashMap::new(),
+                    iters: std::collections::HashMap::new(),
+                    next_iter_id: 1,
+                    pending_rel: 0,
+                    pending_tuple: Vec::new(),
+                    negation_rel: 0,
+                    negation_tuple: Vec::new(),
+                    strings,
+                })),
+            }
+        }
+
+        fn alloc(inner: &mut TestHostInner, v: TVal) -> HostVal {
+            let idx = inner.values.len() as u32;
+            inner.values.push(v);
+            HostVal(idx)
+        }
+
+        /// Dump a relation's tuples as sorted, formatted strings.
+        fn dump_relation(&self, rel: &str) -> Vec<String> {
+            let inner = self.inner.lock().unwrap();
+            let id = host_hash_name(rel);
+            let mut rows: Vec<String> = inner
+                .data
+                .get(&id)
+                .map(|tuples| {
+                    tuples
+                        .iter()
+                        .map(|t| {
+                            t.iter()
+                                .map(|hv| match &inner.values[hv.0 as usize] {
+                                    TVal::Number(n) => n.to_string(),
+                                    TVal::Str(s) => s.clone(),
+                                })
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            rows.sort();
+            rows
+        }
+    }
+
+    impl mangle_vm::Host for TestHost {
+        fn scan_start(&mut self, rel_id: i32) -> i32 {
+            let mut inner = self.inner.lock().unwrap();
+            let id = inner.next_iter_id;
+            inner.next_iter_id += 1;
+            inner.iters.insert(id, (rel_id, 0));
+            id
+        }
+        fn scan_delta_start(&mut self, rel_id: i32) -> i32 {
+            self.scan_start(rel_id)
+        }
+        fn scan_next(&mut self, iter_id: i32) -> i32 {
+            let mut inner = self.inner.lock().unwrap();
+            let Some(&(rel_id, idx)) = inner.iters.get(&iter_id).map(|x| x) else {
+                return 0;
+            };
+            let len = inner.data.get(&rel_id).map_or(0, |t| t.len());
+            if idx < len {
+                inner.iters.insert(iter_id, (rel_id, idx + 1));
+                (iter_id << 16) | (idx as i32 + 1)
+            } else {
+                0
+            }
+        }
+        fn merge_deltas(&mut self) -> i32 {
+            0
+        }
+        fn scan_aggregate_start(&mut self, _rel_id: i32, _desc: Vec<i32>) -> i32 {
+            0
+        }
+        fn scan_index_start(&mut self, _rel_id: i32, _col_idx: i32, _val: HostVal) -> i32 {
+            0
+        }
+        fn get_col(&mut self, ptr: i32, col_idx: i32) -> HostVal {
+            let inner = self.inner.lock().unwrap();
+            let iter_id = ptr >> 16;
+            let tuple_idx = ((ptr & 0xFFFF) - 1) as usize;
+            if let Some((rel_id, _)) = inner.iters.get(&iter_id)
+                && let Some(tuples) = inner.data.get(rel_id)
+            {
+                return tuples[tuple_idx][col_idx as usize];
+            }
+            HostVal(0)
+        }
+        fn insert_begin(&mut self, rel_id: i32) {
+            let mut inner = self.inner.lock().unwrap();
+            inner.pending_rel = rel_id;
+            inner.pending_tuple.clear();
+        }
+        fn insert_push(&mut self, val: HostVal) {
+            let mut inner = self.inner.lock().unwrap();
+            inner.pending_tuple.push(val);
+        }
+        fn insert_end(&mut self) {
+            // Relations are sets: skip duplicates (value-based, mirroring
+            // the interpreter's MemStore).
+            let mut inner = self.inner.lock().unwrap();
+            let rel = inner.pending_rel;
+            let tuple = std::mem::take(&mut inner.pending_tuple);
+            let already = inner.data.get(&rel).is_some_and(|tuples| {
+                tuples.iter().any(|t| {
+                    t.len() == tuple.len()
+                        && t.iter()
+                            .zip(tuple.iter())
+                            .all(|(a, b)| inner.values[a.0 as usize] == inner.values[b.0 as usize])
+                })
+            });
+            if !already {
+                inner.data.entry(rel).or_default().push(tuple);
+            }
+        }
+        fn const_number(&mut self, n: i64) -> HostVal {
+            let mut inner = self.inner.lock().unwrap();
+            Self::alloc(&mut inner, TVal::Number(n))
+        }
+        fn const_float(&mut self, _bits: i64) -> HostVal {
+            HostVal(0)
+        }
+        fn const_string(&mut self, id: i32) -> HostVal {
+            let mut inner = self.inner.lock().unwrap();
+            let s = inner
+                .strings
+                .get((id - 1) as usize)
+                .cloned()
+                .unwrap_or_default();
+            Self::alloc(&mut inner, TVal::Str(s))
+        }
+        fn const_name(&mut self, _id: i32) -> HostVal {
+            unimplemented!("const_name")
+        }
+        fn const_time(&mut self, _nanos: i64) -> HostVal {
+            unimplemented!("const_time")
+        }
+        fn const_duration(&mut self, _nanos: i64) -> HostVal {
+            unimplemented!("const_duration")
+        }
+        fn val_add(&mut self, _a: HostVal, _b: HostVal) -> HostVal {
+            unimplemented!("val_add")
+        }
+        fn val_sub(&mut self, _a: HostVal, _b: HostVal) -> HostVal {
+            unimplemented!("val_sub")
+        }
+        fn val_mul(&mut self, _a: HostVal, _b: HostVal) -> HostVal {
+            unimplemented!("val_mul")
+        }
+        fn val_div(&mut self, _a: HostVal, _b: HostVal) -> HostVal {
+            unimplemented!("val_div")
+        }
+        fn val_sqrt(&mut self, _a: HostVal) -> HostVal {
+            unimplemented!("val_sqrt")
+        }
+        fn val_eq(&mut self, _a: HostVal, _b: HostVal) -> i32 {
+            let inner = self.inner.lock().unwrap();
+            (inner.values[_a.0 as usize] == inner.values[_b.0 as usize]) as i32
+        }
+        fn val_neq(&mut self, _a: HostVal, _b: HostVal) -> i32 {
+            let inner = self.inner.lock().unwrap();
+            (inner.values[_a.0 as usize] != inner.values[_b.0 as usize]) as i32
+        }
+        fn val_lt(&mut self, a: HostVal, b: HostVal) -> i32 {
+            let inner = self.inner.lock().unwrap();
+            match (&inner.values[a.0 as usize], &inner.values[b.0 as usize]) {
+                (TVal::Number(x), TVal::Number(y)) => (x < y) as i32,
+                _ => 0,
+            }
+        }
+        fn val_le(&mut self, a: HostVal, b: HostVal) -> i32 {
+            let inner = self.inner.lock().unwrap();
+            match (&inner.values[a.0 as usize], &inner.values[b.0 as usize]) {
+                (TVal::Number(x), TVal::Number(y)) => (x <= y) as i32,
+                _ => 0,
+            }
+        }
+        fn val_gt(&mut self, a: HostVal, b: HostVal) -> i32 {
+            let inner = self.inner.lock().unwrap();
+            match (&inner.values[a.0 as usize], &inner.values[b.0 as usize]) {
+                (TVal::Number(x), TVal::Number(y)) => (x > y) as i32,
+                _ => 0,
+            }
+        }
+        fn val_ge(&mut self, a: HostVal, b: HostVal) -> i32 {
+            let inner = self.inner.lock().unwrap();
+            match (&inner.values[a.0 as usize], &inner.values[b.0 as usize]) {
+                (TVal::Number(x), TVal::Number(y)) => (x >= y) as i32,
+                _ => 0,
+            }
+        }
+        fn str_concat(&mut self, _a: HostVal, _b: HostVal) -> HostVal {
+            unimplemented!("str_concat")
+        }
+        fn str_replace(
+            &mut self,
+            _s: HostVal,
+            _old: HostVal,
+            _new: HostVal,
+            _count: HostVal,
+        ) -> HostVal {
+            unimplemented!("str_replace")
+        }
+        fn val_to_string(&mut self, _val: HostVal) -> HostVal {
+            unimplemented!("val_to_string")
+        }
+        fn compound_begin(&mut self, _kind: i32) {}
+        fn compound_push(&mut self, _val: HostVal) {}
+        fn compound_end(&mut self) -> HostVal {
+            HostVal(0)
+        }
+        fn compound_get(&mut self, _compound: HostVal, _key: HostVal) -> HostVal {
+            HostVal(0)
+        }
+        fn compound_len(&mut self, _compound: HostVal) -> HostVal {
+            HostVal(0)
+        }
+        fn pair_first(&mut self, _compound: HostVal) -> HostVal {
+            HostVal(0)
+        }
+        fn pair_second(&mut self, _compound: HostVal) -> HostVal {
+            HostVal(0)
+        }
+        fn debuglog(&mut self, _val: HostVal) {}
+        // --- Negation check protocol ---
+        fn negation_begin(&mut self, rel_id: i32) {
+            let mut inner = self.inner.lock().unwrap();
+            inner.negation_rel = rel_id;
+            inner.negation_tuple.clear();
+        }
+        fn negation_push(&mut self, val: HostVal) {
+            let mut inner = self.inner.lock().unwrap();
+            inner.negation_tuple.push(val);
+        }
+        fn negation_end(&mut self) -> i32 {
+            let mut inner = self.inner.lock().unwrap();
+            let rel = inner.negation_rel;
+            let check = std::mem::take(&mut inner.negation_tuple);
+            let found = inner
+                .data
+                .get(&rel)
+                .map(|tuples| {
+                    tuples.iter().any(|tuple| {
+                        tuple.len() == check.len()
+                            && tuple.iter().zip(check.iter()).all(|(a, b)| {
+                                inner.values[a.0 as usize] == inner.values[b.0 as usize]
+                            })
+                    })
+                })
+                .unwrap_or(false);
+            (!found) as i32
+        }
+
+        // --- Built-in string predicate checks (mirror the interpreter's
+        // eval_builtin_predicate semantics; panic on type mismatch). ---
+
+        fn str_starts_with(&mut self, s: HostVal, prefix: HostVal) -> i32 {
+            let inner = self.inner.lock().unwrap();
+            match (
+                &inner.values[s.0 as usize],
+                &inner.values[prefix.0 as usize],
+            ) {
+                (TVal::Str(s), TVal::Str(p)) => s.starts_with(p.as_str()) as i32,
+                _ => panic!("str_starts_with: expected string arguments"),
+            }
+        }
+        fn str_ends_with(&mut self, s: HostVal, suffix: HostVal) -> i32 {
+            let inner = self.inner.lock().unwrap();
+            match (
+                &inner.values[s.0 as usize],
+                &inner.values[suffix.0 as usize],
+            ) {
+                (TVal::Str(s), TVal::Str(p)) => s.ends_with(p.as_str()) as i32,
+                _ => panic!("str_ends_with: expected string arguments"),
+            }
+        }
+        fn str_contains(&mut self, s: HostVal, sub: HostVal) -> i32 {
+            let inner = self.inner.lock().unwrap();
+            match (&inner.values[s.0 as usize], &inner.values[sub.0 as usize]) {
+                (TVal::Str(s), TVal::Str(p)) => s.contains(p.as_str()) as i32,
+                _ => panic!("str_contains: expected string arguments"),
+            }
+        }
+    }
+
+    /// Run a program through the interpreter and return the sorted,
+    /// formatted tuples of `result_rel`.
+    fn interp_result(source: &str, result_rel: &str) -> Result<Vec<String>> {
+        let arena = Arena::new_with_global_interner();
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let interpreter = execute(&mut ir, &stratified, Box::new(MemStore::new()))?;
+        let mut rows: Vec<String> = interpreter
+            .store()
+            .scan(result_rel)
+            .map(|tuples| {
+                tuples
+                    .map(|t| {
+                        t.iter()
+                            .map(|v| match v {
+                                Value::Number(n) => n.to_string(),
+                                Value::String(s) | Value::Name(s) => s.clone(),
+                                other => format!("{other:?}"),
+                            })
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        rows.sort();
+        Ok(rows)
+    }
+
+    /// Run a program through WASM codegen + the VM and return the sorted,
+    /// formatted tuples of `result_rel`.
+    fn wasm_result(source: &str, result_rel: &str) -> Result<Vec<String>> {
+        let arena = Arena::new_with_global_interner();
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let compiled = compile_to_wasm(&mut ir, &stratified);
+        let host = TestHost::new(compiled.strings.clone());
+        let vm = mangle_vm::Vm::new()?;
+        vm.execute(
+            &compiled.wasm,
+            host.clone(),
+            compiled.strings.clone(),
+            compiled.names.clone(),
+        )?;
+        Ok(host.dump_relation(result_rel))
+    }
+
+    #[test]
+    fn test_wasm_negation_parity_with_interpreter() -> Result<()> {
+        let cases: &[(&str, &str)] = &[
+            (
+                // Unary negation over an IDB relation.
+                r#"
+                    num(1). num(2). num(3). num(4).
+                    banned(2). banned(4).
+                    result(X) :- num(X), !banned(X).
+                "#,
+                "result",
+            ),
+            (
+                // Multi-column negation with a constant argument.
+                r#"
+                    pair(1, 5). pair(2, 5). pair(3, 5).
+                    blocked(2, 5).
+                    result(X) :- pair(X, Y), !blocked(X, 5).
+                "#,
+                "result",
+            ),
+            (
+                // Everything blocked: empty result.
+                r#"
+                    num(1). num(2).
+                    banned(1). banned(2).
+                    result(X) :- num(X), !banned(X).
+                "#,
+                "result",
+            ),
+            (
+                // Negated relation never has any facts.
+                r#"
+                    num(1). num(2).
+                    result(X) :- num(X), !banned(X).
+                "#,
+                "result",
+            ),
+            (
+                // Two-column result, negation on both bound variables.
+                r#"
+                    pair(1, 5). pair(2, 6). pair(3, 7).
+                    blocked(2, 6).
+                    result(X, Y) :- pair(X, Y), !blocked(X, Y).
+                "#,
+                "result",
+            ),
+            (
+                // Positive string built-in predicate (:string:contains).
+                r#"
+                    word("apple"). word("banana"). word("cherry").
+                    result(X) :- word(X), :string:contains(X, "an").
+                "#,
+                "result",
+            ),
+            (
+                // Negated string built-in predicate (!:string:contains).
+                r#"
+                    word("apple"). word("banana"). word("cherry").
+                    result(X) :- word(X), !:string:contains(X, "an").
+                "#,
+                "result",
+            ),
+            (
+                // Two string predicates, one negated.
+                r#"
+                    word("alpha"). word("beta"). word("gamma").
+                    result(X) :- word(X), !:string:starts_with(X, "al"), !:string:ends_with(X, "ma").
+                "#,
+                "result",
+            ),
+            (
+                // Negated comparison (!:lt).
+                r#"
+                    num(1). num(2). num(3). num(5).
+                    result(X) :- num(X), !:lt(X, 3).
+                "#,
+                "result",
+            ),
+            (
+                // Negated comparison with both arguments bound (!:le).
+                r#"
+                    pair(1, 2). pair(5, 3).
+                    result(X, Y) :- pair(X, Y), !:le(X, Y).
+                "#,
+                "result",
+            ),
+            (
+                // Positive comparison mixed with negation.
+                r#"
+                    num(1). num(2). num(3). num(4). num(5).
+                    banned(4).
+                    result(X) :- num(X), X > 2, !banned(X).
+                "#,
+                "result",
+            ),
+        ];
+
+        for (source, result_rel) in cases {
+            let expected = interp_result(source, result_rel)?;
+            let got = wasm_result(source, result_rel)?;
+            assert_eq!(
+                expected, got,
+                "WASM/interpreter mismatch for program:\n{source}"
+            );
+        }
         Ok(())
     }
 }

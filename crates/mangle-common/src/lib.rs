@@ -468,6 +468,70 @@ pub trait Host {
     fn hash_join_end(&mut self, _join_id: i32) {
         unimplemented!("hash_join_end");
     }
+
+    // --- Negation check ---
+    //
+    // Protocol (buffer-based, like HashJoin, because the check tuple's
+    // arity is only known statically to the generated code):
+    //   1. `negation_begin(rel_id)` — start building a check tuple for
+    //      the relation identified by `rel_id`.
+    //   2. N calls to `negation_push(val)` — one per column of the check
+    //      tuple, in column order.
+    //   3. `negation_end() -> i32` — returns 1 iff NO tuple currently in
+    //      `rel_id` matches all pushed values (the negated atom holds),
+    //      0 if at least one matching tuple exists.
+    //
+    // Semantics mirror the interpreter's `Condition::Negation` evaluation:
+    // a tuple matches when its arity equals the check tuple's and every
+    // column compares equal. Hosts that cannot answer this query (e.g.
+    // streaming sources without materialization) should keep the panicking
+    // default rather than guess.
+    //
+    // Default impls panic so existing Host implementations compile until
+    // they opt into negation support.
+    fn negation_begin(&mut self, _rel_id: i32) {
+        unimplemented!("negation_begin");
+    }
+    fn negation_push(&mut self, _val: HostVal) {
+        unimplemented!("negation_push");
+    }
+    fn negation_end(&mut self) -> i32 {
+        unimplemented!("negation_end");
+    }
+
+    // --- Built-in predicate checks ---
+    //
+    // Each returns 1 if the predicate holds for the given values, 0
+    // otherwise. Semantics mirror the interpreter's `eval_builtin_predicate`
+    // check modes:
+    //   - string/name predicates expect correctly-typed arguments and
+    //     should panic (trapping the WASM) on a type mismatch, mirroring
+    //     the interpreter's runtime error;
+    //   - `list_member` / `match_field` return 0 for non-list /
+    //     non-struct values (and absent fields), mirroring the silent
+    //     no-rows behavior of the positive `IterateList` / `MatchField`
+    //     ops — the negated forms rely on this.
+    //
+    // Default impls panic so existing Host implementations compile until
+    // they opt into built-in predicate support.
+    fn str_starts_with(&mut self, _s: HostVal, _prefix: HostVal) -> i32 {
+        unimplemented!("str_starts_with");
+    }
+    fn str_ends_with(&mut self, _s: HostVal, _suffix: HostVal) -> i32 {
+        unimplemented!("str_ends_with");
+    }
+    fn str_contains(&mut self, _s: HostVal, _sub: HostVal) -> i32 {
+        unimplemented!("str_contains");
+    }
+    fn match_prefix(&mut self, _name: HostVal, _prefix: HostVal) -> i32 {
+        unimplemented!("match_prefix");
+    }
+    fn list_member(&mut self, _elem: HostVal, _list: HostVal) -> i32 {
+        unimplemented!("list_member");
+    }
+    fn match_field(&mut self, _struct: HostVal, _field: HostVal, _value: HostVal) -> i32 {
+        unimplemented!("match_field");
+    }
 }
 
 // --- Legacy Interfaces ---

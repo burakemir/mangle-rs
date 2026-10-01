@@ -82,7 +82,24 @@ const IMP_HASH_JOIN_PUSH: u32 = 39; //  (externref) -> ()
 const IMP_HASH_JOIN_COMMIT_BUILD: u32 = 40; //  (i32, i32) -> ()
 const IMP_HASH_JOIN_PROBE: u32 = 41; //  (i32) -> i32
 const IMP_HASH_JOIN_END: u32 = 42; //  (i32) -> ()
-const NUM_IMPORTS: u32 = 43;
+// --- Negation protocol ---
+// `negation_begin(rel_id)` starts a check tuple, `negation_push(val)`
+// appends one column value, `negation_end()` returns 1 iff no tuple in
+// the relation matches all pushed values (the negated atom holds).
+const IMP_NEGATION_BEGIN: u32 = 43; // (i32) -> ()
+const IMP_NEGATION_PUSH: u32 = 44; // (externref) -> ()
+const IMP_NEGATION_END: u32 = 45; // () -> i32
+// --- Built-in predicate checks ---
+// Each takes the predicate's arguments as externrefs and returns an i32:
+// 1 if the predicate holds, 0 otherwise. Semantics mirror the
+// interpreter's eval_builtin_predicate check modes.
+const IMP_STR_STARTS_WITH: u32 = 46; // (externref, externref) -> i32
+const IMP_STR_ENDS_WITH: u32 = 47; // (externref, externref) -> i32
+const IMP_STR_CONTAINS: u32 = 48; // (externref, externref) -> i32
+const IMP_MATCH_PREFIX: u32 = 49; // (externref, externref) -> i32
+const IMP_LIST_MEMBER: u32 = 50; // (externref, externref) -> i32
+const IMP_MATCH_FIELD: u32 = 51; // (externref, externref, externref) -> i32
+const NUM_IMPORTS: u32 = 52;
 
 // --- Type indices (for the WASM type section) ---
 const TY_VOID: u32 = 0; //  () -> ()
@@ -101,6 +118,7 @@ const TY_CMP: u32 = 12; // (externref, externref) -> i32
 const TY_QUADOP: u32 = 13; // (externref, externref, externref, externref) -> externref
 const TY_VOID_EXTERNREF: u32 = 14; // () -> externref
 const TY_I32_I32_VOID: u32 = 15; // (i32, i32) -> ()
+const TY_TRI_CMP: u32 = 16; // (externref, externref, externref) -> i32
 
 /// The compiled output of the code generator.
 pub struct CompiledModule {
@@ -166,6 +184,18 @@ pub trait Backend {
 
     /// Emits `hash_join_end(join_id)` — drop the host-side table.
     fn emit_hash_join_end(&self, func: &mut Function, join_id: u32);
+
+    /// Emits `negation_begin(rel_id)` — start a negation check tuple for
+    /// the relation.
+    fn emit_negation_begin(&self, func: &mut Function, rel_name: &str);
+
+    /// Emits `negation_push(val)` — append one column value (externref
+    /// already on the stack) to the pending negation check tuple.
+    fn emit_negation_push(&self, func: &mut Function);
+
+    /// Emits `negation_end()` — leaves an i32 on the stack: 1 iff no
+    /// tuple in the relation matches the pushed values.
+    fn emit_negation_end(&self, func: &mut Function);
 }
 
 fn djb2_hash(name: &str) -> u32 {
@@ -263,6 +293,20 @@ impl Backend for WasmImportsBackend {
     fn emit_hash_join_end(&self, func: &mut Function, join_id: u32) {
         func.instruction(&Instruction::I32Const(join_id as i32));
         func.instruction(&Instruction::Call(IMP_HASH_JOIN_END));
+    }
+
+    fn emit_negation_begin(&self, func: &mut Function, rel_name: &str) {
+        func.instruction(&Instruction::I32Const(djb2_hash(rel_name) as i32));
+        func.instruction(&Instruction::Call(IMP_NEGATION_BEGIN));
+    }
+
+    fn emit_negation_push(&self, func: &mut Function) {
+        // externref already on stack
+        func.instruction(&Instruction::Call(IMP_NEGATION_PUSH));
+    }
+
+    fn emit_negation_end(&self, func: &mut Function) {
+        func.instruction(&Instruction::Call(IMP_NEGATION_END));
     }
 }
 
@@ -384,6 +428,11 @@ impl<'a, B: Backend> Codegen<'a, B> {
         types
             .ty()
             .function(vec![ValType::I32, ValType::I32], vec![]);
+        // T16: (externref, externref, externref) -> i32 — :match_field check
+        types.ty().function(
+            vec![ValType::EXTERNREF, ValType::EXTERNREF, ValType::EXTERNREF],
+            vec![ValType::I32],
+        );
         module.section(&types);
 
         // 2. Imports
@@ -472,6 +521,19 @@ impl<'a, B: Backend> Codegen<'a, B> {
             );
             imports.import("env", "hash_join_probe", EntityType::Function(TY_I32_I32));
             imports.import("env", "hash_join_end", EntityType::Function(TY_I32_VOID));
+            imports.import("env", "negation_begin", EntityType::Function(TY_I32_VOID));
+            imports.import(
+                "env",
+                "negation_push",
+                EntityType::Function(TY_EXTERNREF_VOID),
+            );
+            imports.import("env", "negation_end", EntityType::Function(TY_VOID_I32));
+            imports.import("env", "str_starts_with", EntityType::Function(TY_CMP));
+            imports.import("env", "str_ends_with", EntityType::Function(TY_CMP));
+            imports.import("env", "str_contains", EntityType::Function(TY_CMP));
+            imports.import("env", "match_prefix", EntityType::Function(TY_CMP));
+            imports.import("env", "list_member", EntityType::Function(TY_CMP));
+            imports.import("env", "match_field", EntityType::Function(TY_TRI_CMP));
         }
         module.section(&imports);
 
@@ -858,7 +920,13 @@ impl<'a, B: Backend> Codegen<'a, B> {
                     }
                 }
             }
-            Op::GroupBy { .. } => {}
+            // GroupBy would need dedicated WASM emission (the host-side
+            // scan_aggregate_start protocol is stubbed but unused); emitting
+            // nothing silently produces wrong results, so fail loudly
+            // instead.
+            Op::GroupBy { .. } => {
+                panic!("WASM codegen does not yet support aggregation (GroupBy)")
+            }
             Op::Filter { cond, body } => {
                 self.emit_condition(func, cond, ctx);
                 func.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
@@ -1068,11 +1136,43 @@ impl<'a, B: Backend> Codegen<'a, B> {
                 };
                 func.instruction(&Instruction::Call(import_idx));
             }
-            // These conditions would need dedicated WASM emission; emitting
-            // a constant `true` (as the previous catch-all did) silently
-            // produces wrong results, so fail loudly instead.
-            Condition::Negation { .. } | Condition::Call { .. } | Condition::Not(_) => {
-                panic!("WASM codegen does not yet support condition: {:?}", cond);
+            Condition::Negation { relation, args } => {
+                // Buffer protocol: begin(rel), push each column value,
+                // end() -> 1 iff no tuple matches (negation holds).
+                // Mirrors the interpreter's Condition::Negation evaluation.
+                let rel_name = self.ir.resolve_name(*relation);
+                self.backend.emit_negation_begin(func, rel_name);
+                for arg in args {
+                    self.emit_operand(func, arg, ctx);
+                    self.backend.emit_negation_push(func);
+                }
+                self.backend.emit_negation_end(func);
+            }
+            Condition::Call { function, args } => {
+                // Built-in predicate check: delegate to a host import whose
+                // semantics mirror the interpreter's eval_builtin_predicate.
+                let name = self.ir.resolve_name(*function);
+                let import_idx = match name {
+                    ":string:starts_with" => IMP_STR_STARTS_WITH,
+                    ":string:ends_with" => IMP_STR_ENDS_WITH,
+                    ":string:contains" => IMP_STR_CONTAINS,
+                    ":match_prefix" => IMP_MATCH_PREFIX,
+                    ":list:member" => IMP_LIST_MEMBER,
+                    ":match_field" => IMP_MATCH_FIELD,
+                    other => {
+                        panic!("WASM codegen does not yet support predicate: {other}");
+                    }
+                };
+                for arg in args {
+                    self.emit_operand(func, arg, ctx);
+                }
+                func.instruction(&Instruction::Call(import_idx));
+            }
+            Condition::Not(inner) => {
+                // Logical negation: the inner condition leaves an i32 on
+                // the stack; negate it with i32.eqz.
+                self.emit_condition(func, inner, ctx);
+                func.instruction(&Instruction::I32Eqz);
             }
         }
     }
@@ -1197,25 +1297,15 @@ impl<'a, B: Backend> Codegen<'a, B> {
                         }
                     }
                     "fn:map:keys" | "fn:map:values" | "fn:struct:values" => {
-                        // These return compounds — delegate to host via compound_get
-                        // with a special key convention. For now, treat as unary.
-                        if let Some(arg) = args.first() {
-                            self.emit_operand(func, arg, ctx);
-                            func.instruction(&Instruction::Call(IMP_COMPOUND_LEN));
-                            // TODO: proper keys/values extraction
-                        } else {
-                            func.instruction(&Instruction::RefNull(HeapType::EXTERN));
-                        }
+                        // These need dedicated host-side extraction; emitting
+                        // compound_len silently produces wrong values, so fail
+                        // loudly instead.
+                        panic!("WASM codegen does not yet support function: {}", name);
                     }
                     _ => {
-                        // Unknown function: drop all args, push null
-                        for arg in args {
-                            self.emit_operand(func, arg, ctx);
-                        }
-                        for _ in 0..args.len() {
-                            func.instruction(&Instruction::Drop);
-                        }
-                        func.instruction(&Instruction::RefNull(HeapType::EXTERN));
+                        // Unknown function: fail loudly rather than pushing a
+                        // silent null, which would produce wrong results.
+                        panic!("WASM codegen does not yet support function: {name}");
                     }
                 }
             }
@@ -1394,5 +1484,103 @@ mod tests {
             }
         }
         assert!(found_const_string, "const_string import not found");
+    }
+
+    #[test]
+    fn test_codegen_negation_imports() {
+        // A program with plain Datalog negation must emit the negation
+        // protocol imports (negation_begin / negation_push / negation_end).
+        let arena = ast::Arena::new_with_global_interner();
+        let num = arena.predicate_sym("num", Some(1));
+        let banned = arena.predicate_sym("banned", Some(1));
+        let allowed = arena.predicate_sym("allowed", Some(1));
+        let x = arena.variable("X");
+
+        let clause = ast::Clause {
+            head: arena.atom(allowed, &[x]),
+            head_time: None,
+            premises: arena.alloc_slice_copy(&[
+                arena.alloc(ast::Term::Atom(arena.atom(num, &[x]))),
+                arena.alloc(ast::Term::NegAtom(arena.atom(banned, &[x]))),
+            ]),
+            transform: &[],
+        };
+        let unit = ast::Unit {
+            decls: &[],
+            clauses: arena.alloc_slice_copy(&[&clause]),
+        };
+
+        let ctx = LoweringContext::new(&arena);
+        let mut ir = ctx.lower_unit(&unit);
+
+        let mut codegen = Codegen::new(&mut ir, WasmImportsBackend);
+        let compiled = codegen.generate();
+
+        use wasmparser::Payload;
+        let parser = wasmparser::Parser::new(0);
+        let mut found_negation = [false; 3];
+        for payload in parser.parse_all(&compiled.wasm) {
+            if let Payload::ImportSection(reader) = payload.expect("parsing failed") {
+                for import in reader.into_imports() {
+                    let import = import.expect("import failed");
+                    match import.name {
+                        "negation_begin" => found_negation[0] = true,
+                        "negation_push" => found_negation[1] = true,
+                        "negation_end" => found_negation[2] = true,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        assert!(found_negation[0], "negation_begin import not found");
+        assert!(found_negation[1], "negation_push import not found");
+        assert!(found_negation[2], "negation_end import not found");
+    }
+
+    #[test]
+    fn test_codegen_builtin_predicate_imports() {
+        // A program using the string built-in predicates must emit the
+        // corresponding check imports.
+        let arena = ast::Arena::new_with_global_interner();
+        let word = arena.predicate_sym("word", Some(1));
+        let contains = arena.predicate_sym(":string:contains", Some(2));
+        let has_an = arena.predicate_sym("has_an", Some(1));
+        let x = arena.variable("X");
+        let an = arena.const_(ast::Const::String("an"));
+
+        let clause = ast::Clause {
+            head: arena.atom(has_an, &[x]),
+            head_time: None,
+            premises: arena.alloc_slice_copy(&[
+                arena.alloc(ast::Term::Atom(arena.atom(word, &[x]))),
+                arena.alloc(ast::Term::Atom(arena.atom(contains, &[x, an]))),
+            ]),
+            transform: &[],
+        };
+        let unit = ast::Unit {
+            decls: &[],
+            clauses: arena.alloc_slice_copy(&[&clause]),
+        };
+
+        let ctx = LoweringContext::new(&arena);
+        let mut ir = ctx.lower_unit(&unit);
+
+        let mut codegen = Codegen::new(&mut ir, WasmImportsBackend);
+        let compiled = codegen.generate();
+
+        use wasmparser::Payload;
+        let parser = wasmparser::Parser::new(0);
+        let mut found = false;
+        for payload in parser.parse_all(&compiled.wasm) {
+            if let Payload::ImportSection(reader) = payload.expect("parsing failed") {
+                for import in reader.into_imports() {
+                    let import = import.expect("import failed");
+                    if import.name == "str_contains" {
+                        found = true;
+                    }
+                }
+            }
+        }
+        assert!(found, "str_contains import not found");
     }
 }

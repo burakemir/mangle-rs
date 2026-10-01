@@ -33,6 +33,9 @@ pub struct CompositeHost {
 
     /// Maps composite HostVal -> (host_index, sub_host HostVal).
     val_map: Vec<(usize, HostVal)>,
+
+    /// Host index that the pending negation check is routed to.
+    negation_host: Option<usize>,
 }
 
 impl Default for CompositeHost {
@@ -49,6 +52,7 @@ impl CompositeHost {
             active_iters: HashMap::new(),
             next_iter_id: 1,
             val_map: Vec::new(),
+            negation_host: None,
         }
     }
 
@@ -377,5 +381,66 @@ impl Host for CompositeHost {
     fn debuglog(&mut self, val: HostVal) {
         let (h, sub_hv) = self.unwrap(val);
         self.hosts[h].debuglog(sub_hv);
+    }
+
+    // --- Negation: delegate to the routed sub-host, unwrapping values
+    // along the way (same pattern as scan_index_start). ---
+
+    fn negation_begin(&mut self, rel_id: i32) {
+        let h_idx = self.routes.get(&rel_id).copied().unwrap_or(0);
+        self.negation_host = Some(h_idx);
+        self.hosts[h_idx].negation_begin(rel_id);
+    }
+
+    fn negation_push(&mut self, val: HostVal) {
+        let (_, sub_hv) = self.unwrap(val);
+        let h_idx = self.negation_host.unwrap_or(0);
+        self.hosts[h_idx].negation_push(sub_hv);
+    }
+
+    fn negation_end(&mut self) -> i32 {
+        let h_idx = self.negation_host.take().unwrap_or(0);
+        self.hosts[h_idx].negation_end()
+    }
+
+    // --- Built-in predicate checks: delegate to the host of the first
+    // operand, unwrapping values along the way (same pattern as the
+    // compound operations). ---
+
+    fn str_starts_with(&mut self, s: HostVal, prefix: HostVal) -> i32 {
+        let (h, s_sub) = self.unwrap(s);
+        let (_, p_sub) = self.unwrap(prefix);
+        self.hosts[h].str_starts_with(s_sub, p_sub)
+    }
+
+    fn str_ends_with(&mut self, s: HostVal, suffix: HostVal) -> i32 {
+        let (h, s_sub) = self.unwrap(s);
+        let (_, p_sub) = self.unwrap(suffix);
+        self.hosts[h].str_ends_with(s_sub, p_sub)
+    }
+
+    fn str_contains(&mut self, s: HostVal, sub: HostVal) -> i32 {
+        let (h, s_sub) = self.unwrap(s);
+        let (_, p_sub) = self.unwrap(sub);
+        self.hosts[h].str_contains(s_sub, p_sub)
+    }
+
+    fn match_prefix(&mut self, name: HostVal, prefix: HostVal) -> i32 {
+        let (h, n_sub) = self.unwrap(name);
+        let (_, p_sub) = self.unwrap(prefix);
+        self.hosts[h].match_prefix(n_sub, p_sub)
+    }
+
+    fn list_member(&mut self, elem: HostVal, list: HostVal) -> i32 {
+        let (h, e_sub) = self.unwrap(elem);
+        let (_, l_sub) = self.unwrap(list);
+        self.hosts[h].list_member(e_sub, l_sub)
+    }
+
+    fn match_field(&mut self, struct_val: HostVal, field: HostVal, value: HostVal) -> i32 {
+        let (h, s_sub) = self.unwrap(struct_val);
+        let (_, f_sub) = self.unwrap(field);
+        let (_, v_sub) = self.unwrap(value);
+        self.hosts[h].match_field(s_sub, f_sub, v_sub)
     }
 }
