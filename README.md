@@ -52,8 +52,9 @@ Source ──> Parser ──> AST ──> Analysis ──> IR ──> Planner �
 5.  **Execution**:
 
     *   **Server Mode** (`mangle-codegen` + `mangle-vm`):
-        Generates WASM with 38 host imports covering scan/insert, constants,
-        arithmetic, comparisons, string operations, and compound types.
+        Generates WASM with 54 host imports covering scan/insert, constants,
+        arithmetic, comparisons, string operations, compound types, negation
+        checks, and aggregations.
         Values cross the WASM boundary as `externref` handles backed by an
         in-host value slab (`HostVal(u32)`). The `Host` trait abstracts
         storage, enabling pluggable backends (in-memory, CSV, composite).
@@ -90,6 +91,40 @@ Both execution modes support:
 *   **String operations**: `fn:string:concat`, `fn:string:replace`, `fn:number:to_string`, etc.
 *   **Arithmetic**: `fn:plus`, `fn:minus`, `fn:mult`, `fn:div`, `fn:sqrt`
 *   **Comparisons**: `=`, `!=`, `<`, `<=`, `>`, `>=` (including cross-type numeric ordering)
+
+## Parity TODO
+
+The long-term goal is parity with
+[mangle-go](https://codeberg.org/TauCeti/mangle-go). Status and remaining gaps:
+
+### WASM codegen vs. interpreter
+
+Every physical-plan operation (`Op`, `Condition`) now has WASM emission and
+is covered by the interpreter-parity test suite in `mangle-driver`. The
+remaining gap is expression functions (`Expr::Call`) that the interpreter
+evaluates but WASM codegen rejects with a panic:
+
+*   `fn:list:append`
+*   `fn:map:keys`, `fn:map:values`, `fn:struct:values`
+*   all `fn:duration:*` functions (`from_hours`, `from_seconds`, `hours`,
+    `nanos`, `add`, `mult`, `parse`, ...)
+*   all `fn:time:*` functions (`year`, `month`, `format`, `parse_rfc3339`,
+    `trunc`, `add`, `sub`, ...); `fn:time:now` additionally needs a decision
+    on non-determinism in compiled modules
+
+### Interpreter vs. mangle-go
+
+*   `:match_entry` (map matching): the positive form is silently broken —
+    the planner has no arm for it and falls through to a relation lookup on
+    a relation that never exists, so rules using it return no rows. Its
+    negation is a loud compile error. Needs a dedicated `Op` like
+    `MatchField`/`IterateList`.
+*   Missing built-in predicates: `:string:matches` (RE2), `:filter`,
+    `:match_pair`, `:match_cons`, `:match_nil`, `:within_distance`,
+    `:float:lt`/`:le`/`:gt`/`:ge`, and the interval-algebra predicates
+    (`:interval:before`, `:interval:after`, ...).
+*   Missing functions: `fn:mod` and several others present in mangle-go's
+    `builtin` package.
 
 ## Try it in a browser
 
