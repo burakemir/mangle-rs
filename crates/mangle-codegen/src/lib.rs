@@ -99,7 +99,10 @@ const IMP_STR_CONTAINS: u32 = 48; // (externref, externref) -> i32
 const IMP_MATCH_PREFIX: u32 = 49; // (externref, externref) -> i32
 const IMP_LIST_MEMBER: u32 = 50; // (externref, externref) -> i32
 const IMP_MATCH_FIELD: u32 = 51; // (externref, externref, externref) -> i32
-const NUM_IMPORTS: u32 = 52;
+// --- Struct field extraction / list iteration (binding modes) ---
+const IMP_FIELD_PRESENT: u32 = 52; // (externref, externref) -> i32
+const IMP_LIST_ITER_START: u32 = 53; // (externref) -> i32
+const NUM_IMPORTS: u32 = 54;
 
 // --- Type indices (for the WASM type section) ---
 const TY_VOID: u32 = 0; //  () -> ()
@@ -119,6 +122,7 @@ const TY_QUADOP: u32 = 13; // (externref, externref, externref, externref) -> ex
 const TY_VOID_EXTERNREF: u32 = 14; // () -> externref
 const TY_I32_I32_VOID: u32 = 15; // (i32, i32) -> ()
 const TY_TRI_CMP: u32 = 16; // (externref, externref, externref) -> i32
+const TY_UNREF_I32: u32 = 17; // (externref) -> i32
 
 /// The compiled output of the code generator.
 pub struct CompiledModule {
@@ -196,6 +200,17 @@ pub trait Backend {
     /// Emits `negation_end()` — leaves an i32 on the stack: 1 iff no
     /// tuple in the relation matches the pushed values.
     fn emit_negation_end(&self, func: &mut Function);
+
+    /// Emits `field_present(struct, field)` — consumes the struct and field
+    /// name (externrefs, struct first) from the stack, leaves an i32: 1 iff
+    /// the value is a Struct containing the field.
+    fn emit_field_present(&self, func: &mut Function);
+
+    /// Emits `list_iter_start(list)` — consumes the list externref from the
+    /// stack, leaves an iter_id (i32) yielding the list's elements via the
+    /// existing scan_next / get_col protocol. 0 for a non-List value (empty
+    /// iteration).
+    fn emit_list_iter_start(&self, func: &mut Function);
 }
 
 fn djb2_hash(name: &str) -> u32 {
@@ -307,6 +322,14 @@ impl Backend for WasmImportsBackend {
 
     fn emit_negation_end(&self, func: &mut Function) {
         func.instruction(&Instruction::Call(IMP_NEGATION_END));
+    }
+
+    fn emit_field_present(&self, func: &mut Function) {
+        func.instruction(&Instruction::Call(IMP_FIELD_PRESENT));
+    }
+
+    fn emit_list_iter_start(&self, func: &mut Function) {
+        func.instruction(&Instruction::Call(IMP_LIST_ITER_START));
     }
 }
 
@@ -433,6 +456,10 @@ impl<'a, B: Backend> Codegen<'a, B> {
             vec![ValType::EXTERNREF, ValType::EXTERNREF, ValType::EXTERNREF],
             vec![ValType::I32],
         );
+        // T17: (externref) -> i32 — list_iter_start
+        types
+            .ty()
+            .function(vec![ValType::EXTERNREF], vec![ValType::I32]);
         module.section(&types);
 
         // 2. Imports
@@ -534,6 +561,8 @@ impl<'a, B: Backend> Codegen<'a, B> {
             imports.import("env", "match_prefix", EntityType::Function(TY_CMP));
             imports.import("env", "list_member", EntityType::Function(TY_CMP));
             imports.import("env", "match_field", EntityType::Function(TY_TRI_CMP));
+            imports.import("env", "field_present", EntityType::Function(TY_CMP));
+            imports.import("env", "list_iter_start", EntityType::Function(TY_UNREF_I32));
         }
         module.section(&imports);
 
@@ -836,6 +865,23 @@ impl<'a, B: Backend> Codegen<'a, B> {
                 }
                 count += Self::collect_vars(body, ctx);
             }
+            Op::MatchField { var, body, .. } => {
+                if !ctx.var_map.contains_key(var) {
+                    ctx.var_map.insert(*var, ctx.next_local);
+                    ctx.next_local += 1;
+                }
+                count += Self::collect_vars(body, ctx);
+            }
+            Op::IterateList { var, body, .. } => {
+                // One host-side element iterator (consumed via
+                // scan_next / get_col).
+                count += 1;
+                if !ctx.var_map.contains_key(var) {
+                    ctx.var_map.insert(*var, ctx.next_local);
+                    ctx.next_local += 1;
+                }
+                count += Self::collect_vars(body, ctx);
+            }
             _ => {}
         }
         count
@@ -963,10 +1009,73 @@ impl<'a, B: Backend> Codegen<'a, B> {
                 body,
             } => self.emit_hash_join(func, build_source, probe_source, join_keys, body, ctx),
             Op::Nop => {}
-            // These ops would need dedicated WASM emission; skipping them
-            // silently would produce wrong results, so fail loudly instead.
-            Op::MatchField { .. } | Op::IterateList { .. } => {
-                panic!("WASM codegen does not yet support :match_field / :list:member")
+            Op::MatchField {
+                struct_op,
+                field,
+                var,
+                body,
+            } => {
+                // Binding form of :match_field: if the struct contains the
+                // field, bind `var` to its value and run the body; otherwise
+                // produce no rows (mirroring the interpreter's Op::MatchField).
+                //
+                //   if (field_present(s, f)) {
+                //       var = compound_get(s, f);
+                //       body;
+                //   }
+                //
+                // The struct is saved in the externref scratch local (0)
+                // because it is needed again for the extraction.
+                let field_op = Operand::Const(Constant::Name(*field));
+                self.emit_operand(func, struct_op, ctx);
+                func.instruction(&Instruction::LocalTee(0));
+                self.emit_operand(func, &field_op, ctx);
+                self.backend.emit_field_present(func);
+                func.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+                // Bind var to the field value.
+                func.instruction(&Instruction::LocalGet(0));
+                self.emit_operand(func, &field_op, ctx);
+                func.instruction(&Instruction::Call(IMP_COMPOUND_GET));
+                if let Some(&local_idx) = ctx.var_map.get(var) {
+                    func.instruction(&Instruction::LocalSet(local_idx));
+                } else {
+                    func.instruction(&Instruction::Drop);
+                }
+                self.emit_op(func, body, ctx);
+                func.instruction(&Instruction::End);
+            }
+            Op::IterateList { source, var, body } => {
+                // Binding form of :list:member: iterate the list's elements,
+                // binding `var` to each. A non-List value yields an empty
+                // iteration (mirroring the interpreter's Op::IterateList).
+                // Reuses the scan_next / get_col loop pattern with column 0
+                // as the element.
+                let iter_local = ctx.iter_base + ctx.iter_offset;
+                ctx.iter_offset += 1;
+
+                self.emit_operand(func, source, ctx);
+                self.backend.emit_list_iter_start(func);
+                func.instruction(&Instruction::LocalSet(iter_local));
+
+                func.instruction(&Instruction::Block(wasm_encoder::BlockType::Empty));
+                func.instruction(&Instruction::Loop(wasm_encoder::BlockType::Empty));
+
+                self.backend.emit_scan_next(func, iter_local);
+                func.instruction(&Instruction::LocalTee(1));
+
+                func.instruction(&Instruction::I32Eqz);
+                func.instruction(&Instruction::BrIf(1));
+
+                if let Some(&local_idx) = ctx.var_map.get(var) {
+                    self.backend.emit_get_col(func, 1, 0);
+                    func.instruction(&Instruction::LocalSet(local_idx));
+                }
+
+                self.emit_op(func, body, ctx);
+
+                func.instruction(&Instruction::Br(0));
+                func.instruction(&Instruction::End);
+                func.instruction(&Instruction::End);
             }
         }
     }
@@ -1582,5 +1691,52 @@ mod tests {
             }
         }
         assert!(found, "str_contains import not found");
+    }
+
+    #[test]
+    fn test_codegen_binding_mode_imports() {
+        // :list:member in binding mode must emit the list-iteration import
+        // (list_iter_start) rather than the membership check.
+        let arena = ast::Arena::new_with_global_interner();
+        let container = arena.predicate_sym("container", Some(1));
+        let member = arena.predicate_sym(":list:member", Some(2));
+        let elem = arena.predicate_sym("elem", Some(1));
+        let x = arena.variable("X");
+        let l = arena.variable("L");
+
+        let clause = ast::Clause {
+            head: arena.atom(elem, &[x]),
+            head_time: None,
+            premises: arena.alloc_slice_copy(&[
+                arena.alloc(ast::Term::Atom(arena.atom(container, &[l]))),
+                arena.alloc(ast::Term::Atom(arena.atom(member, &[x, l]))),
+            ]),
+            transform: &[],
+        };
+        let unit = ast::Unit {
+            decls: &[],
+            clauses: arena.alloc_slice_copy(&[&clause]),
+        };
+
+        let ctx = LoweringContext::new(&arena);
+        let mut ir = ctx.lower_unit(&unit);
+
+        let mut codegen = Codegen::new(&mut ir, WasmImportsBackend);
+        let compiled = codegen.generate();
+
+        use wasmparser::Payload;
+        let parser = wasmparser::Parser::new(0);
+        let mut found_list_iter = false;
+        for payload in parser.parse_all(&compiled.wasm) {
+            if let Payload::ImportSection(reader) = payload.expect("parsing failed") {
+                for import in reader.into_imports() {
+                    let import = import.expect("import failed");
+                    if import.name == "list_iter_start" {
+                        found_list_iter = true;
+                    }
+                }
+            }
+        }
+        assert!(found_list_iter, "list_iter_start import not found");
     }
 }

@@ -443,4 +443,27 @@ impl Host for CompositeHost {
         let (_, v_sub) = self.unwrap(value);
         self.hosts[h].match_field(s_sub, f_sub, v_sub)
     }
+
+    // --- Binding modes (Op::MatchField / Op::IterateList) ---
+
+    fn field_present(&mut self, struct_val: HostVal, field: HostVal) -> i32 {
+        let (h, s_sub) = self.unwrap(struct_val);
+        let (_, f_sub) = self.unwrap(field);
+        self.hosts[h].field_present(s_sub, f_sub)
+    }
+
+    fn list_iter_start(&mut self, list: HostVal) -> i32 {
+        // Route through the host owning the list value; the returned
+        // iter_id is wrapped like a scan iterator so scan_next / get_col
+        // delegate correctly (same pattern as scan_start).
+        let (h, l_sub) = self.unwrap(list);
+        let real_id = self.hosts[h].list_iter_start(l_sub);
+        if real_id != 0 {
+            let id = self.next_iter_id;
+            self.next_iter_id += 1;
+            self.active_iters.insert(id, (h, real_id));
+            return id;
+        }
+        0
+    }
 }

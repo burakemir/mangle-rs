@@ -2779,6 +2779,9 @@ mod tests {
     enum TVal {
         Number(i64),
         Str(String),
+        Name(String),
+        /// Compound: (kind, elements). kind: 0=List, 1=Pair, 2=Map, 3=Struct.
+        Compound(i32, Vec<HostVal>),
     }
 
     #[derive(Clone)]
@@ -2790,12 +2793,18 @@ mod tests {
         values: Vec<TVal>,
         data: std::collections::HashMap<i32, Vec<Vec<HostVal>>>,
         iters: std::collections::HashMap<i32, (i32, usize)>,
+        /// List-element iterators (Op::IterateList).
+        list_iters: std::collections::HashMap<i32, (Vec<HostVal>, usize)>,
         next_iter_id: i32,
         pending_rel: i32,
         pending_tuple: Vec<HostVal>,
         negation_rel: i32,
         negation_tuple: Vec<HostVal>,
+        /// Pending compound build.
+        compound_kind: i32,
+        compound_elems: Vec<HostVal>,
         strings: Vec<String>,
+        names: Vec<String>,
     }
 
     fn host_hash_name(name: &str) -> i32 {
@@ -2807,18 +2816,22 @@ mod tests {
     }
 
     impl TestHost {
-        fn new(strings: Vec<String>) -> Self {
+        fn new(strings: Vec<String>, names: Vec<String>) -> Self {
             Self {
                 inner: std::sync::Arc::new(std::sync::Mutex::new(TestHostInner {
                     values: Vec::new(),
                     data: std::collections::HashMap::new(),
                     iters: std::collections::HashMap::new(),
+                    list_iters: std::collections::HashMap::new(),
                     next_iter_id: 1,
                     pending_rel: 0,
                     pending_tuple: Vec::new(),
                     negation_rel: 0,
                     negation_tuple: Vec::new(),
+                    compound_kind: 0,
+                    compound_elems: Vec::new(),
                     strings,
+                    names,
                 })),
             }
         }
@@ -2843,7 +2856,8 @@ mod tests {
                             t.iter()
                                 .map(|hv| match &inner.values[hv.0 as usize] {
                                     TVal::Number(n) => n.to_string(),
-                                    TVal::Str(s) => s.clone(),
+                                    TVal::Str(s) | TVal::Name(s) => s.clone(),
+                                    TVal::Compound(..) => "<compound>".to_string(),
                                 })
                                 .collect::<Vec<_>>()
                                 .join(",")
@@ -2869,6 +2883,16 @@ mod tests {
         }
         fn scan_next(&mut self, iter_id: i32) -> i32 {
             let mut inner = self.inner.lock().unwrap();
+            // List-element iterators (Op::IterateList).
+            if let Some(&(ref elems, idx)) = inner.list_iters.get(&iter_id) {
+                if idx < elems.len() {
+                    let ptr = (iter_id << 16) | (idx as i32 + 1);
+                    let elems = elems.clone();
+                    inner.list_iters.insert(iter_id, (elems, idx + 1));
+                    return ptr;
+                }
+                return 0;
+            }
             let Some(&(rel_id, idx)) = inner.iters.get(&iter_id).map(|x| x) else {
                 return 0;
             };
@@ -2893,6 +2917,10 @@ mod tests {
             let inner = self.inner.lock().unwrap();
             let iter_id = ptr >> 16;
             let tuple_idx = ((ptr & 0xFFFF) - 1) as usize;
+            // List-element iterators: column 0 is the element.
+            if let Some((elems, _)) = inner.list_iters.get(&iter_id) {
+                return elems[tuple_idx];
+            }
             if let Some((rel_id, _)) = inner.iters.get(&iter_id)
                 && let Some(tuples) = inner.data.get(rel_id)
             {
@@ -2943,8 +2971,14 @@ mod tests {
                 .unwrap_or_default();
             Self::alloc(&mut inner, TVal::Str(s))
         }
-        fn const_name(&mut self, _id: i32) -> HostVal {
-            unimplemented!("const_name")
+        fn const_name(&mut self, id: i32) -> HostVal {
+            let mut inner = self.inner.lock().unwrap();
+            let s = inner
+                .names
+                .get((id - 1) as usize)
+                .cloned()
+                .unwrap_or_default();
+            Self::alloc(&mut inner, TVal::Name(s))
         }
         fn const_time(&mut self, _nanos: i64) -> HostVal {
             unimplemented!("const_time")
@@ -3018,12 +3052,44 @@ mod tests {
         fn val_to_string(&mut self, _val: HostVal) -> HostVal {
             unimplemented!("val_to_string")
         }
-        fn compound_begin(&mut self, _kind: i32) {}
-        fn compound_push(&mut self, _val: HostVal) {}
-        fn compound_end(&mut self) -> HostVal {
-            HostVal(0)
+        fn compound_begin(&mut self, kind: i32) {
+            let mut inner = self.inner.lock().unwrap();
+            inner.compound_kind = kind;
+            inner.compound_elems.clear();
         }
-        fn compound_get(&mut self, _compound: HostVal, _key: HostVal) -> HostVal {
+        fn compound_push(&mut self, val: HostVal) {
+            let mut inner = self.inner.lock().unwrap();
+            inner.compound_elems.push(val);
+        }
+        fn compound_end(&mut self) -> HostVal {
+            let mut inner = self.inner.lock().unwrap();
+            let kind = inner.compound_kind;
+            let elems = std::mem::take(&mut inner.compound_elems);
+            Self::alloc(&mut inner, TVal::Compound(kind, elems))
+        }
+        fn compound_get(&mut self, compound: HostVal, key: HostVal) -> HostVal {
+            let inner = self.inner.lock().unwrap();
+            if let TVal::Compound(kind, elems) = &inner.values[compound.0 as usize] {
+                match kind {
+                    0 => {
+                        // List: key is index (Number)
+                        if let TVal::Number(idx) = &inner.values[key.0 as usize] {
+                            return elems.get(*idx as usize).copied().unwrap_or(HostVal(0));
+                        }
+                    }
+                    2 | 3 => {
+                        // Map/Struct: even positions are keys, odd are values
+                        for i in (0..elems.len()).step_by(2) {
+                            if i + 1 < elems.len()
+                                && inner.values[elems[i].0 as usize] == inner.values[key.0 as usize]
+                            {
+                                return elems[i + 1];
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
             HostVal(0)
         }
         fn compound_len(&mut self, _compound: HostVal) -> HostVal {
@@ -3095,6 +3161,30 @@ mod tests {
                 _ => panic!("str_contains: expected string arguments"),
             }
         }
+
+        // --- Binding modes (Op::MatchField / Op::IterateList) ---
+
+        fn field_present(&mut self, struct_val: HostVal, field: HostVal) -> i32 {
+            let inner = self.inner.lock().unwrap();
+            match &inner.values[struct_val.0 as usize] {
+                TVal::Compound(3, pairs) => pairs
+                    .chunks_exact(2)
+                    .any(|c| inner.values[c[0].0 as usize] == inner.values[field.0 as usize])
+                    as i32,
+                _ => 0,
+            }
+        }
+
+        fn list_iter_start(&mut self, list: HostVal) -> i32 {
+            let mut inner = self.inner.lock().unwrap();
+            if let TVal::Compound(0, elems) = inner.values[list.0 as usize].clone() {
+                let id = inner.next_iter_id;
+                inner.next_iter_id += 1;
+                inner.list_iters.insert(id, (elems, 0));
+                return id;
+            }
+            0
+        }
     }
 
     /// Run a program through the interpreter and return the sorted,
@@ -3131,7 +3221,7 @@ mod tests {
         let arena = Arena::new_with_global_interner();
         let (mut ir, stratified) = compile(source, &arena)?;
         let compiled = compile_to_wasm(&mut ir, &stratified);
-        let host = TestHost::new(compiled.strings.clone());
+        let host = TestHost::new(compiled.strings.clone(), compiled.names.clone());
         let vm = mangle_vm::Vm::new()?;
         vm.execute(
             &compiled.wasm,
@@ -3235,6 +3325,55 @@ mod tests {
                     num(1). num(2). num(3). num(4). num(5).
                     banned(4).
                     result(X) :- num(X), X > 2, !banned(X).
+                "#,
+                "result",
+            ),
+            (
+                // :list:member binding mode (unbound X).
+                r#"
+                    container(["a", "b"]).
+                    result(X) :- container(L), :list:member(X, L).
+                "#,
+                "result",
+            ),
+            (
+                // :list:member check mode (X already bound).
+                r#"
+                    word("a"). word("z").
+                    container(["a", "b"]).
+                    result(X) :- word(X), container(L), :list:member(X, L).
+                "#,
+                "result",
+            ),
+            (
+                // :match_field binding mode (unbound X).
+                r#"
+                    data({/name: "alice", /age: 30}).
+                    result(X) :- data(S), :match_field(S, /name, X).
+                "#,
+                "result",
+            ),
+            (
+                // :match_field check mode (value already bound).
+                r#"
+                    data({/name: "alice"}).
+                    result(1) :- data(S), :match_field(S, /name, "alice").
+                "#,
+                "result",
+            ),
+            (
+                // :match_field on an absent field: no rows.
+                r#"
+                    data({/name: "alice"}).
+                    result(X) :- data(S), :match_field(S, /missing, X).
+                "#,
+                "result",
+            ),
+            (
+                // Structs inside lists: bind elements, then extract fields.
+                r#"
+                    people([{/name: "alice"}, {/name: "bob"}]).
+                    result(X) :- people(P), :list:member(S, P), :match_field(S, /name, X).
                 "#,
                 "result",
             ),

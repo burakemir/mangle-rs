@@ -562,6 +562,21 @@ impl Vm {
             },
         )?;
 
+        // 52: field_present (externref, externref) -> i32
+        cmpop!("field_present", field_present);
+
+        // 53: list_iter_start (externref) -> i32
+        linker.func_wrap(
+            "env",
+            "list_iter_start",
+            |mut caller: wasmtime::Caller<'_, HostWrapper<H>>,
+             a: Option<Rooted<ExternRef>>|
+             -> i32 {
+                let a_hv = extract_hv(&a, &caller);
+                caller.data_mut().host.list_iter_start(a_hv)
+            },
+        )?;
+
         let instance = linker.instantiate(&mut store, &module)?;
         let run = instance.get_typed_func::<(), ()>(&mut store, "run")?;
         run.call(&mut store, ())?;
@@ -777,6 +792,8 @@ mod tests {
         /// rel_id -> tuples of HostVal handles
         data: HashMap<i32, Vec<Vec<HostVal>>>,
         iters: HashMap<i32, (i32, usize)>,
+        /// List-element iterators (Op::IterateList): iter_id -> (elements, cursor)
+        list_iters: HashMap<i32, (Vec<HostVal>, usize)>,
         next_iter_id: i32,
         /// Pending multi-column insert
         pending_rel: i32,
@@ -798,6 +815,7 @@ mod tests {
                 values: Vec::new(),
                 data: HashMap::new(),
                 iters: HashMap::new(),
+                list_iters: HashMap::new(),
                 next_iter_id: 1,
                 pending_rel: 0,
                 pending_tuple: Vec::new(),
@@ -920,6 +938,14 @@ mod tests {
             self.scan_start(rel_id)
         }
         fn scan_next(&mut self, iter_id: i32) -> i32 {
+            // List-element iterators (Op::IterateList).
+            if let Some((elems, idx)) = self.list_iters.get_mut(&iter_id)
+                && *idx < elems.len()
+            {
+                let ptr = (iter_id << 16) | (*idx as i32 + 1);
+                *idx += 1;
+                return ptr;
+            }
             if let Some((rel_id, idx)) = self.iters.get_mut(&iter_id)
                 && let Some(tuples) = self.data.get(rel_id)
                 && *idx < tuples.len()
@@ -943,6 +969,10 @@ mod tests {
         fn get_col(&mut self, ptr: i32, col_idx: i32) -> HostVal {
             let iter_id = ptr >> 16;
             let tuple_idx = (ptr & 0xFFFF) - 1;
+            // List-element iterators: column 0 is the element.
+            if let Some((elems, _)) = self.list_iters.get(&iter_id) {
+                return elems[tuple_idx as usize];
+            }
             if let Some((rel_id, _)) = self.iters.get(&iter_id)
                 && let Some(tuples) = self.data.get(rel_id)
             {
@@ -1258,6 +1288,31 @@ mod tests {
                 _ => 0,
             }
         }
+
+        // --- Binding modes (Op::MatchField / Op::IterateList) ---
+
+        fn field_present(&mut self, struct_val: HostVal, field: HostVal) -> i32 {
+            match self.get_val(struct_val) {
+                // Non-struct: absent, mirroring the interpreter's silent
+                // no-rows behavior for Op::MatchField.
+                Val::Compound(3, pairs) => pairs
+                    .chunks_exact(2)
+                    .any(|c| self.get_val(c[0]) == self.get_val(field))
+                    as i32,
+                _ => 0,
+            }
+        }
+
+        fn list_iter_start(&mut self, list: HostVal) -> i32 {
+            if let Val::Compound(0, elems) = self.get_val(list).clone() {
+                let id = self.next_iter_id;
+                self.next_iter_id += 1;
+                self.list_iters.insert(id, (elems, 0));
+                return id;
+            }
+            // Not a list: empty iteration (iter_id 0 never yields).
+            0
+        }
     }
 
     // --- SharedMemHost wrapper for thread-safety ---
@@ -1423,6 +1478,12 @@ mod tests {
             }
             fn match_field(&mut self, s: HostVal, f: HostVal, v: HostVal) -> i32 {
                 self.inner.lock().unwrap().match_field(s, f, v)
+            }
+            fn field_present(&mut self, s: HostVal, f: HostVal) -> i32 {
+                self.inner.lock().unwrap().field_present(s, f)
+            }
+            fn list_iter_start(&mut self, list: HostVal) -> i32 {
+                self.inner.lock().unwrap().list_iter_start(list)
             }
         };
     }
@@ -1920,6 +1981,116 @@ mod tests {
         let mut xs: Vec<i64> = results.iter().map(|t| t[0]).collect();
         xs.sort();
         assert_eq!(xs, vec![3, 5]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_wasm_list_member_binding_e2e() -> Result<()> {
+        // Positive :list:member in binding mode (unbound X).
+        let host = run_wasm_program(
+            r#"
+            container(["a", "b"]).
+            elem(X) :- container(L), :list:member(X, L).
+        "#,
+        )?;
+        let mut results = host.get_string_facts("elem");
+        results.sort();
+        assert_eq!(results.len(), 2, "elem: {:?}", results);
+        assert_eq!(results[0][0], "a");
+        assert_eq!(results[1][0], "b");
+        Ok(())
+    }
+
+    #[test]
+    fn test_wasm_list_member_check_e2e() -> Result<()> {
+        // Positive :list:member in check mode (X already bound).
+        let host = run_wasm_program(
+            r#"
+            word("a"). word("z").
+            container(["a", "b"]).
+            in_list(X) :- word(X), container(L), :list:member(X, L).
+        "#,
+        )?;
+        let results = host.get_string_facts("in_list");
+        assert_eq!(results.len(), 1, "in_list: {:?}", results);
+        assert_eq!(results[0][0], "a");
+        Ok(())
+    }
+
+    #[test]
+    fn test_wasm_list_member_non_list_e2e() -> Result<()> {
+        // A non-list second argument yields no rows (silent no-rows
+        // behavior, mirroring the interpreter's IterateList op).
+        let host = run_wasm_program(
+            r#"
+            word("a").
+            notalist(42).
+            in_list(X) :- word(X), notalist(L), :list:member(X, L).
+        "#,
+        )?;
+        let results = host.get_string_facts("in_list");
+        assert_eq!(results.len(), 0, "in_list: {:?}", results);
+        Ok(())
+    }
+
+    #[test]
+    fn test_wasm_match_field_binding_e2e() -> Result<()> {
+        // Positive :match_field in binding mode (unbound X).
+        let host = run_wasm_program(
+            r#"
+            data({/name: "alice", /age: 30}).
+            nm(X) :- data(S), :match_field(S, /name, X).
+        "#,
+        )?;
+        let results = host.get_string_facts("nm");
+        assert_eq!(results.len(), 1, "nm: {:?}", results);
+        assert_eq!(results[0][0], "alice");
+        Ok(())
+    }
+
+    #[test]
+    fn test_wasm_match_field_check_e2e() -> Result<()> {
+        // Positive :match_field in check mode (value already bound).
+        let host = run_wasm_program(
+            r#"
+            data({/name: "alice"}).
+            is_alice(1) :- data(S), :match_field(S, /name, "alice").
+        "#,
+        )?;
+        let results = host.get_number_facts("is_alice");
+        assert_eq!(results.len(), 1, "is_alice: {:?}", results);
+        Ok(())
+    }
+
+    #[test]
+    fn test_wasm_match_field_absent_e2e() -> Result<()> {
+        // Absent field: no rows (silent no-rows behavior, mirroring the
+        // interpreter's MatchField op).
+        let host = run_wasm_program(
+            r#"
+            data({/name: "alice"}).
+            nm(X) :- data(S), :match_field(S, /missing, X).
+        "#,
+        )?;
+        let results = host.get_string_facts("nm");
+        assert_eq!(results.len(), 0, "nm: {:?}", results);
+        Ok(())
+    }
+
+    #[test]
+    fn test_wasm_match_field_and_list_member_combined_e2e() -> Result<()> {
+        // Structs inside lists: bind list elements, then extract fields.
+        let host = run_wasm_program(
+            r#"
+            people([{/name: "alice"}, {/name: "bob"}]).
+            nm(X) :- people(P), :list:member(S, P), :match_field(S, /name, X).
+        "#,
+        )?;
+        let mut results = host.get_string_facts("nm");
+        results.sort();
+        assert_eq!(results.len(), 2, "nm: {:?}", results);
+        assert_eq!(results[0][0], "alice");
+        assert_eq!(results[1][0], "bob");
         Ok(())
     }
 }

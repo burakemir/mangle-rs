@@ -532,6 +532,30 @@ pub trait Host {
     fn match_field(&mut self, _struct: HostVal, _field: HostVal, _value: HostVal) -> i32 {
         unimplemented!("match_field");
     }
+
+    // --- Struct field extraction (Op::MatchField binding mode) ---
+
+    /// Returns 1 iff `struct_val` is a Struct containing `field` (with any
+    /// value). Used by the generated code to decide whether the `:match_field`
+    /// binding op produces a row; the value itself is then read with
+    /// `compound_get`.
+    ///
+    /// A non-struct value returns 0, mirroring the interpreter's silent
+    /// no-rows behavior for `Op::MatchField`.
+    fn field_present(&mut self, _struct_val: HostVal, _field: HostVal) -> i32 {
+        unimplemented!("field_present");
+    }
+
+    // --- List iteration (Op::IterateList) ---
+
+    /// Starts an iterator over the elements of `list`, returning an iter_id
+    /// consumable with the existing `scan_next` / `get_col` protocol
+    /// (column 0 = the element). Returns 0 for a non-List value, which the
+    /// generated code treats as an empty iteration — mirroring the
+    /// interpreter's silent no-rows behavior for `Op::IterateList`.
+    fn list_iter_start(&mut self, _list: HostVal) -> i32 {
+        unimplemented!("list_iter_start");
+    }
 }
 
 // --- Legacy Interfaces ---
