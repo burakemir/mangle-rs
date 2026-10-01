@@ -4,6 +4,56 @@ All notable changes in mangle/rust will be documented in this file.
 
 ## Unreleased
 
+## [0.9.1] - 2026-10-06
+
+### 🚀 Features
+
+- **Negated built-in predicates** (`!:list:member`, `!:match_field`,
+  `!:lt`/`:le`/`:gt`/`:ge` incl. `:time:`/`:duration:` variants,
+  `!:match_prefix`, `!:string:starts_with`/`ends_with`/`contains`):
+  previously these fell through to the generic negation path, which looks
+  the predicate up as a never-populated relation — the negation always
+  succeeded, silently producing wrong results. The planner now emits a
+  `Condition::Not` wrapping the built-in's check mode, requiring all
+  variable arguments to be bound by earlier premises (negation cannot
+  bind). Negation of built-ins without positive-form support (e.g.
+  `!:match_entry`) is a compile error instead of a silent wrong answer.
+- **WASM codegen reaches interpreter parity on the physical plan**: every
+  `Op` and `Condition` variant now has emission.
+  - Plain Datalog negation compiles to a host buffer protocol
+    (`negation_begin` / `negation_push` / `negation_end`), mirroring the
+    HashJoin pattern.
+  - Built-in predicate checks (`:string:*`, `:match_prefix`,
+    `:list:member`, `:match_field`) delegate to new host imports mirroring
+    the interpreter's `eval_builtin_predicate`.
+  - The binding forms of `:match_field` and `:list:member` compile to a
+    `field_present` check + `compound_get` extraction and a
+    `list_iter_start` iteration, reusing the scan protocol.
+  - `Op::GroupBy` writes an aggregate description (key columns + function
+    codes) to linear memory and iterates the host-computed groups via the
+    existing `scan_aggregate_start` import; hosts implement all nine
+    aggregate functions.
+  - New interpreter-vs-WASM parity test suite in `mangle-driver` (24
+    programs) asserting identical results in both execution modes.
+
+### 🐛 Bug Fixes
+
+- WASM codegen: `Op::GroupBy`, `fn:map:keys`/`fn:map:values`/
+  `fn:struct:values`, and unknown functions previously compiled to
+  silently wrong results (empty output, `compound_len`, or null); they now
+  fail loudly at codegen time.
+- `mangle-vm` test hosts: inserts are deduplicated value-based, matching
+  the interpreter's set semantics for relations.
+- `CsvHost::scan_aggregate_start` now fails loudly instead of silently
+  returning no groups.
+
+### 📖 Documentation
+
+- README: new "Parity TODO" section documenting the remaining gaps towards
+  mangle-go (missing `Expr::Call` function families in WASM codegen, the
+  broken positive `:match_entry` form, absent built-in predicates and
+  functions).
+
 ## [0.9.0] - 2026-09-22
 
 ### 🚀 Features
