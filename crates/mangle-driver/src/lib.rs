@@ -373,7 +373,7 @@ enum StratumPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mangle_interpreter::{MemStore, Value};
+    use mangle_interpreter::{CompoundKind, MemStore, Value};
     use mangle_vm::HostVal;
 
     #[test]
@@ -542,6 +542,51 @@ mod tests {
         results.sort();
 
         assert_eq!(results, vec![(1, 2), (2, 1)]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_driver_aggregation_collect_distinct() -> Result<()> {
+        let arena = Arena::new_with_global_interner();
+        // The K=1 group sees V=10 twice (distinct middle columns keep both
+        // p facts), so collect_distinct must drop the duplicate.
+        let source = r#"
+            p(1, "a", 10).
+            p(1, "b", 10).
+            p(1, "c", 20).
+            p(2, "d", 30).
+            q(K, L) :- p(K, _, V) |> do fn:group_by(K); let L = fn:collect_distinct(V).
+        "#;
+
+        let (mut ir, stratified) = compile(source, &arena)?;
+        let store = Box::new(MemStore::new());
+        let interpreter = execute(&mut ir, &stratified, store)?;
+
+        let facts: Vec<_> = interpreter
+            .store()
+            .scan("q")
+            .expect("relation q not found")
+            .collect();
+        let mut results: Vec<(i64, Vec<i64>)> = facts
+            .iter()
+            .map(|t| match (&t[0], &t[1]) {
+                (Value::Number(k), Value::Compound(CompoundKind::List, elems)) => {
+                    let mut vs: Vec<i64> = elems
+                        .iter()
+                        .map(|e| match e {
+                            Value::Number(n) => *n,
+                            other => panic!("expected number, got {other:?}"),
+                        })
+                        .collect();
+                    vs.sort();
+                    (*k, vs)
+                }
+                other => panic!("expected (number, list), got {other:?}"),
+            })
+            .collect();
+        results.sort();
+
+        assert_eq!(results, vec![(1, vec![10, 20]), (2, vec![30])]);
         Ok(())
     }
 

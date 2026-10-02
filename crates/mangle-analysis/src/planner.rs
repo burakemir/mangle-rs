@@ -1149,6 +1149,7 @@ impl<'a> Planner<'a> {
                     | "fn:max"
                     | "fn:min"
                     | "fn:collect"
+                    | "fn:collect_distinct"
                     | "fn:float:sum"
                     | "fn:float:max"
                     | "fn:float:min"
