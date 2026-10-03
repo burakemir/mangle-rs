@@ -1192,24 +1192,74 @@ impl<'a> BoundsChecker<'a> {
                 let var_ranges = state.as_map();
                 let feasible = self.get_or_infer_alternatives(pred, &args, &var_ranges);
 
+                // Regular atom: look up or infer alternatives.
+                // Temporal atoms carry 2 extra trailing time columns —
+                // trim them before matching against declared bounds (same
+                // as the head check in check_rule).
+                let is_temporal = self.ir.temporal_predicates.contains(&pred);
+                let (check_args, time_args): (&[InstId], &[InstId]) =
+                    if is_temporal && args.len() >= 2 {
+                        (&args[..args.len() - 2], &args[args.len() - 2..])
+                    } else {
+                        (&args[..], &[])
+                    };
+                let var_ranges = state.as_map();
+                let feasible = self.get_or_infer_alternatives(pred, check_args, &var_ranges);
+
                 if !feasible.is_empty() {
                     // Use the first feasible alternative to bind variables.
                     let first = &feasible[0].clone();
-                    for (arg, type_id) in args.iter().zip(first.iter()) {
+                    for (arg, type_id) in check_args.iter().zip(first.iter()) {
                         if let Inst::Var(v) = self.ir.get(*arg) {
                             let v = *v;
-                            state.add_or_refine_with_ir(self.ir, v, *type_id);
+                            self.refine_var(
+                                &mut state,
+                                v,
+                                *type_id,
+                                &format!("atom {}", pred_name),
+                            )?;
                         }
                     }
-                } else if let Some(alternatives) = self.rel_type_map.get(&pred).cloned() {
-                    // Fallback: no feasible alternative, use first declared alt.
-                    if let Some(first_alt) = alternatives.first() {
-                        for (arg, type_id) in args.iter().zip(first_alt.iter()) {
-                            if let Inst::Var(v) = self.ir.get(*arg) {
-                                let v = *v;
-                                state.add_or_refine_with_ir(self.ir, v, *type_id);
-                            }
-                        }
+                } else if self.rel_type_map.contains_key(&pred) {
+                    // The predicate has declared alternatives, but none are
+                    // compatible with the argument types inferred so far — the
+                    // atom can never match (mangle-go's feasibleAlternatives
+                    // errors here instead of binding from the first decl).
+                    let pred_types = self.rel_type_map.get(&pred).cloned().unwrap();
+                    let declared = pred_types
+                        .iter()
+                        .map(|alt| {
+                            format!(
+                                "[{}]",
+                                alt.iter()
+                                    .map(|t| self.describe_inst(*t))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" | ");
+                    let arg_types = check_args
+                        .iter()
+                        .map(|a| {
+                            let b = self.bound_of_arg(*a, &var_ranges);
+                            self.describe_inst(b)
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Err(anyhow!(
+                        "atom {} on args [{}] cannot succeed: incompatible with declared bounds {}",
+                        pred_name,
+                        arg_types,
+                        declared
+                    ));
+                }
+                // The synthetic time columns bind their variables to /time.
+                let time_type = type_expr::find_or_create_name(self.ir, "/time");
+                for arg in time_args {
+                    if let Inst::Var(v) = self.ir.get(*arg) {
+                        let v = *v;
+                        state.add_or_refine_with_ir(self.ir, v, time_type);
                     }
                 }
                 Ok(state)
@@ -3697,5 +3747,82 @@ mod tests {
         "#,
         );
         assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Join self-refinement across repeated predicate uses
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn join_self_refinement_incompatible() {
+        // mangle-go TestBoundsAnalyzerNegative: bar is /string x /number;
+        // Z is bound to /number by bar's 2nd column, then reused in bar's
+        // 1st column — the third atom can never match.
+        let result = check(
+            r#"
+            Decl foo(X, Y) bound [/string, /number].
+            Decl bar(A, B) bound [/string, /number].
+            foo(X, Y) :- bar(X, Y), bar(X, Z), bar(Z, Y).
+        "#,
+        );
+        let msg = result.err().unwrap().to_string();
+        assert!(msg.contains("bar"), "{msg}");
+        assert!(msg.contains("cannot succeed"), "{msg}");
+    }
+
+    #[test]
+    fn join_self_refinement_valid_chain() {
+        // Homogeneous columns: chaining is fine.
+        let result = check(
+            r#"
+            Decl foo(X, Y) bound [/string, /string].
+            Decl edge(A, B) bound [/string, /string].
+            edge("a", "b").
+            edge("b", "c").
+            foo(X, Y) :- edge(X, Y), edge(Y, Z), edge(Z, W).
+        "#,
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn join_self_refinement_repeated_independent() {
+        let result = check(
+            r#"
+            Decl foo(X, Y) bound [/string, /number].
+            Decl bar(A, B) bound [/string, /number].
+            bar("a", 1).
+            foo(X, Y) :- bar(X, Y), bar(X, Z).
+        "#,
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn join_self_refinement_multi_alternative() {
+        // With two declared alternatives, the second one keeps the chained
+        // use feasible.
+        let result = check(
+            r#"
+            Decl foo(X, Y) bound [/string, /number].
+            Decl bar(A, B) bound [/string, /number] bound [/number, /string].
+            foo(X, Y) :- bar(X, Y), bar(Y, Z).
+        "#,
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn temporal_atom_with_declared_bounds() {
+        // Regression: temporal atoms carry 2 synthetic time columns that
+        // must be trimmed before matching declared bounds.
+        let result = check(
+            r#"
+            Decl link(A, B) temporal bound [/name, /name].
+            link(/a, /b)@[2024-01-01T00:00:00Z, 2024-01-02T00:00:00Z].
+            reach(A, B) :- link(A, B)@[T1, T2].
+        "#,
+        );
+        assert!(result.is_ok(), "{result:?}");
     }
 }

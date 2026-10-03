@@ -6,6 +6,19 @@ All notable changes in mangle/rust will be documented in this file.
 
 ### 🐛 Bug Fixes
 
+- **Error when an atom cannot match any declared bound alternative**
+  (mangle-go `feasibleAlternatives` parity): when a predicate has
+  declarations but none are compatible with the argument types inferred
+  so far — e.g. a variable bound to /number by one use reused in a /string
+  column of a later self-join — the atom can never match and is now a
+  compile error. Previously the checker silently fell back to binding
+  from the first declared alternative, so `foo(X, Y) :- bar(X, Y),
+  bar(X, Z), bar(Z, Y)` with `bar` declared `/string, /number` passed.
+  Variable bindings from feasible alternatives now also error on
+  provably-disjoint refinements instead of keeping the stale type.
+  Temporal atoms are handled correctly: their 2 synthetic trailing time
+  columns are trimmed before matching declared bounds and bind their
+  variables to /time.
 - **Report empty type meets as errors instead of silently dropping them**
   (mangle-go parity): a variable whose inferred type is provably
   incompatible with a later use — e.g. a /number variable unified with a
