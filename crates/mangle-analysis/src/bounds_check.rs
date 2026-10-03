@@ -65,6 +65,83 @@ const REDUCER_FNS: &[&str] = &[
     "fn:float:min",
 ];
 
+/// Arity requirement of a built-in function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FnArity {
+    /// Exactly N arguments.
+    Fixed(usize),
+    /// Any number of arguments (folds, constructors).
+    VarArgs,
+    /// At least one argument (aggregations).
+    AtLeastOne,
+    /// An even number of arguments (key/value constructors).
+    Even,
+}
+
+/// Arity table for every function the runtime (interpreter / WASM codegen)
+/// implements, mirroring mangle-go's `builtin.Functions`. `None` means the
+/// function does not exist at runtime.
+fn builtin_arity(name: &str) -> Option<FnArity> {
+    use FnArity::*;
+    Some(match name {
+        // Var-arity folds.
+        "fn:plus" | "fn:minus" | "fn:mult" | "fn:div" | "fn:float:plus" | "fn:float:minus"
+        | "fn:float:mult" | "fn:float:div" | "fn:string:concat" | "fn:list" | "fn:group_by" => {
+            VarArgs
+        }
+        // Key/value constructors need an even number of arguments.
+        "fn:map" | "fn:struct" => Even,
+        // Aggregations need at least one argument.
+        "fn:count"
+        | "fn:sum"
+        | "fn:max"
+        | "fn:min"
+        | "fn:collect"
+        | "fn:collect_distinct"
+        | "fn:float:sum"
+        | "fn:float:max"
+        | "fn:float:min" => AtLeastOne,
+        // Fixed arity.
+        "fn:sqrt" => Fixed(1),
+        "fn:string:replace" => Fixed(4),
+        "fn:number:to_string" | "fn:float64:to_string" | "fn:name:to_string" => Fixed(1),
+        "fn:pair" => Fixed(2),
+        "fn:list:get" => Fixed(2),
+        "fn:list:append" => Fixed(2),
+        "fn:len" | "fn:list:len" | "fn:map:len" | "fn:struct:len" => Fixed(1),
+        "fn:pair:first" | "fn:pair:second" => Fixed(1),
+        "fn:map:get" | "fn:struct:get" => Fixed(2),
+        "fn:map:keys" | "fn:map:values" | "fn:struct:values" => Fixed(1),
+        "fn:time:now" => Fixed(0),
+        "fn:time:add"
+        | "fn:time:sub"
+        | "fn:time:trunc"
+        | "fn:time:format"
+        | "fn:time:parse_civil" => Fixed(2),
+        "fn:time:format_civil" => Fixed(3),
+        "fn:time:year"
+        | "fn:time:month"
+        | "fn:time:day"
+        | "fn:time:hour"
+        | "fn:time:minute"
+        | "fn:time:second"
+        | "fn:time:from_unix_nanos"
+        | "fn:time:to_unix_nanos"
+        | "fn:time:parse_rfc3339" => Fixed(1),
+        "fn:duration:add" | "fn:duration:mult" => Fixed(2),
+        "fn:duration:hours"
+        | "fn:duration:minutes"
+        | "fn:duration:seconds"
+        | "fn:duration:nanos"
+        | "fn:duration:from_nanos"
+        | "fn:duration:from_hours"
+        | "fn:duration:from_minutes"
+        | "fn:duration:from_seconds"
+        | "fn:duration:parse" => Fixed(1),
+        _ => return None,
+    })
+}
+
 /// Bounds checker state.
 pub struct BoundsChecker<'a> {
     ir: &'a mut Ir,
@@ -105,6 +182,7 @@ impl<'a> BoundsChecker<'a> {
         self.build_rules_map();
         self.check_arity_consistency()?;
         self.check_bindings()?;
+        self.check_function_arities()?;
         self.check_all_clauses()?;
         if let Some(e) = self.fn_arg_errors.first() {
             return Err(anyhow!("type error: {e}"));
@@ -273,6 +351,117 @@ impl<'a> BoundsChecker<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Pass 3.5: Check that every function application in a rule's premises
+    /// and transforms has a valid arity and refers to a function the runtime
+    /// actually implements (port of mangle-go's `checkFunctions`/
+    /// `checkExprArity`). Facts have no premises or transforms and are
+    /// skipped, matching mangle-go.
+    fn check_function_arities(&self) -> Result<()> {
+        for inst in &self.ir.insts {
+            if let Inst::Rule {
+                premises,
+                transform,
+                ..
+            } = inst
+            {
+                for p in premises {
+                    match self.ir.get(*p) {
+                        Inst::Atom { args, .. } => {
+                            for a in args {
+                                self.check_term_fn_arities(*a)?;
+                            }
+                        }
+                        Inst::NegAtom(inner) => {
+                            if let Inst::Atom { args, .. } = self.ir.get(*inner) {
+                                for a in args {
+                                    self.check_term_fn_arities(*a)?;
+                                }
+                            }
+                        }
+                        Inst::Eq(l, r) | Inst::Ineq(l, r) => {
+                            self.check_term_fn_arities(*l)?;
+                            self.check_term_fn_arities(*r)?;
+                        }
+                        _ => {}
+                    }
+                }
+                for t in transform {
+                    if let Inst::Transform { app, .. } = self.ir.get(*t) {
+                        self.check_term_fn_arities(*app)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Recursively checks function applications inside a term tree.
+    fn check_term_fn_arities(&self, id: InstId) -> Result<()> {
+        match self.ir.get(id) {
+            Inst::ApplyFn { function, args } => {
+                let fname = self.ir.resolve_name(*function);
+                match builtin_arity(fname) {
+                    Some(FnArity::Fixed(n)) if args.len() != n => {
+                        return Err(anyhow!(
+                            "function {} expects {} argument{}, provided {}",
+                            fname,
+                            n,
+                            if n == 1 { "" } else { "s" },
+                            args.len()
+                        ));
+                    }
+                    Some(FnArity::AtLeastOne) if args.is_empty() => {
+                        return Err(anyhow!(
+                            "reducer function {} expects at least one argument",
+                            fname
+                        ));
+                    }
+                    Some(FnArity::Even) if args.len() % 2 != 0 => {
+                        return Err(anyhow!(
+                            "expect even number of arguments for {} - use the literal syntax for {}s",
+                            fname,
+                            if fname == "fn:struct" {
+                                "struct"
+                            } else {
+                                "map"
+                            }
+                        ));
+                    }
+                    Some(_) => {}
+                    None => {
+                        return Err(anyhow!("unknown function {}", fname));
+                    }
+                }
+                for a in args {
+                    self.check_term_fn_arities(*a)?;
+                }
+                Ok(())
+            }
+            Inst::List(elems) => {
+                for e in elems {
+                    self.check_term_fn_arities(*e)?;
+                }
+                Ok(())
+            }
+            Inst::Map { keys, values } => {
+                for k in keys {
+                    self.check_term_fn_arities(*k)?;
+                }
+                for v in values {
+                    self.check_term_fn_arities(*v)?;
+                }
+                Ok(())
+            }
+            Inst::Struct { values, .. } => {
+                for v in values {
+                    self.check_term_fn_arities(*v)?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
     }
 
     /// Pass 3: Binding (safety) analysis for every rule, mirroring mangle-go's
@@ -3081,5 +3270,96 @@ mod tests {
         "#,
         );
         assert!(ok2.is_ok(), "{ok2:?}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Function arity checking (mangle-go checkExprArity parity)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fn_arity_list_get() {
+        // fn:list:get takes exactly 2 arguments.
+        let result = check("p([1]). q(X) :- X = fn:list:get([1]).");
+        let msg = result.err().unwrap().to_string();
+        assert!(msg.contains("fn:list:get"), "{msg}");
+        assert!(msg.contains("expects 2"), "{msg}");
+    }
+
+    #[test]
+    fn fn_arity_list_get_in_transform() {
+        let result = check("p([1]). q(Y) :- p(X) |> let Y = fn:list:get(X).");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn fn_arity_nested() {
+        // Arity errors inside nested applications are caught.
+        let result = check("q(X) :- X = fn:list(fn:list:get(1)).");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn fn_arity_collect_no_args() {
+        let result = check("p(1). q(X) :- p(Y) |> do fn:group_by(); let X = fn:collect().");
+        let msg = result.err().unwrap().to_string();
+        assert!(msg.contains("at least one argument"), "{msg}");
+    }
+
+    #[test]
+    fn fn_arity_collect_distinct_no_args() {
+        let result =
+            check("p(1). q(X) :- p(Y) |> do fn:group_by(); let X = fn:collect_distinct().");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn fn_arity_struct_odd() {
+        let result = check("q(X) :- X = fn:struct(1).");
+        let msg = result.err().unwrap().to_string();
+        assert!(msg.contains("even number of arguments"), "{msg}");
+    }
+
+    #[test]
+    fn fn_arity_map_odd() {
+        let result = check("q(X) :- X = fn:map(1, 2, 3).");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn fn_arity_unknown_function() {
+        // Functions the runtime does not implement are rejected up front
+        // (the interpreter would fail with 'Unknown function' at runtime).
+        let result =
+            check("p(1). q(Y) :- p(X) |> let Y = fn:plus(X, X), let _ = fn:ring_the_alarm().");
+        let msg = result.err().unwrap().to_string();
+        assert!(msg.contains("unknown function"), "{msg}");
+        assert!(msg.contains("fn:ring_the_alarm"), "{msg}");
+    }
+
+    #[test]
+    fn fn_arity_mangle_go_only_functions() {
+        // Present in mangle-go but not implemented by this runtime.
+        let result = check("q(X) :- X = fn:list:cons(fn:list:get([1], 1), []).");
+        assert!(result.is_err());
+        let result = check("q(X) :- X = fn:mod(5, 2).");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn fn_arity_valid_varargs() {
+        // Folds and constructors accept any (even) number of arguments.
+        assert!(check("q(X) :- X = fn:plus(1, 2, 3).").is_ok());
+        assert!(check("q(X) :- X = fn:string:concat(\"a\", \"b\", \"c\").").is_ok());
+        assert!(check("q(X) :- X = fn:struct(/a, 1, /b, 2).").is_ok());
+        assert!(check("q(X) :- X = fn:map(1, \"a\", 2, \"b\").").is_ok());
+        // Wildcards inside valid applications are fine.
+        assert!(check("q(X) :- X = fn:pair(1, fn:string:concat()).").is_ok());
+    }
+
+    #[test]
+    fn fn_arity_time_now() {
+        assert!(check("q(X) :- X = fn:time:now().").is_ok());
+        let result = check("q(X) :- X = fn:time:now(1).");
+        assert!(result.is_err());
     }
 }

@@ -6,6 +6,16 @@ All notable changes in mangle/rust will be documented in this file.
 
 ### 🐛 Bug Fixes
 
+- **Check function arities and reject unknown functions** (port of
+  mangle-go's `checkFunctions`/`checkExprArity`): every function
+  application in rule premises and transforms is checked against an arity
+  table covering all 67 functions the runtime implements — fixed-arity
+  (`fn:list:get` takes 2, `fn:string:replace` takes 4, `fn:time:now` takes
+  0, ...), var-arity folds and constructors, `fn:map`/`fn:struct` need an
+  even number of arguments, reducers need at least one. Functions the
+  runtime does not implement (`fn:ring_the_alarm`, mangle-go-only fns
+  like `fn:mod`/`fn:list:cons`) are compile errors instead of runtime
+  "Unknown function" failures.
 - **Check function argument types** against the interpreter's runtime
   semantics, mirroring mangle-go's `typeOfFn` argument checks: `fn:plus` on
   a /string variable, `fn:sum` over strings in a transform, `fn:mult` on
