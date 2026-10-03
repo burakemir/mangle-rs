@@ -272,24 +272,42 @@ impl<'a> BoundsChecker<'a> {
     fn check_bindings(&mut self) -> Result<()> {
         // Collect rules first: the checks below only read the IR, but keeping
         // them in a separate pass avoids borrow conflicts on self.ir.
-        let rules: Vec<(InstId, Vec<InstId>, Vec<InstId>)> = self
-            .ir
-            .insts
-            .iter()
-            .filter_map(|inst| {
-                if let Inst::Rule {
-                    head,
-                    premises,
-                    transform,
-                } = inst
-                    && (!premises.is_empty() || !transform.is_empty())
-                {
-                    Some((*head, premises.clone(), transform.clone()))
+        let mut rules: Vec<(InstId, Vec<InstId>, Vec<InstId>)> = Vec::new();
+        let mut facts: Vec<InstId> = Vec::new();
+        for inst in self.ir.insts.iter() {
+            if let Inst::Rule {
+                head,
+                premises,
+                transform,
+            } = inst
+            {
+                if !premises.is_empty() || !transform.is_empty() {
+                    rules.push((*head, premises.clone(), transform.clone()));
                 } else {
-                    None
+                    facts.push(*head);
                 }
-            })
-            .collect();
+            }
+        }
+
+        // Facts (unit clauses) cannot bind variables: every variable in a
+        // fact head is an error (matching mangle-go's CheckRule, which
+        // requires head variables to be bound by the — empty — body).
+        for head in facts {
+            let mut vars = FxHashSet::default();
+            for arg in self.atom_args(head) {
+                self.term_vars(arg, &mut vars);
+            }
+            if let Some(v) = vars.iter().next() {
+                let pred_name = self
+                    .atom_predicate(head)
+                    .map(|p| self.ir.resolve_name(p).to_string())
+                    .unwrap_or_else(|| "?".to_string());
+                return Err(anyhow!(
+                    "variable {} in fact {}(...) is not bound: facts must be ground",
+                    self.var_name(*v), pred_name
+                ));
+            }
+        }
 
         for (head, premises, transform) in rules {
             self.check_rule_bindings(head, &premises, &transform)?;
@@ -2521,6 +2539,31 @@ mod tests {
     #[test]
     fn binding_wildcards_exempt() {
         assert!(check("p(1, 2). q(X) :- p(X, _).").is_ok());
+    }
+
+    #[test]
+    fn binding_fact_with_variable() {
+        // Facts are unit clauses: they have no body to bind variables.
+        let result = check("p(1). q(X).");
+        let msg = result.err().unwrap().to_string();
+        assert!(msg.contains("fact"), "{msg}");
+        assert!(msg.contains("X"), "{msg}");
+        assert!(msg.contains("ground"), "{msg}");
+    }
+
+    #[test]
+    fn binding_fact_with_wildcard() {
+        // A wildcard in a fact is an anonymous variable — equally unbound
+        // (mangle-go rejects `foo(_).` too).
+        let result = check("q(_).");
+        assert!(result.is_err(), "expected error, got: {:?}", result);
+    }
+
+    #[test]
+    fn binding_fact_with_nested_variable() {
+        // Variables nested inside compound fact args are also unbound.
+        let result = check("q([1, X]).");
+        assert!(result.is_err(), "expected error, got: {:?}", result);
     }
 
     // -----------------------------------------------------------------------

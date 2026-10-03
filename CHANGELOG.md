@@ -4,6 +4,14 @@ All notable changes in mangle/rust will be documented in this file.
 
 ## Unreleased
 
+### 🐛 Bug Fixes
+
+- **Reject facts containing variables** (`q(X).`, `q(_)`, `q([1, X])`):
+  facts are unit clauses with no body to bind variables; they must be
+  ground. Previously these compiled and then failed at runtime
+  (`Variable not found`) or matched nothing. Matches mangle-go's
+  `CheckRule`, which requires head variables to be bound.
+
 ### 🚀 Features
 
 - **Binding (safety) analysis for rules**, mirroring mangle-go's
