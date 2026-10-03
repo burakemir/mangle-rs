@@ -6,6 +6,17 @@ All notable changes in mangle/rust will be documented in this file.
 
 ### 🐛 Bug Fixes
 
+- **Report empty type meets as errors instead of silently dropping them**
+  (mangle-go parity): a variable whose inferred type is provably
+  incompatible with a later use — e.g. a /number variable unified with a
+  string constant, a `:match_prefix` prefix disjoint from the variable's
+  name type, a `:match_field`/`:match_entry`/`:list:member` argument
+  incompatible with the struct/map/list element type, or a transform `let`
+  refining a variable to a disjoint type — now fails the bounds check.
+  Previously the empty intersection was discarded and the rule passed with
+  its earlier (wrong) type. `:match_prefix` now meets against the raw
+  prefix term (a `/foo` prefix means "names under /foo"), matching
+  mangle-go.
 - **Check function arities and reject unknown functions** (port of
   mangle-go's `checkFunctions`/`checkExprArity`): every function
   application in rule premises and transforms is checked against an arity

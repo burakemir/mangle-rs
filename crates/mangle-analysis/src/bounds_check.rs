@@ -1065,7 +1065,7 @@ impl<'a> BoundsChecker<'a> {
                 let app = *app;
                 if let Some(v) = var {
                     let tpe = self.bound_of_arg(app, &state.as_map());
-                    state.add_or_refine_with_ir(self.ir, v, tpe);
+                    self.refine_var(&mut state, v, tpe, "transform")?;
                 }
             }
         }
@@ -1244,12 +1244,12 @@ impl<'a> BoundsChecker<'a> {
                 if let Inst::Var(lv) = self.ir.get(left) {
                     let lv = *lv;
                     let tpe = self.bound_of_arg(right, &var_ranges);
-                    state.add_or_refine_with_ir(self.ir, lv, tpe);
+                    self.refine_var(&mut state, lv, tpe, "equality")?;
                 }
                 if let Inst::Var(rv) = self.ir.get(right) {
                     let rv = *rv;
                     let tpe = self.bound_of_arg(left, &state.as_map());
-                    state.add_or_refine_with_ir(self.ir, rv, tpe);
+                    self.refine_var(&mut state, rv, tpe, "equality")?;
                 }
                 Ok(state)
             }
@@ -1473,27 +1473,67 @@ impl<'a> BoundsChecker<'a> {
     }
 
     /// Special case inference for `:match_prefix(Name, Prefix)`.
+    /// Refines a variable's inferred type with `tpe`, returning an error when
+    /// the two are provably disjoint (e.g. a /number variable unified with a
+    /// string constant — the rule can never derive anything). Without this,
+    /// empty meets were silently dropped and mismatched rules passed the
+    /// declared-bounds check.
+    fn refine_var(
+        &mut self,
+        state: &mut InferState,
+        var: NameId,
+        tpe: InstId,
+        context: &str,
+    ) -> Result<()> {
+        if let Some(&existing) = state.as_map().get(&var) {
+            let ctx = TypeContext::default();
+            let meet = type_expr::lower_bound(self.ir, &ctx, &[existing, tpe]);
+            if type_expr::is_empty_type(self.ir, meet) {
+                return Err(anyhow!(
+                    "{}: variable {} has type {} but is used as {}",
+                    context,
+                    self.var_name(var),
+                    self.describe_inst(existing),
+                    self.describe_inst(tpe)
+                ));
+            }
+        }
+        state.add_or_refine_with_ir(self.ir, var, tpe);
+        Ok(())
+    }
+
     fn infer_match_prefix(&mut self, args: &[InstId], mut state: InferState) -> Result<InferState> {
         if args.len() != 2 {
             return Ok(state);
         }
         let var_ranges = state.as_map();
         let tpe = self.bound_of_arg(args[0], &var_ranges);
-        let prefix = self.bound_of_arg(args[1], &var_ranges);
+        // The prefix term itself acts as the type (mangle-go meets with the
+        // raw `args[1]`): a name constant /foo means "names under /foo",
+        // which is tighter than running it through the name trie.
+        let prefix = match self.ir.get(args[1]) {
+            Inst::Name(_) => args[1],
+            _ => self.bound_of_arg(args[1], &var_ranges),
+        };
 
         let ctx = TypeContext::default();
         let meet = type_expr::lower_bound(self.ir, &ctx, &[tpe, prefix]);
-        if !type_expr::is_empty_type(self.ir, meet) {
-            if let Inst::Var(v) = self.ir.get(args[0]) {
-                let v = *v;
-                state.add_or_refine_with_ir(self.ir, v, meet);
-            }
-            // Second arg (prefix) is typically a constant.
-            let name_type = type_expr::find_or_create_name(self.ir, "/name");
-            if let Inst::Var(v) = self.ir.get(args[1]) {
-                let v = *v;
-                state.add_or_refine_with_ir(self.ir, v, name_type);
-            }
+        if type_expr::is_empty_type(self.ir, meet) {
+            return Err(anyhow!(
+                ":match_prefix cannot succeed: type {} is incompatible with {}",
+                self.describe_inst(tpe),
+                self.describe_inst(prefix)
+            ));
+        }
+        if let Inst::Var(v) = self.ir.get(args[0]) {
+            let v = *v;
+            state.add_or_refine_with_ir(self.ir, v, meet);
+        }
+        // Second arg (prefix) is typically a constant; a variable is /name.
+        let name_type = type_expr::find_or_create_name(self.ir, "/name");
+        if let Inst::Var(v) = self.ir.get(args[1]) {
+            let v = *v;
+            self.refine_var(&mut state, v, name_type, ":match_prefix")?;
         }
         Ok(state)
     }
@@ -1523,9 +1563,14 @@ impl<'a> BoundsChecker<'a> {
             let ctx = TypeContext::default();
             let value_bound = self.bound_of_arg(args[2], &state.as_map());
             let meet = type_expr::lower_bound(self.ir, &ctx, &[value_bound, field_type]);
-            if !type_expr::is_empty_type(self.ir, meet)
-                && let Inst::Var(v) = self.ir.get(args[2])
-            {
+            if type_expr::is_empty_type(self.ir, meet) {
+                return Err(anyhow!(
+                    ":match_field on args: value type mismatch got {} want {}",
+                    self.describe_inst(value_bound),
+                    self.describe_inst(field_type)
+                ));
+            }
+            if let Inst::Var(v) = self.ir.get(args[2]) {
                 let v = *v;
                 state.add_or_refine_with_ir(self.ir, v, meet);
             }
@@ -1561,9 +1606,14 @@ impl<'a> BoundsChecker<'a> {
             // Bind key.
             let key_bound = self.bound_of_arg(args[1], &state.as_map());
             let key_meet = type_expr::lower_bound(self.ir, &ctx, &[key_bound, key_type]);
-            if !type_expr::is_empty_type(self.ir, key_meet)
-                && let Inst::Var(v) = self.ir.get(args[1])
-            {
+            if type_expr::is_empty_type(self.ir, key_meet) {
+                return Err(anyhow!(
+                    ":match_entry on args: key type mismatch got {} want {}",
+                    self.describe_inst(key_bound),
+                    self.describe_inst(key_type)
+                ));
+            }
+            if let Inst::Var(v) = self.ir.get(args[1]) {
                 let v = *v;
                 state.add_or_refine_with_ir(self.ir, v, key_meet);
             }
@@ -1571,9 +1621,14 @@ impl<'a> BoundsChecker<'a> {
             // Bind value.
             let val_bound = self.bound_of_arg(args[2], &state.as_map());
             let val_meet = type_expr::lower_bound(self.ir, &ctx, &[val_bound, val_type]);
-            if !type_expr::is_empty_type(self.ir, val_meet)
-                && let Inst::Var(v) = self.ir.get(args[2])
-            {
+            if type_expr::is_empty_type(self.ir, val_meet) {
+                return Err(anyhow!(
+                    ":match_entry on args: value type mismatch got {} want {}",
+                    self.describe_inst(val_bound),
+                    self.describe_inst(val_type)
+                ));
+            }
+            if let Inst::Var(v) = self.ir.get(args[2]) {
                 let v = *v;
                 state.add_or_refine_with_ir(self.ir, v, val_meet);
             }
@@ -1595,9 +1650,14 @@ impl<'a> BoundsChecker<'a> {
             let ctx = TypeContext::default();
             let elem_bound = self.bound_of_arg(args[0], &state.as_map());
             let meet = type_expr::lower_bound(self.ir, &ctx, &[elem_bound, elem_type]);
-            if !type_expr::is_empty_type(self.ir, meet)
-                && let Inst::Var(v) = self.ir.get(args[0])
-            {
+            if type_expr::is_empty_type(self.ir, meet) {
+                return Err(anyhow!(
+                    ":list:member on args cannot succeed: element type {} is incompatible with {}",
+                    self.describe_inst(elem_bound),
+                    self.describe_inst(elem_type)
+                ));
+            }
+            if let Inst::Var(v) = self.ir.get(args[0]) {
                 let v = *v;
                 state.add_or_refine_with_ir(self.ir, v, meet);
             }
@@ -3360,6 +3420,101 @@ mod tests {
     fn fn_arity_time_now() {
         assert!(check("q(X) :- X = fn:time:now().").is_ok());
         let result = check("q(X) :- X = fn:time:now(1).");
+        assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Empty-meet refinement errors
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn eq_refines_to_disjoint_type() {
+        // mangle-go TestBoundsAnalyzerNegative: X is /number from bar, then
+        // unified with a string — the rule can never derive anything.
+        let result = check(
+            r#"
+            Decl foo(X) bound [/number].
+            Decl bar(X) bound [/number].
+            foo(X) :- bar(X), X = "hello".
+        "#,
+        );
+        let msg = result.err().unwrap().to_string();
+        assert!(msg.contains("equality"), "{msg}");
+        assert!(msg.contains("X"), "{msg}");
+    }
+
+    #[test]
+    fn eq_with_compatible_type_still_ok() {
+        let result = check(
+            r#"
+            Decl foo(X) bound [/number].
+            Decl bar(X) bound [/number].
+            foo(X) :- bar(X), X = 3.
+        "#,
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn match_prefix_incompatible_prefix() {
+        // mangle-go TestBoundsAnalyzerNegative: X is /bar, prefix /foo.
+        let result = check(
+            r#"
+            Decl foo(X) bound [/bar].
+            Decl bar(X) bound [/bar].
+            foo(X) :- bar(X), :match_prefix(X, /foo).
+        "#,
+        );
+        let msg = result.err().unwrap().to_string();
+        assert!(msg.contains(":match_prefix"), "{msg}");
+        assert!(msg.contains("incompatible"), "{msg}");
+    }
+
+    #[test]
+    fn match_prefix_compatible_prefix() {
+        // mangle-go TestBoundsAnalyzer: X is /foo, prefix /foo.
+        let result = check(
+            r#"
+            Decl foo(X) bound [/name].
+            Decl bar(X) bound [/foo].
+            foo(X) :- bar(X), :match_prefix(X, /foo).
+        "#,
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn transform_let_conflicting_types() {
+        // A transform let refining a variable to a disjoint type is an error.
+        let result = check(
+            r#"
+            Decl src(X) bound [/number].
+            Decl result(X, Y) bound [/number, /string].
+            result(X, Y) :- src(X) |> let Y = fn:plus(X, 1), let Z = fn:string:concat(Y, "!").
+        "#,
+        );
+        assert!(result.is_err());
+        // The compatible form passes.
+        let ok = check(
+            r#"
+            Decl src(X) bound [/number].
+            Decl result(X, Y) bound [/number, /string].
+            result(X, Y) :- src(X) |> let Y = fn:number:to_string(X), let Z = fn:string:concat(Y, "!").
+        "#,
+        );
+        assert!(ok.is_ok(), "{ok:?}");
+    }
+
+    #[test]
+    fn list_member_disjoint_element() {
+        // Element var is /number, list is .List</string>.
+        let result = check(
+            r#"
+            Decl foo(X) bound [/number].
+            Decl bar(X) bound [.List</string>].
+            foo(X) :- bar(X), :list:member(X, X).
+        "#,
+        );
         assert!(result.is_err());
     }
 }
