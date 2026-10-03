@@ -753,8 +753,10 @@ pub fn type_conforms(ir: &Ir, ctx: &TypeContext, left: InstId, right: InstId) ->
     }
 
     // Name hierarchy: /foo/bar conforms to /foo, /name, /any.
+    // Base types (/number, /string, ...) are not names despite starting
+    // with '/', so they must not conform to /name through this rule.
     if let (Some(left_name), Some(right_name)) = (name_str(ir, left), name_str(ir, right)) {
-        if right_name == "/name" && left_name.starts_with('/') {
+        if right_name == "/name" && left_name.starts_with('/') && !is_base_type(ir, left) {
             return true;
         }
         return left_name.starts_with(right_name)

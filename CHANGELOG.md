@@ -6,6 +6,22 @@ All notable changes in mangle/rust will be documented in this file.
 
 ### 🐛 Bug Fixes
 
+- **Check function argument types** against the interpreter's runtime
+  semantics, mirroring mangle-go's `typeOfFn` argument checks: `fn:plus` on
+  a /string variable, `fn:sum` over strings in a transform, `fn:mult` on
+  /name, `fn:sqrt`/float functions on non-numeric values, `fn:time:*`/
+  `fn:duration:*` with wrong argument kinds, `fn:string:replace` argument
+  positions — all now compile errors instead of runtime failures. Float
+  functions accept /number (coerced); only provably-disjoint types are
+  rejected, so unions like `.Union</number, /string>` never false-positive.
+  The check runs for every rule, including rules whose head predicate has
+  no `Decl`.
+- **Fix `/number` etc. conforming to `/name`**: the name-hierarchy shortcut
+  in `type_conforms` accepted any type starting with `/`, so all base types
+  were (wrongly) subtypes of `/name`.
+- **`fn:time:sub` result type** now depends on the second argument:
+  (time, time) infers /duration, (time, duration) infers /time (previously
+  always /duration).
 - **Reject facts containing variables** (`q(X).`, `q(_)`, `q([1, X])`):
   facts are unit clauses with no body to bind variables; they must be
   ground. Previously these compiled and then failed at runtime

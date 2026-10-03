@@ -80,6 +80,9 @@ pub struct BoundsChecker<'a> {
     visiting: FxHashSet<NameId>,
     /// Counter for generating fresh type variable names.
     fresh_var_counter: usize,
+    /// Function argument-type errors (e.g. `fn:plus` applied to /string),
+    /// collected during inference and reported after all clauses are checked.
+    fn_arg_errors: Vec<String>,
 }
 
 impl<'a> BoundsChecker<'a> {
@@ -92,6 +95,7 @@ impl<'a> BoundsChecker<'a> {
             inferred: FxHashMap::default(),
             visiting: FxHashSet::default(),
             fresh_var_counter: 0,
+            fn_arg_errors: Vec::new(),
         }
     }
 
@@ -101,7 +105,11 @@ impl<'a> BoundsChecker<'a> {
         self.build_rules_map();
         self.check_arity_consistency()?;
         self.check_bindings()?;
-        self.check_all_clauses()
+        self.check_all_clauses()?;
+        if let Some(e) = self.fn_arg_errors.first() {
+            return Err(anyhow!("type error: {e}"));
+        }
+        Ok(())
     }
 
     /// Generates a fresh type variable NameId (e.g., `?X0`, `?X1`, ...).
@@ -244,14 +252,23 @@ impl<'a> BoundsChecker<'a> {
                 let head = *head;
                 let premises = premises.clone();
                 let transform = transform.clone();
-                if let Some(pred) = self.atom_predicate(head)
-                    && let Some(alternatives) = self.rel_type_map.get(&pred).cloned()
-                {
-                    if premises.is_empty() && transform.is_empty() {
+                let is_fact = premises.is_empty() && transform.is_empty();
+                let alternatives = self
+                    .atom_predicate(head)
+                    .and_then(|pred| self.rel_type_map.get(&pred).cloned());
+                if is_fact {
+                    if let Some(alternatives) = alternatives {
                         self.check_fact(head, &alternatives)?;
-                    } else {
-                        self.check_rule(head, &premises, &transform, &alternatives)?;
                     }
+                } else if let Some(alternatives) = alternatives {
+                    self.check_rule(head, &premises, &transform, &alternatives)?;
+                } else {
+                    // Undeclared head predicate: no declared bounds to check
+                    // against, but still run the inference pipeline so that
+                    // function argument-type errors (e.g. fn:plus applied to
+                    // a /string) surface for every rule, not just declared
+                    // ones.
+                    let _ = self.infer_rule_types(head, &premises, &transform)?;
                 }
             }
         }
@@ -304,7 +321,8 @@ impl<'a> BoundsChecker<'a> {
                     .unwrap_or_else(|| "?".to_string());
                 return Err(anyhow!(
                     "variable {} in fact {}(...) is not bound: facts must be ground",
-                    self.var_name(*v), pred_name
+                    self.var_name(*v),
+                    pred_name
                 ));
             }
         }
@@ -834,16 +852,16 @@ impl<'a> BoundsChecker<'a> {
     ///
     /// Uses the inference pipeline: for each premise, infer variable types
     /// via feasible alternatives, then check that head args conform.
-    fn check_rule(
+    /// Runs the type-inference pipeline for a rule and returns the inferred
+    /// head argument types. Also (as a side effect) collects function
+    /// argument-type errors via `bound_of_arg`/`bound_of_apply_fn`.
+    fn infer_rule_types(
         &mut self,
         head: InstId,
         premises: &[InstId],
         transforms: &[InstId],
-        alternatives: &[Vec<InstId>],
-    ) -> Result<()> {
+    ) -> Result<Vec<InstId>> {
         let head_args = self.atom_args(head);
-        let pred = self.atom_predicate(head).unwrap();
-        let is_temporal = self.ir.temporal_predicates.contains(&pred);
 
         // Run inference pipeline.
         let mut state = InferState::new();
@@ -865,10 +883,23 @@ impl<'a> BoundsChecker<'a> {
 
         // Compute head tuple types.
         let var_ranges = state.as_map();
-        let inferred: Vec<InstId> = head_args
+        Ok(head_args
             .iter()
             .map(|arg| self.bound_of_arg(*arg, &var_ranges))
-            .collect();
+            .collect())
+    }
+
+    fn check_rule(
+        &mut self,
+        head: InstId,
+        premises: &[InstId],
+        transforms: &[InstId],
+        alternatives: &[Vec<InstId>],
+    ) -> Result<()> {
+        let pred = self.atom_predicate(head).unwrap();
+        let is_temporal = self.ir.temporal_predicates.contains(&pred);
+
+        let inferred = self.infer_rule_types(head, premises, transforms)?;
 
         // For temporal predicates, trim synthetic time columns.
         let check_len = if is_temporal && inferred.len() >= 2 {
@@ -1461,12 +1492,225 @@ impl<'a> BoundsChecker<'a> {
     }
 
     /// Infers a type for a function application expression.
+    /// Checks that one argument's inferred bound is compatible with an
+    /// expected type. Records an error when the two are provably disjoint
+    /// (e.g. `fn:plus` applied to a /string variable); an unbound variable
+    /// (/any) never errors — inference may simply not know better yet.
+    fn expect_arg(
+        &mut self,
+        fname: &str,
+        arg: InstId,
+        var_ranges: &FxHashMap<NameId, InstId>,
+        expected: &str,
+    ) {
+        let bound = self.bound_of_arg(arg, var_ranges);
+        let expected_t = type_expr::find_or_create_name(self.ir, expected);
+        let ctx = TypeContext::default();
+        let meet = type_expr::lower_bound(self.ir, &ctx, &[bound, expected_t]);
+        if type_expr::is_empty_type(self.ir, meet) {
+            let msg = format!(
+                "{}: argument has type {}, expected {}",
+                fname,
+                self.describe_inst(bound),
+                expected
+            );
+            if !self.fn_arg_errors.contains(&msg) {
+                self.fn_arg_errors.push(msg);
+            }
+        }
+    }
+
+    /// Checks that every argument conforms to `expected` (varargs form).
+    fn expect_all_args(
+        &mut self,
+        fname: &str,
+        args: &[InstId],
+        var_ranges: &FxHashMap<NameId, InstId>,
+        expected: &str,
+    ) {
+        for arg in args {
+            self.expect_arg(fname, *arg, var_ranges, expected);
+        }
+    }
+
+    /// Checks arguments positionally against `spec` (fixed-arity form);
+    /// extra arguments beyond the spec are not checked.
+    fn expect_args(
+        &mut self,
+        fname: &str,
+        args: &[InstId],
+        var_ranges: &FxHashMap<NameId, InstId>,
+        spec: &[&str],
+    ) {
+        for (arg, expected) in args.iter().zip(spec.iter()) {
+            self.expect_arg(fname, *arg, var_ranges, expected);
+        }
+    }
+
+    /// Checks that one argument's inferred bound is compatible with a
+    /// pre-built expected type expression (e.g. a union).
+    fn expect_arg_type(
+        &mut self,
+        fname: &str,
+        arg: InstId,
+        var_ranges: &FxHashMap<NameId, InstId>,
+        expected: InstId,
+        expected_desc: &str,
+    ) {
+        let bound = self.bound_of_arg(arg, var_ranges);
+        let ctx = TypeContext::default();
+        let meet = type_expr::lower_bound(self.ir, &ctx, &[bound, expected]);
+        if type_expr::is_empty_type(self.ir, meet) {
+            let msg = format!(
+                "{}: argument has type {}, expected {}",
+                fname,
+                self.describe_inst(bound),
+                expected_desc
+            );
+            if !self.fn_arg_errors.contains(&msg) {
+                self.fn_arg_errors.push(msg);
+            }
+        }
+    }
+
+    /// The union type `/number | /float64` (functions that coerce integers
+    /// to floats).
+    fn num_or_float_type(&mut self) -> InstId {
+        let n = type_expr::find_or_create_name(self.ir, "/number");
+        let f = type_expr::find_or_create_name(self.ir, "/float64");
+        type_expr::new_union_or_single(self.ir, vec![n, f])
+    }
+
+    /// Validates function argument types against the runtime semantics of
+    /// the interpreter (the source of truth for this crate), mirroring
+    /// mangle-go's `typeOfFn` argument checks. Result types are separate
+    /// (see the match below).
+    fn check_fn_arg_types(
+        &mut self,
+        fname: &str,
+        args: &[InstId],
+        var_ranges: &FxHashMap<NameId, InstId>,
+    ) {
+        match fname {
+            // Integer arithmetic: strictly /number.
+            "fn:plus" | "fn:minus" | "fn:mult" | "fn:div" => {
+                self.expect_all_args(fname, args, var_ranges, "/number");
+            }
+            // Float arithmetic and sqrt: coerce /number to f64.
+            "fn:float:plus" | "fn:float:minus" | "fn:float:mult" | "fn:float:div" | "fn:sqrt" => {
+                let expected = self.num_or_float_type();
+                for arg in args {
+                    self.expect_arg_type(fname, *arg, var_ranges, expected, "/number or /float64");
+                }
+            }
+            // Integer reducers: strictly /number.
+            "fn:sum" | "fn:max" | "fn:min" => {
+                self.expect_all_args(fname, args, var_ranges, "/number");
+            }
+            // Float reducers: coerce /number to f64.
+            "fn:float:sum" | "fn:float:max" | "fn:float:min" => {
+                let expected = self.num_or_float_type();
+                for arg in args {
+                    self.expect_arg_type(fname, *arg, var_ranges, expected, "/number or /float64");
+                }
+            }
+            "fn:string:replace" => {
+                self.expect_args(
+                    fname,
+                    args,
+                    var_ranges,
+                    &["/string", "/string", "/string", "/number"],
+                );
+            }
+            // Time functions (strict argument types, matching the interpreter).
+            "fn:time:year"
+            | "fn:time:month"
+            | "fn:time:day"
+            | "fn:time:hour"
+            | "fn:time:minute"
+            | "fn:time:second"
+            | "fn:time:to_unix_nanos"
+            | "fn:time:trunc"
+            | "fn:time:format" => {
+                self.expect_args(fname, args, var_ranges, &["/time"]);
+            }
+            "fn:time:from_unix_nanos" => {
+                self.expect_args(fname, args, var_ranges, &["/number"]);
+            }
+            "fn:time:parse_rfc3339" => {
+                self.expect_args(fname, args, var_ranges, &["/string"]);
+            }
+            "fn:time:parse_civil" => {
+                self.expect_args(fname, args, var_ranges, &["/string", "/string"]);
+            }
+            "fn:time:format_civil" => {
+                self.expect_args(fname, args, var_ranges, &["/time", "/string", "/name"]);
+            }
+            "fn:time:add" => {
+                self.expect_args(fname, args, var_ranges, &["/time", "/duration"]);
+            }
+            "fn:time:sub" => {
+                // (time, time) or (time, duration).
+                self.expect_args(fname, args, var_ranges, &["/time"]);
+                if let Some(arg1) = args.get(1) {
+                    let t = type_expr::find_or_create_name(self.ir, "/time");
+                    let d = type_expr::find_or_create_name(self.ir, "/duration");
+                    let expected = type_expr::new_union_or_single(self.ir, vec![t, d]);
+                    self.expect_arg_type(fname, *arg1, var_ranges, expected, "/time or /duration");
+                }
+            }
+            // Duration functions (strict argument types, matching the interpreter).
+            "fn:duration:add" => {
+                self.expect_args(fname, args, var_ranges, &["/duration", "/duration"]);
+            }
+            "fn:duration:mult" => {
+                // (duration, number) or (number, duration).
+                if let (Some(arg0), Some(arg1)) = (args.first(), args.get(1)) {
+                    let d = type_expr::find_or_create_name(self.ir, "/duration");
+                    let n = type_expr::find_or_create_name(self.ir, "/number");
+                    let expected = type_expr::new_union_or_single(self.ir, vec![d, n]);
+                    self.expect_arg_type(
+                        fname,
+                        *arg0,
+                        var_ranges,
+                        expected,
+                        "/duration or /number",
+                    );
+                    self.expect_arg_type(
+                        fname,
+                        *arg1,
+                        var_ranges,
+                        expected,
+                        "/duration or /number",
+                    );
+                }
+            }
+            "fn:duration:hours"
+            | "fn:duration:minutes"
+            | "fn:duration:seconds"
+            | "fn:duration:nanos" => {
+                self.expect_args(fname, args, var_ranges, &["/duration"]);
+            }
+            "fn:duration:from_nanos"
+            | "fn:duration:from_hours"
+            | "fn:duration:from_minutes"
+            | "fn:duration:from_seconds" => {
+                self.expect_args(fname, args, var_ranges, &["/number"]);
+            }
+            "fn:duration:parse" => {
+                self.expect_args(fname, args, var_ranges, &["/string"]);
+            }
+            _ => {}
+        }
+    }
+
     fn bound_of_apply_fn(
         &mut self,
         fname: &str,
         args: &[InstId],
         var_ranges: &FxHashMap<NameId, InstId>,
     ) -> InstId {
+        self.check_fn_arg_types(fname, args, var_ranges);
         match fname {
             "fn:list" => {
                 if args.is_empty() {
@@ -1653,7 +1897,23 @@ impl<'a> BoundsChecker<'a> {
             | "fn:time:parse_rfc3339"
             | "fn:time:parse_civil"
             | "fn:time:trunc" => type_expr::find_or_create_name(self.ir, "/time"),
-            "fn:time:sub" => type_expr::find_or_create_name(self.ir, "/duration"),
+            "fn:time:sub" => {
+                // (time, time) -> duration; (time, duration) -> time.
+                // When the second argument's type is unknown, fall back to
+                // /any (over-approximation) instead of guessing.
+                if let Some(arg1) = args.get(1) {
+                    let arg1_t = self.bound_of_arg(*arg1, var_ranges);
+                    let duration_t = type_expr::find_or_create_name(self.ir, "/duration");
+                    let ctx = TypeContext::default();
+                    if type_expr::set_conforms(self.ir, &ctx, arg1_t, duration_t) {
+                        return type_expr::find_or_create_name(self.ir, "/time");
+                    }
+                    if !type_expr::is_any(self.ir, arg1_t) {
+                        return type_expr::find_or_create_name(self.ir, "/duration");
+                    }
+                }
+                type_expr::find_or_create_name(self.ir, "/any")
+            }
             "fn:time:year"
             | "fn:time:month"
             | "fn:time:day"
@@ -2615,7 +2875,7 @@ mod tests {
             r#"
             Decl foo(T, D, N, F) bound [/time, /duration, /number, /float64].
             p(1000).
-            foo(T, D, N, F) :- p(X), T = fn:time:from_unix_nanos(X), D = fn:duration:from_seconds(1.0), N = fn:duration:nanos(D), F = fn:duration:seconds(D).
+            foo(T, D, N, F) :- p(X), T = fn:time:from_unix_nanos(X), D = fn:duration:from_seconds(1), N = fn:duration:nanos(D), F = fn:duration:seconds(D).
         "#,
         );
         assert!(result.is_ok(), "{result:?}");
@@ -2632,5 +2892,194 @@ mod tests {
         "#,
         );
         assert!(result.is_ok(), "{result:?}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Function argument-type checking (mangle-go exprtyping_test.go parity)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fn_arg_plus_on_string() {
+        // fn:plus applied to a /string variable.
+        let result = check(
+            r#"
+            Decl src(X) bound [/string].
+            Decl result(Y) bound [/number].
+            result(Y) :- src(X) |> let Y = fn:plus(X, 1).
+        "#,
+        );
+        let msg = result.err().unwrap().to_string();
+        assert!(msg.contains("fn:plus"), "{msg}");
+        assert!(msg.contains("expected /number"), "{msg}");
+    }
+
+    #[test]
+    fn fn_arg_minus_on_string() {
+        let result = check(
+            r#"
+            Decl src(X) bound [/string].
+            Decl result(Y) bound [/number].
+            result(Y) :- src(X) |> let Y = fn:minus(X, 1).
+        "#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn fn_arg_mult_on_name() {
+        let result = check(
+            r#"
+            Decl src(X) bound [/name].
+            Decl result(Y) bound [/number].
+            result(Y) :- src(X) |> let Y = fn:mult(X, 2).
+        "#,
+        );
+        let msg = result.err().unwrap().to_string();
+        assert!(msg.contains("fn:mult"), "{msg}");
+    }
+
+    #[test]
+    fn fn_arg_sum_on_strings() {
+        // fn:sum over /string values in a group_by transform.
+        let result = check(
+            r#"
+            Decl src(X, Z) bound [/string, /string].
+            Decl result(X, Y) bound [/string, /number].
+            result(X, Y) :- src(X, Z) |> do fn:group_by(X); let Y = fn:sum(Z).
+        "#,
+        );
+        let msg = result.err().unwrap().to_string();
+        assert!(msg.contains("fn:sum"), "{msg}");
+    }
+
+    #[test]
+    fn fn_arg_max_on_strings() {
+        let result = check(
+            r#"
+            Decl src(X, Z) bound [/string, /string].
+            Decl result(X, Y) bound [/string, /number].
+            result(X, Y) :- src(X, Z) |> do fn:group_by(X); let Y = fn:max(Z).
+        "#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn fn_arg_plus_on_string_in_body() {
+        // mangle-go's neg_plusarg.mg: no declarations at all — the error
+        // must surface even for undeclared predicates.
+        let result = check("p(X) :- Y = \"A\", X = fn:plus(1, Y).");
+        let msg = result.err().unwrap().to_string();
+        assert!(msg.contains("fn:plus"), "{msg}");
+    }
+
+    #[test]
+    fn fn_arg_float_plus_accepts_number() {
+        // Float functions coerce /number to f64: both forms are valid.
+        let result = check(
+            r#"
+            Decl src(X) bound [/number].
+            Decl result(Y) bound [/float64].
+            result(Y) :- src(X) |> let Y = fn:float:plus(X, 1.5).
+        "#,
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn fn_arg_float_plus_on_string() {
+        let result = check(
+            r#"
+            Decl src(X) bound [/string].
+            Decl result(Y) bound [/float64].
+            result(Y) :- src(X) |> let Y = fn:float:plus(X, 1.5).
+        "#,
+        );
+        let msg = result.err().unwrap().to_string();
+        assert!(msg.contains("fn:float:plus"), "{msg}");
+    }
+
+    #[test]
+    fn fn_arg_sqrt_in_body() {
+        let result = check(
+            r#"
+            Decl src(X) bound [/number].
+            Decl result(Y) bound [/float64].
+            result(Y) :- src(X), Y = fn:sqrt(X).
+        "#,
+        );
+        assert!(result.is_ok(), "{result:?}");
+
+        let result = check(
+            r#"
+            Decl src(X) bound [/name].
+            Decl result(Y) bound [/float64].
+            result(Y) :- src(X), Y = fn:sqrt(X).
+        "#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn fn_arg_union_bound_is_not_an_error() {
+        // A variable that may be /number or /string is fine for fn:plus —
+        // only provably-disjoint types are rejected.
+        let result = check(
+            r#"
+            Decl src(X) bound [.Union</number, /string>].
+            Decl result(Y) bound [/number].
+            result(Y) :- src(X) |> let Y = fn:plus(X, 1).
+        "#,
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn fn_arg_time_functions_strict() {
+        // fn:time:year expects /time, not /number.
+        let result = check(
+            r#"
+            Decl src(X) bound [/number].
+            Decl result(Y) bound [/number].
+            result(Y) :- src(X), Y = fn:time:year(X).
+        "#,
+        );
+        let msg = result.err().unwrap().to_string();
+        assert!(msg.contains("fn:time:year"), "{msg}");
+    }
+
+    #[test]
+    fn fn_arg_duration_from_seconds_strict() {
+        // The interpreter requires a /number here (mangle-go takes float64;
+        // we follow our runtime).
+        let result = check(
+            r#"
+            Decl result(D) bound [/duration].
+            result(D) :- D = fn:duration:from_seconds(1.0).
+        "#,
+        );
+        let msg = result.err().unwrap().to_string();
+        assert!(msg.contains("fn:duration:from_seconds"), "{msg}");
+    }
+
+    #[test]
+    fn fn_arg_time_sub_accepts_both_forms() {
+        // (time, time) and (time, duration) are both valid for fn:time:sub.
+        let ok1 = check(
+            r#"
+            Decl src(T) bound [/time].
+            Decl result(D) bound [/duration].
+            result(D) :- src(T), U = fn:time:from_unix_nanos(0), D = fn:time:sub(T, U).
+        "#,
+        );
+        assert!(ok1.is_ok(), "{ok1:?}");
+        let ok2 = check(
+            r#"
+            Decl src(T) bound [/time].
+            Decl result(T2) bound [/time].
+            result(T2) :- src(T), D = fn:duration:from_seconds(1), T2 = fn:time:sub(T, D).
+        "#,
+        );
+        assert!(ok2.is_ok(), "{ok2:?}");
     }
 }
