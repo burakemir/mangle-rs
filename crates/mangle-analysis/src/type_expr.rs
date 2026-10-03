@@ -1235,12 +1235,49 @@ pub fn has_type(ir: &Ir, type_expr: InstId, value: InstId) -> bool {
             if args.len() != 2 {
                 return false;
             }
+            // Value may be a pair constructor application ... or a
+            // 2-element list (the runtime representation of a pair).
+            if let Inst::ApplyFn {
+                function,
+                args: vargs,
+            } = ir.get(value)
+                && ir.resolve_name(*function) == "fn:pair"
+                && vargs.len() == 2
+            {
+                return has_type(ir, args[0], vargs[0]) && has_type(ir, args[1], vargs[1]);
+            }
             match list_value_elems(ir, value) {
                 Some(elems) if elems.len() == 2 => {
                     has_type(ir, args[0], elems[0]) && has_type(ir, args[1], elems[1])
                 }
                 _ => false,
             }
+        }
+
+        FN_TUPLE => {
+            // Tuple values are constructor applications. fn:tuple acts as
+            // identity (one argument), pair (two) or nested pairs (more);
+            // a 2-tuple also accepts a fn:pair value (mangle-go semantics).
+            if let Inst::ApplyFn {
+                function,
+                args: vargs,
+            } = ir.get(value)
+            {
+                match ir.resolve_name(*function) {
+                    "fn:tuple" => {
+                        return vargs.len() == args.len()
+                            && vargs
+                                .iter()
+                                .zip(args.iter())
+                                .all(|(v, t)| has_type(ir, *t, *v));
+                    }
+                    "fn:pair" if args.len() == 2 && vargs.len() == 2 => {
+                        return has_type(ir, args[0], vargs[0]) && has_type(ir, args[1], vargs[1]);
+                    }
+                    _ => {}
+                }
+            }
+            false
         }
 
         FN_STRUCT => has_type_struct(ir, type_expr, value),

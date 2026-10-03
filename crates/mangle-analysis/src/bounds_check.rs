@@ -1189,10 +1189,6 @@ impl<'a> BoundsChecker<'a> {
                 }
 
                 // Regular atom: look up or infer alternatives.
-                let var_ranges = state.as_map();
-                let feasible = self.get_or_infer_alternatives(pred, &args, &var_ranges);
-
-                // Regular atom: look up or infer alternatives.
                 // Temporal atoms carry 2 extra trailing time columns —
                 // trim them before matching against declared bounds (same
                 // as the head check in check_rule).
@@ -3810,6 +3806,74 @@ mod tests {
         "#,
         );
         assert!(result.is_ok(), "{result:?}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Constructor applications in fact positions
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fact_pair_constructor() {
+        // mangle-go TestBoundsAnalyzer: bar(fn:pair('a', 0)) against
+        // .Pair</string, /number>.
+        let ok = check(
+            r#"
+            Decl bar(T) bound [.Pair</string, /number>].
+            bar(fn:pair("a", 0)).
+        "#,
+        );
+        assert!(ok.is_ok(), "{ok:?}");
+
+        // Swapped argument types must fail.
+        let result = check(
+            r#"
+            Decl bar(T) bound [.Pair</string, /number>].
+            bar(fn:pair(0, "a")).
+        "#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn fact_tuple_constructor() {
+        let ok = check(
+            r#"
+            Decl bar(T) bound [.Tuple</string, /number, /name>].
+            bar(fn:tuple("a", 0, /foo)).
+        "#,
+        );
+        assert!(ok.is_ok(), "{ok:?}");
+
+        // Wrong element type.
+        let result = check(
+            r#"
+            Decl bar(T) bound [.Tuple</string, /number, /name>].
+            bar(fn:tuple("a", 0, "foo")).
+        "#,
+        );
+        assert!(result.is_err());
+
+        // Wrong arity.
+        let result = check(
+            r#"
+            Decl bar(T) bound [.Tuple</string, /number>].
+            bar(fn:tuple("a", 0, /foo)).
+        "#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn fact_pair_value_against_tuple_type() {
+        // A fn:pair value satisfies a 2-element tuple type (mangle-go
+        // semantics: fn:tuple with two arguments is a pair).
+        let ok = check(
+            r#"
+            Decl bar(T) bound [.Tuple</string, /number>].
+            bar(fn:pair("a", 0)).
+        "#,
+        );
+        assert!(ok.is_ok(), "{ok:?}");
     }
 
     #[test]

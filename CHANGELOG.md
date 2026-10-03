@@ -6,6 +6,13 @@ All notable changes in mangle/rust will be documented in this file.
 
 ### 🐛 Bug Fixes
 
+- **Accept `fn:pair`/`fn:tuple` constructor values in fact positions**
+  (mangle-go parity): `bar(fn:pair("a", 0)).` against a `.Pair</string,
+  /number>` declaration (or `fn:tuple` against `.Tuple<...>`) now
+  type-checks element-wise. `has_type` previously only understood list,
+  map and struct constructor applications, so pair/tuple facts always
+  failed their declared bounds. A `fn:pair` value also satisfies a
+  2-element tuple type, matching mangle-go's tuple semantics.
 - **Error when an atom cannot match any declared bound alternative**
   (mangle-go `feasibleAlternatives` parity): when a predicate has
   declarations but none are compatible with the argument types inferred
