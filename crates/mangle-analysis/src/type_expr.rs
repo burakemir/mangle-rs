@@ -1586,6 +1586,24 @@ pub fn new_map_type(ir: &mut Ir, key: InstId, val: InstId) -> InstId {
     })
 }
 
+/// Creates a `fn:Pair(left_type, right_type)` type expression.
+pub fn new_pair_type(ir: &mut Ir, left: InstId, right: InstId) -> InstId {
+    let name = ir.intern_name(FN_PAIR);
+    ir.add_inst(Inst::ApplyFn {
+        function: name,
+        args: vec![left, right],
+    })
+}
+
+/// Returns `(left_type, right_type)` of a `fn:Pair` type expression.
+pub fn pair_type_args(ir: &Ir, id: InstId) -> Option<(InstId, InstId)> {
+    let args = apply_fn_args(ir, id)?;
+    if apply_fn_name(ir, id) != Some(FN_PAIR) || args.len() != 2 {
+        return None;
+    }
+    Some((args[0], args[1]))
+}
+
 /// Creates a `fn:Struct(field1, type1, ...)` type expression.
 pub fn new_struct_type(ir: &mut Ir, args: Vec<InstId>) -> InstId {
     let name = ir.intern_name(FN_STRUCT);

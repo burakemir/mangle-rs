@@ -30,6 +30,41 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::name_trie::NameTrie;
 use crate::type_expr::{self, TypeContext};
 
+/// Built-in predicates all of whose arguments are inputs (evaluated as
+/// filters): every variable must be bound by an earlier premise.
+const FILTER_PREDS: &[&str] = &[
+    ":lt",
+    ":le",
+    ":gt",
+    ":ge",
+    ":time:lt",
+    ":time:le",
+    ":time:gt",
+    ":time:ge",
+    ":duration:lt",
+    ":duration:le",
+    ":duration:gt",
+    ":duration:ge",
+    ":string:starts_with",
+    ":string:ends_with",
+    ":string:contains",
+    ":match_prefix",
+];
+
+/// Reducer (aggregation) functions, matching the planner's
+/// `try_parse_aggregate` whitelist.
+const REDUCER_FNS: &[&str] = &[
+    "fn:sum",
+    "fn:count",
+    "fn:max",
+    "fn:min",
+    "fn:collect",
+    "fn:collect_distinct",
+    "fn:float:sum",
+    "fn:float:max",
+    "fn:float:min",
+];
+
 /// Bounds checker state.
 pub struct BoundsChecker<'a> {
     ir: &'a mut Ir,
@@ -65,6 +100,7 @@ impl<'a> BoundsChecker<'a> {
         self.collect_declarations()?;
         self.build_rules_map();
         self.check_arity_consistency()?;
+        self.check_bindings()?;
         self.check_all_clauses()
     }
 
@@ -220,6 +256,493 @@ impl<'a> BoundsChecker<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Pass 3: Binding (safety) analysis for every rule, mirroring mangle-go's
+    /// `Analyzer.CheckRule`. A variable is bound when:
+    /// - it appears in a positive (non-builtin) atom, or
+    /// - it is unified (via an equality) with a constant or bound variable, or
+    /// - it is an output of a built-in predicate (`:match_field`,
+    ///   `:match_entry`, `:list:member`), or
+    /// - it is defined by a `let` in the rule's transform.
+    ///
+    /// Additionally checks that transforms do not redefine body variables,
+    /// that group_by keys are bound variables, and that head variables are
+    /// either group_by keys or transform definitions.
+    fn check_bindings(&mut self) -> Result<()> {
+        // Collect rules first: the checks below only read the IR, but keeping
+        // them in a separate pass avoids borrow conflicts on self.ir.
+        let rules: Vec<(InstId, Vec<InstId>, Vec<InstId>)> = self
+            .ir
+            .insts
+            .iter()
+            .filter_map(|inst| {
+                if let Inst::Rule {
+                    head,
+                    premises,
+                    transform,
+                } = inst
+                    && (!premises.is_empty() || !transform.is_empty())
+                {
+                    Some((*head, premises.clone(), transform.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for (head, premises, transform) in rules {
+            self.check_rule_bindings(head, &premises, &transform)?;
+        }
+        Ok(())
+    }
+
+    /// Binding analysis for a single rule.
+    fn check_rule_bindings(
+        &self,
+        head: InstId,
+        premises: &[InstId],
+        transform: &[InstId],
+    ) -> Result<()> {
+        let head_args = self.atom_args(head);
+        let pred_name = self
+            .atom_predicate(head)
+            .map(|p| self.ir.resolve_name(p).to_string())
+            .unwrap_or_else(|| "?".to_string());
+
+        let mut head_vars: FxHashSet<NameId> = FxHashSet::default();
+        for arg in head_args {
+            self.term_vars(arg, &mut head_vars);
+        }
+
+        let mut bound: FxHashSet<NameId> = FxHashSet::default();
+        let mut seen: FxHashSet<NameId> = head_vars.clone();
+        // Variable-variable equalities whose binding is still pending.
+        let mut pending_eqs: Vec<(NameId, NameId)> = Vec::new();
+        // Variables used inside apply-expressions of equalities; checked at
+        // the end so forward references via later atoms are still errors.
+        let mut eq_expr_vars: Vec<NameId> = Vec::new();
+
+        // --- Premises: evaluate left-to-right, binding as we go. ---
+        for &p in premises {
+            match self.ir.get(p) {
+                Inst::Atom { predicate, args } => {
+                    let pred = self.ir.resolve_name(*predicate).to_string();
+                    let mut vars = FxHashSet::default();
+                    for a in args {
+                        self.term_vars(*a, &mut vars);
+                    }
+                    seen.extend(vars.iter().copied());
+
+                    match pred.as_str() {
+                        // Filter predicates: every variable must already be
+                        // bound (evaluation is left-to-right).
+                        p if FILTER_PREDS.contains(&p) => {
+                            for v in &vars {
+                                if !bound.contains(v) {
+                                    return Err(anyhow!(
+                                        "variable {} in {}(...) of rule for {} will not have a value yet; move the subgoal to the right",
+                                        self.var_name(*v),
+                                        pred,
+                                        pred_name
+                                    ));
+                                }
+                            }
+                        }
+                        // :match_field(Struct, Field, Value): inputs bound,
+                        // Value is an output.
+                        ":match_field" | ":match_entry" => {
+                            if args.len() == 3 {
+                                let mut inputs = FxHashSet::default();
+                                self.term_vars(args[0], &mut inputs);
+                                self.term_vars(args[1], &mut inputs);
+                                for v in &inputs {
+                                    if !bound.contains(v) {
+                                        return Err(anyhow!(
+                                            "variable {} in {}(...) of rule for {} will not have a value yet; move the subgoal to the right",
+                                            self.var_name(*v),
+                                            pred,
+                                            pred_name
+                                        ));
+                                    }
+                                }
+                                bound.extend(inputs);
+                                if let Inst::Var(v) = self.ir.get(args[2]) {
+                                    bound.insert(*v);
+                                }
+                            }
+                        }
+                        // :list:member(Elem, List): List is an input, Elem an output.
+                        ":list:member" => {
+                            if args.len() == 2 {
+                                let mut inputs = FxHashSet::default();
+                                self.term_vars(args[1], &mut inputs);
+                                for v in &inputs {
+                                    if !bound.contains(v) {
+                                        return Err(anyhow!(
+                                            "variable {} in :list:member(...) of rule for {} will not have a value yet; move the subgoal to the right",
+                                            self.var_name(*v),
+                                            pred_name
+                                        ));
+                                    }
+                                }
+                                bound.extend(inputs);
+                                if let Inst::Var(v) = self.ir.get(args[0]) {
+                                    bound.insert(*v);
+                                }
+                            }
+                        }
+                        // Regular atoms bind all their variables.
+                        _ => {
+                            bound.extend(vars.iter().copied());
+                        }
+                    }
+                }
+                Inst::NegAtom(inner) => {
+                    // Negated atoms consume bindings; they never produce any.
+                    if let Inst::Atom { args, .. } = self.ir.get(*inner) {
+                        for a in args {
+                            self.term_vars(*a, &mut seen);
+                        }
+                    }
+                }
+                Inst::Eq(l, r) => {
+                    let mut lvars = FxHashSet::default();
+                    let mut rvars = FxHashSet::default();
+                    self.term_vars(*l, &mut lvars);
+                    self.term_vars(*r, &mut rvars);
+                    seen.extend(lvars.iter().copied());
+                    seen.extend(rvars.iter().copied());
+
+                    match (self.ir.get(*l), self.ir.get(*r)) {
+                        (Inst::Var(lv), Inst::Var(rv)) => {
+                            if bound.contains(lv) {
+                                bound.insert(*rv);
+                            } else if bound.contains(rv) {
+                                bound.insert(*lv);
+                            } else {
+                                // Neither side bound yet: may be resolved by a
+                                // later premise; re-check after the scan.
+                                pending_eqs.push((*lv, *rv));
+                            }
+                        }
+                        (Inst::Var(lv), _) => {
+                            if rvars.iter().all(|v| bound.contains(v)) {
+                                bound.insert(*lv);
+                            } else {
+                                eq_expr_vars.extend(rvars);
+                            }
+                        }
+                        (_, Inst::Var(rv)) => {
+                            if lvars.iter().all(|v| bound.contains(v)) {
+                                bound.insert(*rv);
+                            } else {
+                                eq_expr_vars.extend(lvars);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Inst::Ineq(l, r) => {
+                    // Inequality is a filter: both sides must be bound here.
+                    let mut vars = FxHashSet::default();
+                    self.term_vars(*l, &mut vars);
+                    self.term_vars(*r, &mut vars);
+                    seen.extend(vars.iter().copied());
+                    for v in &vars {
+                        if !bound.contains(v) {
+                            return Err(anyhow!(
+                                "variable {} in inequality of rule for {} will not have a value yet; move the subgoal to the right",
+                                self.var_name(*v),
+                                pred_name
+                            ));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Resolve pending variable-variable equalities to a fixpoint
+        // (e.g. `X = Y, Y = Z, p(Z)` binds all three).
+        let mut progressed = true;
+        while progressed {
+            progressed = false;
+            for &(l, r) in &pending_eqs {
+                if bound.contains(&l) && !bound.contains(&r) {
+                    bound.insert(r);
+                    progressed = true;
+                } else if bound.contains(&r) && !bound.contains(&l) {
+                    bound.insert(l);
+                    progressed = true;
+                }
+            }
+        }
+
+        // Variables used in apply-expressions of equalities must be bound.
+        for v in &eq_expr_vars {
+            if !bound.contains(v) {
+                return Err(anyhow!(
+                    "variable {} in equality expression of rule for {} is not bound",
+                    self.var_name(*v),
+                    pred_name
+                ));
+            }
+        }
+
+        // --- Transforms. ---
+        // `defs` accumulates all transform definitions (for the final
+        // checks); `available` tracks which variables are in scope for each
+        // block (mirroring the planner's temp-relation capture).
+        let mut defs: FxHashSet<NameId> = FxHashSet::default();
+        let mut uses: FxHashSet<NameId> = FxHashSet::default();
+        let mut available: FxHashSet<NameId> = bound.clone();
+
+        // Split into blocks by 'do' statements (same as the planner).
+        let mut blocks: Vec<Vec<InstId>> = Vec::new();
+        let mut current: Vec<InstId> = Vec::new();
+        for &t in transform {
+            if let Inst::Transform { var: None, .. } = self.ir.get(t) {
+                blocks.push(std::mem::take(&mut current));
+            }
+            current.push(t);
+        }
+        blocks.push(current);
+
+        // Block 0: leading let-statements evaluated per joined row.
+        for &t in &blocks[0] {
+            if let Inst::Transform { var: Some(v), app } = self.ir.get(t) {
+                let (v, app) = (*v, *app);
+                self.term_vars(app, &mut uses);
+                if self.is_wildcard(v) {
+                    continue; // `let _ = ...` is allowed.
+                }
+                if bound.contains(&v) {
+                    return Err(anyhow!(
+                        "the transform of rule for {} redefines variable {} from rule body",
+                        pred_name,
+                        self.var_name(v)
+                    ));
+                }
+                defs.insert(v);
+                available.insert(v);
+            }
+        }
+
+        // Later blocks: each starts with `do fn:group_by(...)`.
+        let mut last_group_keys: Option<FxHashSet<NameId>> = None;
+        let mut last_block_defs: FxHashSet<NameId> = FxHashSet::default();
+        for block in blocks.iter().skip(1) {
+            let Some(&do_stmt) = block.first() else {
+                continue;
+            };
+            let app = match self.ir.get(do_stmt) {
+                Inst::Transform { app, .. } => *app,
+                _ => continue,
+            };
+            let (function, key_args) = match self.ir.get(app) {
+                Inst::ApplyFn { function, args } => (*function, args.clone()),
+                _ => {
+                    return Err(anyhow!(
+                        "do-transform of rule for {} must apply a function",
+                        pred_name
+                    ));
+                }
+            };
+            let fn_name = self.ir.resolve_name(function);
+            if fn_name != "fn:group_by" {
+                return Err(anyhow!(
+                    "unsupported do-transform fn {} in rule for {} (only fn:group_by is supported)",
+                    fn_name,
+                    pred_name
+                ));
+            }
+
+            // Group keys: distinct variables in scope.
+            let mut group_keys: FxHashSet<NameId> = FxHashSet::default();
+            for &k in &key_args {
+                let Inst::Var(v) = self.ir.get(k) else {
+                    return Err(anyhow!(
+                        "each argument of group_by must be a variable in rule for {}",
+                        pred_name
+                    ));
+                };
+                if !group_keys.insert(*v) {
+                    return Err(anyhow!(
+                        "each argument of group_by must be a distinct variable in rule for {}",
+                        pred_name
+                    ));
+                }
+                if !available.contains(v) {
+                    return Err(anyhow!(
+                        "group_by key {} is not bound in rule for {}",
+                        self.var_name(*v),
+                        pred_name
+                    ));
+                }
+            }
+
+            // Statements after group_by must be let-statements.
+            let mut block_defs: FxHashSet<NameId> = FxHashSet::default();
+            for &t in block.iter().skip(1) {
+                let Inst::Transform { var: Some(v), app } = self.ir.get(t) else {
+                    return Err(anyhow!(
+                        "all statements following group_by have to be let-statements in rule for {}",
+                        pred_name
+                    ));
+                };
+                let (v, app) = (*v, *app);
+                if self.is_wildcard(v) {
+                    continue;
+                }
+                if bound.contains(&v) {
+                    return Err(anyhow!(
+                        "the transform of rule for {} redefines variable {} from rule body",
+                        pred_name,
+                        self.var_name(v)
+                    ));
+                }
+
+                let mut fn_vars = FxHashSet::default();
+                self.term_vars(app, &mut fn_vars);
+                let is_reducer = match self.ir.get(app) {
+                    Inst::ApplyFn { function, .. } => {
+                        REDUCER_FNS.contains(&self.ir.resolve_name(*function))
+                    }
+                    _ => false,
+                };
+                if is_reducer {
+                    // Reducers aggregate over the group's rows: their
+                    // variables must be columns of the source relation.
+                    for fv in &fn_vars {
+                        if !available.contains(fv) {
+                            return Err(anyhow!(
+                                "variable {} used in transform of rule for {} is not in scope",
+                                self.var_name(*fv),
+                                pred_name
+                            ));
+                        }
+                    }
+                } else {
+                    // Regular let-expressions see only this block's group
+                    // keys and previously defined transform variables.
+                    for fv in &fn_vars {
+                        if !(group_keys.contains(fv) || block_defs.contains(fv)) {
+                            return Err(anyhow!(
+                                "variable {} in transform of rule for {} must be either part of group_by or defined in the transform",
+                                self.var_name(*fv),
+                                pred_name
+                            ));
+                        }
+                    }
+                }
+                defs.insert(v);
+                block_defs.insert(v);
+            }
+            last_group_keys = Some(group_keys);
+            last_block_defs = block_defs;
+            // After a group_by block, only its keys and definitions survive
+            // as columns of the materialized relation.
+            available = last_group_keys
+                .as_ref()
+                .unwrap()
+                .union(&last_block_defs)
+                .copied()
+                .collect();
+        }
+
+        // --- Head variables. ---
+        // With a group_by transform, head variables must be group keys or
+        // transform definitions of the final block (matching mangle-go);
+        // otherwise they must be bound by the body or a transform let.
+        for v in &head_vars {
+            let ok = match &last_group_keys {
+                Some(keys) => keys.contains(v) || last_block_defs.contains(v),
+                None => bound.contains(v) || defs.contains(v),
+            };
+            if !ok {
+                if last_group_keys.is_some() {
+                    return Err(anyhow!(
+                        "head variable {} of rule for {} is neither part of group_by nor aggregated",
+                        self.var_name(*v),
+                        pred_name
+                    ));
+                }
+                return Err(anyhow!(
+                    "variable {} in head of rule for {} is not bound",
+                    self.var_name(*v),
+                    pred_name
+                ));
+            }
+        }
+
+        // --- Every variable seen anywhere must be bound somewhere. ---
+        for v in &seen {
+            if !(bound.contains(v) || defs.contains(v)) {
+                return Err(anyhow!(
+                    "variable {} in rule for {} is not bound",
+                    self.var_name(*v),
+                    pred_name
+                ));
+            }
+        }
+
+        // --- Transform uses must refer to clause variables. ---
+        for v in &uses {
+            if !(seen.contains(v) || defs.contains(v)) {
+                return Err(anyhow!(
+                    "variable {} used in transform of rule for {} does not appear in clause",
+                    self.var_name(*v),
+                    pred_name
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Whether a variable name denotes the anonymous wildcard `_`.
+    fn is_wildcard(&self, v: NameId) -> bool {
+        self.ir.resolve_name(v) == "_"
+    }
+
+    fn var_name(&self, v: NameId) -> &str {
+        self.ir.resolve_name(v)
+    }
+
+    /// Collects the (non-wildcard) variables of a base-term instruction tree.
+    fn term_vars(&self, id: InstId, out: &mut FxHashSet<NameId>) {
+        match self.ir.get(id) {
+            Inst::Var(v) => {
+                if !self.is_wildcard(*v) {
+                    out.insert(*v);
+                }
+            }
+            Inst::List(elems) => {
+                for e in elems {
+                    self.term_vars(*e, out);
+                }
+            }
+            Inst::Map { keys, values } => {
+                for k in keys {
+                    self.term_vars(*k, out);
+                }
+                for v in values {
+                    self.term_vars(*v, out);
+                }
+            }
+            Inst::Struct { values, .. } => {
+                for v in values {
+                    self.term_vars(*v, out);
+                }
+            }
+            Inst::ApplyFn { args, .. } => {
+                for a in args {
+                    self.term_vars(*a, out);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Check a fact (unit clause head) against declared bound alternatives.
@@ -965,13 +1488,34 @@ impl<'a> BoundsChecker<'a> {
                 type_expr::new_struct_type(self.ir, struct_args)
             }
             "fn:tuple" => {
+                // fn:tuple acts as identity (one argument), a pair (two
+                // arguments) or nested pairs (more); its bound is the tuple
+                // of the argument bounds (matching mangle-go).
                 let arg_types: Vec<InstId> = args
                     .iter()
                     .map(|a| self.bound_of_arg(*a, var_ranges))
                     .collect();
                 type_expr::new_tuple_type(self.ir, arg_types)
             }
-            "fn:struct_get" if args.len() == 2 => {
+            "fn:pair" if args.len() == 2 => {
+                let lt = self.bound_of_arg(args[0], var_ranges);
+                let rt = self.bound_of_arg(args[1], var_ranges);
+                type_expr::new_pair_type(self.ir, lt, rt)
+            }
+            "fn:pair:first" | "fn:pair:second" if args.len() == 1 => {
+                let pair_type = self.bound_of_arg(args[0], var_ranges);
+                match type_expr::pair_type_args(self.ir, pair_type) {
+                    Some((lt, rt)) => {
+                        if fname == "fn:pair:first" {
+                            lt
+                        } else {
+                            rt
+                        }
+                    }
+                    None => type_expr::find_or_create_name(self.ir, "/any"),
+                }
+            }
+            "fn:struct:get" if args.len() == 2 => {
                 let struct_type = self.bound_of_arg(args[0], var_ranges);
                 if let Inst::Name(n) = self.ir.get(args[1]) {
                     let field = *n;
@@ -985,14 +1529,20 @@ impl<'a> BoundsChecker<'a> {
             "fn:plus" | "fn:minus" | "fn:mult" | "fn:div" => {
                 type_expr::find_or_create_name(self.ir, "/number")
             }
-            "fn:float_plus" | "fn:float_mult" | "fn:float_div" => {
+            "fn:float:plus" | "fn:float:minus" | "fn:float:mult" | "fn:float:div" => {
                 type_expr::find_or_create_name(self.ir, "/float64")
             }
             "fn:string:concat" | "fn:string:replace" => {
                 type_expr::find_or_create_name(self.ir, "/string")
             }
+            "fn:number:to_string" | "fn:float64:to_string" | "fn:name:to_string" => {
+                type_expr::find_or_create_name(self.ir, "/string")
+            }
             "fn:count" | "fn:sum" | "fn:max" | "fn:min" => {
                 type_expr::find_or_create_name(self.ir, "/number")
+            }
+            "fn:float:sum" | "fn:float:max" | "fn:float:min" => {
+                type_expr::find_or_create_name(self.ir, "/float64")
             }
             "fn:list:len" | "fn:len" | "fn:map:len" | "fn:struct:len" => {
                 type_expr::find_or_create_name(self.ir, "/number")
@@ -1030,6 +1580,45 @@ impl<'a> BoundsChecker<'a> {
                 let elem = type_expr::upper_bound(self.ir, &ctx, &[old_elem, new_elem]);
                 type_expr::new_list_type(self.ir, elem)
             }
+            "fn:map:get" if args.len() == 2 => {
+                // Value type of the map argument, or /any if not a map.
+                let map_type = self.bound_of_arg(args[0], var_ranges);
+                match type_expr::map_type_args(self.ir, map_type) {
+                    Some((_, vt)) => vt,
+                    None => type_expr::find_or_create_name(self.ir, "/any"),
+                }
+            }
+            "fn:map:keys" if args.len() == 1 => {
+                let map_type = self.bound_of_arg(args[0], var_ranges);
+                let kt = match type_expr::map_type_args(self.ir, map_type) {
+                    Some((kt, _)) => kt,
+                    None => type_expr::find_or_create_name(self.ir, "/any"),
+                };
+                type_expr::new_list_type(self.ir, kt)
+            }
+            "fn:map:values" if args.len() == 1 => {
+                let map_type = self.bound_of_arg(args[0], var_ranges);
+                let vt = match type_expr::map_type_args(self.ir, map_type) {
+                    Some((_, vt)) => vt,
+                    None => type_expr::find_or_create_name(self.ir, "/any"),
+                };
+                type_expr::new_list_type(self.ir, vt)
+            }
+            "fn:struct:values" if args.len() == 1 => {
+                // List of the upper bound of the struct's field types.
+                let struct_type = self.bound_of_arg(args[0], var_ranges);
+                let field_types: Vec<InstId> = type_expr::struct_type_fields(self.ir, struct_type)
+                    .into_iter()
+                    .map(|(_, ft, _)| ft)
+                    .collect();
+                let elem = if field_types.is_empty() {
+                    type_expr::find_or_create_name(self.ir, "/any")
+                } else {
+                    let ctx = TypeContext::default();
+                    type_expr::upper_bound(self.ir, &ctx, &field_types)
+                };
+                type_expr::new_list_type(self.ir, elem)
+            }
             "fn:collect" | "fn:collect_distinct" => {
                 if args.len() == 1 {
                     let elem_type = self.bound_of_arg(args[0], var_ranges);
@@ -1039,6 +1628,36 @@ impl<'a> BoundsChecker<'a> {
                     type_expr::new_list_type(self.ir, any)
                 }
             }
+            // --- Time functions (result types per mangle-go's builtin table) ---
+            "fn:time:now"
+            | "fn:time:add"
+            | "fn:time:from_unix_nanos"
+            | "fn:time:parse_rfc3339"
+            | "fn:time:parse_civil"
+            | "fn:time:trunc" => type_expr::find_or_create_name(self.ir, "/time"),
+            "fn:time:sub" => type_expr::find_or_create_name(self.ir, "/duration"),
+            "fn:time:year"
+            | "fn:time:month"
+            | "fn:time:day"
+            | "fn:time:hour"
+            | "fn:time:minute"
+            | "fn:time:second"
+            | "fn:time:to_unix_nanos" => type_expr::find_or_create_name(self.ir, "/number"),
+            "fn:time:format" | "fn:time:format_civil" => {
+                type_expr::find_or_create_name(self.ir, "/string")
+            }
+            // --- Duration functions ---
+            "fn:duration:add"
+            | "fn:duration:mult"
+            | "fn:duration:from_nanos"
+            | "fn:duration:from_hours"
+            | "fn:duration:from_minutes"
+            | "fn:duration:from_seconds"
+            | "fn:duration:parse" => type_expr::find_or_create_name(self.ir, "/duration"),
+            "fn:duration:hours" | "fn:duration:minutes" | "fn:duration:seconds" => {
+                type_expr::find_or_create_name(self.ir, "/float64")
+            }
+            "fn:duration:nanos" => type_expr::find_or_create_name(self.ir, "/number"),
             _ => type_expr::find_or_create_name(self.ir, "/any"),
         }
     }
@@ -1778,5 +2397,197 @@ mod tests {
             "error should mention 'inconsistent arity': {}",
             msg
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Binding (safety) analysis
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn binding_unbound_head_var() {
+        let result = check("p(1). q(X, Y) :- p(X).");
+        let msg = result.err().unwrap().to_string();
+        assert!(msg.contains("Y"), "{msg}");
+        assert!(msg.contains("not bound"), "{msg}");
+    }
+
+    #[test]
+    fn binding_var_only_in_negation() {
+        // Negation never binds; Y must be bound elsewhere.
+        let result = check("p(1). q(X) :- p(X), !r(Y).");
+        let msg = result.err().unwrap().to_string();
+        assert!(msg.contains("Y"), "{msg}");
+    }
+
+    #[test]
+    fn binding_eq_chain_converges() {
+        // X = Y, Y = Z, Z bound by p: all three are bound.
+        assert!(check("p(1). q(X) :- p(Z), X = Y, Y = Z.").is_ok());
+    }
+
+    #[test]
+    fn binding_eq_expr_with_unbound_var() {
+        let result = check("p(1). q(X) :- X = fn:plus(Y, 1).");
+        let msg = result.err().unwrap().to_string();
+        assert!(msg.contains("Y"), "{msg}");
+    }
+
+    #[test]
+    fn binding_filter_pred_needs_bound_args() {
+        // :lt is a filter: Y must be bound before use (evaluation is
+        // left-to-right).
+        let result = check("p(1). q(X) :- :lt(Y, 5), p(X), X = Y.");
+        let msg = result.err().unwrap().to_string();
+        assert!(msg.contains("move the subgoal to the right"), "{msg}");
+    }
+
+    #[test]
+    fn binding_list_member_output_mode() {
+        // :list:member(E, L) binds E from L.
+        assert!(check("p([1, 2]). q(E) :- p(L), :list:member(E, L).").is_ok());
+    }
+
+    #[test]
+    fn binding_match_field_output_mode() {
+        assert!(check(r#"p({/a: 1}). q(V) :- p(S), :match_field(S, /a, V)."#).is_ok());
+    }
+
+    #[test]
+    fn binding_group_by_key_must_be_bound() {
+        let result = check("p(1). q(X, L) :- p(X) |> do fn:group_by(K); let L = fn:collect(X).");
+        let msg = result.err().unwrap().to_string();
+        assert!(msg.contains("group_by key K"), "{msg}");
+    }
+
+    #[test]
+    fn binding_head_var_neither_grouped_nor_aggregated() {
+        let result =
+            check("p(1, 2). q(K, V) :- p(K, V) |> do fn:group_by(K); let C = fn:count(V).");
+        let msg = result.err().unwrap().to_string();
+        assert!(
+            msg.contains("neither part of group_by nor aggregated"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn binding_group_by_ok() {
+        assert!(
+            check("p(1, 2). q(K, S) :- p(K, V) |> do fn:group_by(K); let S = fn:sum(V).").is_ok()
+        );
+        // Multiple keys and multiple aggregations.
+        assert!(check(
+            "p(1, 2, 3). q(K, T, M, N) :- p(K, T, V) |> do fn:group_by(K, T); let M = fn:max(V); let N = fn:min(V)."
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn binding_transform_redefines_body_var() {
+        let result = check("p(1, 2). q(Y) :- p(X, Y) |> let Y = fn:plus(X, 1).");
+        let msg = result.err().unwrap().to_string();
+        assert!(msg.contains("redefines variable Y"), "{msg}");
+    }
+
+    #[test]
+    fn binding_non_reducer_let_must_use_group_keys() {
+        // fn:plus is not a reducer: V is not a group key.
+        let result =
+            check("p(1, 2). q(K, Z) :- p(K, V) |> do fn:group_by(K); let Z = fn:plus(V, 1).");
+        let msg = result.err().unwrap().to_string();
+        assert!(
+            msg.contains("either part of group_by or defined in the transform"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn binding_let_after_group_by_can_chain() {
+        // Non-reducer lets may use group keys and earlier transform defs.
+        assert!(check(
+            "p(1, 2). q(K, Z) :- p(K, V) |> do fn:group_by(K); let S = fn:sum(V); let Z = fn:plus(S, 1)."
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn binding_only_group_by_supported_in_do() {
+        let result =
+            check("p(1, 2). q(K, L) :- p(K, V) |> do fn:sort_by(K); let L = fn:collect(V).");
+        let msg = result.err().unwrap().to_string();
+        assert!(msg.contains("only fn:group_by is supported"), "{msg}");
+    }
+
+    #[test]
+    fn binding_wildcards_exempt() {
+        assert!(check("p(1, 2). q(X) :- p(X, _).").is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // Function bound inference (bound_of_apply_fn)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn bound_of_float_uses_colon_names() {
+        // fn:float:plus must infer /float64 (the old list used
+        // underscore names that never matched).
+        let result = check(
+            r#"
+            Decl foo(X, Y) bound [/float64, /float64].
+            p(1.5).
+            foo(A, B) :- p(X), A = fn:float:plus(X, 1.0), B = fn:float:minus(X, 0.5).
+        "#,
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn bound_of_float_aggregates() {
+        let result = check(
+            r#"
+            Decl p(K, V) bound [/number, /float64].
+            Decl foo(K, S) bound [/number, /float64].
+            p(1, 2.5).
+            foo(K, S) :- p(K, V) |> do fn:group_by(K); let S = fn:float:sum(V).
+        "#,
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn bound_of_to_string_functions() {
+        let result = check(
+            r#"
+            Decl foo(S) bound [/string].
+            p(1).
+            foo(S) :- p(X), S = fn:number:to_string(X).
+        "#,
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn bound_of_time_and_duration_functions() {
+        let result = check(
+            r#"
+            Decl foo(T, D, N, F) bound [/time, /duration, /number, /float64].
+            p(1000).
+            foo(T, D, N, F) :- p(X), T = fn:time:from_unix_nanos(X), D = fn:duration:from_seconds(1.0), N = fn:duration:nanos(D), F = fn:duration:seconds(D).
+        "#,
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn bound_of_pair_functions() {
+        let result = check(
+            r#"
+            Decl p(X) bound [/number].
+            Decl foo(A, B) bound [/number, /string].
+            p(1).
+            foo(A, B) :- p(X), P = fn:pair(X, "x"), A = fn:pair:first(P), B = fn:name:to_string(/q).
+        "#,
+        );
+        assert!(result.is_ok(), "{result:?}");
     }
 }

@@ -4,6 +4,35 @@ All notable changes in mangle/rust will be documented in this file.
 
 ## Unreleased
 
+### 🚀 Features
+
+- **Binding (safety) analysis for rules**, mirroring mangle-go's
+  `Analyzer.CheckRule`. The bounds checker now rejects, at compile time,
+  rules that previously failed at runtime (`Variable not found`) or —
+  worse — silently produced wrong results:
+  - variables in the head (or used anywhere) that are never bound by a
+    positive atom, an equality, or a transform `let`;
+  - filter built-ins (`:lt`, `:match_prefix`, string predicates, …)
+    applied to variables not yet bound ("move the subgoal to the right");
+  - `group_by` keys that are not bound variables, or not distinct;
+  - head variables that are neither `group_by` keys nor aggregated when
+    the rule has a `do fn:group_by` transform;
+  - transforms that redefine body variables, or use variables that are
+    not in scope (non-reducer `let`s see only group keys and earlier
+    transform definitions);
+  - `do`-transforms applying anything other than `fn:group_by` (the
+    planner silently mis-planned these as group-bys).
+- **Bounds inference for built-in functions** (`bound_of_apply_fn`):
+  fixed misnamed function arms that never matched (`fn:float_plus` →
+  `fn:float:plus` etc., `fn:struct_get` → `fn:struct:get`) and added the
+  missing ones: `fn:pair`/`fn:pair:first`/`fn:pair:second`, `fn:map:get`,
+  `fn:map:keys`/`fn:map:values`/`fn:struct:values`, `fn:float:minus`,
+  the float aggregates (`fn:float:sum`/`max`/`min`), the `*:to_string`
+  conversions, and all `fn:time:*`/`fn:duration:*` functions, following
+  mangle-go's builtin function-type table. `fn:tuple` is documented as
+  acting like identity (one argument), a pair (two) or nested pairs
+  (more), matching mangle-go.
+
 ## [0.9.2] - 2026-10-03
 
 ### 🐛 Bug Fixes
