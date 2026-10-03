@@ -1181,6 +1181,13 @@ impl<'a> BoundsChecker<'a> {
                     return self.infer_list_member(&args, state);
                 }
 
+                // Filter built-ins: every argument must have the predicate's
+                // argument type (mangle-go's BuiltinRelations), and variables
+                // are refined to it (e.g. `:lt(X, 10)` forces X to /number).
+                if FILTER_PREDS.contains(&pred_name.as_str()) {
+                    return self.infer_filter_pred(&pred_name, &args, state);
+                }
+
                 // Regular atom: look up or infer alternatives.
                 let var_ranges = state.as_map();
                 let feasible = self.get_or_infer_alternatives(pred, &args, &var_ranges);
@@ -1473,6 +1480,77 @@ impl<'a> BoundsChecker<'a> {
     }
 
     /// Special case inference for `:match_prefix(Name, Prefix)`.
+    /// Infers types for a filter built-in predicate (`:lt`, `:string:contains`,
+    /// `:time:lt`, ...). Arguments are checked against the predicate's
+    /// argument type, following mangle-go's `BuiltinRelations` but widened
+    /// where our runtime deliberately accepts more: `:lt`/`:le`/`:gt`/`:ge`
+    /// also compare floats (there is no separate `:float:lt`), and
+    /// `:time:*`/`:duration:*` also accept plain numbers (compared as
+    /// nanoseconds). Unbound variables are refined to the predicate's primary
+    /// argument type (`:lt` -> /number, `:time:lt` -> /time, ...); already-
+    /// bound variables keep their (possibly more precise) type. A provably-
+    /// disjoint argument (e.g. `:lt` on a /string) is a type error, since the
+    /// filter could never succeed.
+    fn infer_filter_pred(
+        &mut self,
+        pred_name: &str,
+        args: &[InstId],
+        mut state: InferState,
+    ) -> Result<InferState> {
+        let (primary, accepted, accepted_desc): (&str, InstId, &str) = match pred_name {
+            ":lt" | ":le" | ":gt" | ":ge" => {
+                ("/number", self.num_or_float_type(), "/number or /float64")
+            }
+            ":time:lt" | ":time:le" | ":time:gt" | ":time:ge" => {
+                let t = type_expr::find_or_create_name(self.ir, "/time");
+                let n = type_expr::find_or_create_name(self.ir, "/number");
+                (
+                    "/time",
+                    type_expr::new_union_or_single(self.ir, vec![t, n]),
+                    "/time or /number",
+                )
+            }
+            ":duration:lt" | ":duration:le" | ":duration:gt" | ":duration:ge" => {
+                let d = type_expr::find_or_create_name(self.ir, "/duration");
+                let n = type_expr::find_or_create_name(self.ir, "/number");
+                (
+                    "/duration",
+                    type_expr::new_union_or_single(self.ir, vec![d, n]),
+                    "/duration or /number",
+                )
+            }
+            // :string:starts_with, :string:ends_with, :string:contains
+            _ => {
+                let s = type_expr::find_or_create_name(self.ir, "/string");
+                ("/string", s, "/string")
+            }
+        };
+        let primary_t = type_expr::find_or_create_name(self.ir, primary);
+        for arg in args {
+            let ranges = state.as_map();
+            let bound = self.bound_of_arg(*arg, &ranges);
+            let ctx = TypeContext::default();
+            let meet = type_expr::lower_bound(self.ir, &ctx, &[bound, accepted]);
+            if type_expr::is_empty_type(self.ir, meet) {
+                return Err(anyhow!(
+                    "{}: argument has type {}, expected {}",
+                    pred_name,
+                    self.describe_inst(bound),
+                    accepted_desc
+                ));
+            }
+            if let Inst::Var(v) = self.ir.get(*arg) {
+                let v = *v;
+                // Only refine unbound variables; a bound variable keeps its
+                // (possibly more precise, e.g. /float64) existing type.
+                if !state.as_map().contains_key(&v) {
+                    state.add_or_refine_with_ir(self.ir, v, primary_t);
+                }
+            }
+        }
+        Ok(state)
+    }
+
     /// Refines a variable's inferred type with `tpe`, returning an error when
     /// the two are provably disjoint (e.g. a /number variable unified with a
     /// string constant — the rule can never derive anything). Without this,
@@ -3421,6 +3499,109 @@ mod tests {
         assert!(check("q(X) :- X = fn:time:now().").is_ok());
         let result = check("q(X) :- X = fn:time:now(1).");
         assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Filter predicate type refinement (mangle-go BuiltinRelations parity)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn filter_lt_on_string_var() {
+        // mangle-go TestBoundsAnalyzerNegative: :lt forces /number; a /string
+        // variable can never satisfy it.
+        let result = check(
+            r#"
+            Decl foo(X) bound [/string].
+            Decl bar(X) bound [/string].
+            foo(X) :- bar(X), :lt(X, 10).
+        "#,
+        );
+        let msg = result.err().unwrap().to_string();
+        assert!(msg.contains(":lt"), "{msg}");
+        assert!(msg.contains("expected"), "{msg}");
+    }
+
+    #[test]
+    fn filter_lt_refines_to_number() {
+        // With an undeclared body predicate, :lt refines X to numeric so the
+        // /number head check passes.
+        let result = check(
+            r#"
+            Decl foo(X) bound [/number].
+            bar(1).
+            foo(X) :- bar(X), :lt(X, 10).
+        "#,
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn filter_lt_accepts_float() {
+        // Our runtime has no separate :float:lt: :lt compares floats too.
+        let result = check(
+            r#"
+            Decl foo(X) bound [/float64].
+            Decl bar(X) bound [/float64].
+            bar(1.5).
+            foo(X) :- bar(X), :lt(X, 2.5).
+        "#,
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn filter_string_predicates() {
+        // :string:starts_with forces /string.
+        let ok = check(
+            r#"
+            Decl foo(X) bound [/string].
+            bar("baz").
+            foo(X) :- bar(X), :string:starts_with(X, "b").
+        "#,
+        );
+        assert!(ok.is_ok(), "{ok:?}");
+
+        let result = check(
+            r#"
+            Decl foo(X) bound [/number].
+            Decl bar(X) bound [/number].
+            foo(X) :- bar(X), :string:contains(X, "b").
+        "#,
+        );
+        let msg = result.err().unwrap().to_string();
+        assert!(msg.contains(":string:contains"), "{msg}");
+    }
+
+    #[test]
+    fn filter_time_and_duration_preds() {
+        // :time:lt on /time args passes; on /string it fails.
+        let ok = check(
+            r#"
+            Decl foo(T) bound [/time].
+            Decl bar(T) bound [/time].
+            foo(T) :- bar(T), :time:lt(T, T).
+        "#,
+        );
+        assert!(ok.is_ok(), "{ok:?}");
+
+        let result = check(
+            r#"
+            Decl foo(T) bound [/string].
+            Decl bar(T) bound [/string].
+            foo(T) :- bar(T), :time:lt(T, T).
+        "#,
+        );
+        assert!(result.is_err());
+
+        // Durations compare against plain numbers (nanos) at runtime.
+        let ok = check(
+            r#"
+            Decl foo(D) bound [/duration].
+            Decl bar(D) bound [/duration].
+            foo(D) :- bar(D), :duration:le(D, 600000000000).
+        "#,
+        );
+        assert!(ok.is_ok(), "{ok:?}");
     }
 
     // -----------------------------------------------------------------------

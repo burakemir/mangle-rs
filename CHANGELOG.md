@@ -17,6 +17,14 @@ All notable changes in mangle/rust will be documented in this file.
   its earlier (wrong) type. `:match_prefix` now meets against the raw
   prefix term (a `/foo` prefix means "names under /foo"), matching
   mangle-go.
+- **Check filter predicate argument types and refine variables** (port of
+  mangle-go's `BuiltinRelations`): `:lt`/`:le`/`:gt`/`:ge` require numeric
+  arguments, `:time:*` /time, `:duration:*` /duration, and the
+  `:string:*` predicates /string; unbound variables are refined to the
+  predicate's argument type (so `foo(X) :- bar(X), :lt(X, 10)` infers
+  X as /number). Widened where our runtime is deliberately more lenient
+  than mangle-go: `:lt` also compares floats, and `:time:*`/`:duration:*`
+  also accept plain numbers (compared as nanoseconds).
 - **Check function arities and reject unknown functions** (port of
   mangle-go's `checkFunctions`/`checkExprArity`): every function
   application in rule premises and transforms is checked against an arity
