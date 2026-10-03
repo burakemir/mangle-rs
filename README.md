@@ -39,8 +39,10 @@ Source ──> Parser ──> AST ──> Analysis ──> IR ──> Planner �
     Arena-allocated AST with interned identifiers.
 
 2.  **Analysis & Lowering** (`mangle-analysis`):
-    Stratification, type checking, AST-to-IR lowering, and query planning
-    (nested-loop joins, index lookups, semi-naive delta iteration).
+    Stratification, binding (safety) analysis, bounds checking (type
+    inference with declared bounds, function arity and argument-type
+    checking), AST-to-IR lowering, and query planning (nested-loop joins,
+    index lookups, semi-naive delta iteration).
 
 3.  **Intermediate Representation** (`mangle-ir`):
     Flat, indexed representation (logical `Inst` + physical `Op`).
@@ -79,7 +81,11 @@ Source ──> Parser ──> AST ──> Analysis ──> IR ──> Planner �
 | `mangle-wasm` | Browser WASM target (interpreter compiled to `wasm32-unknown-unknown`) |
 | `mangle-simplecolumn` | SimpleColumn file format reader + `Host`/`Store` adapters |
 | `mangle-db` | Persistent storage layer |
+| `mangle-delta` | Delta Lake EDB source (`EdbSource` impl with predicate pushdown) |
+| `mangle-parquet` | Plain Parquet EDB source (row-group pruning) |
 | `mangle-server` | HTTP server for Mangle queries |
+| `mangle-proto` | Protobuf / Connect RPC interface (`MangleService`) |
+| `mangle-ffi` | Stable C ABI over the engine (see `include/mangle.h`) |
 | `mangle-engine` | (Legacy) AST-level interpreter |
 
 ## Type Support
@@ -90,6 +96,7 @@ Both execution modes support:
 *   **Compounds**: lists, pairs, maps, structs (constructed via `fn:list`, `fn:pair`, `fn:map`, `fn:struct`)
 *   **String operations**: `fn:string:concat`, `fn:string:replace`, `fn:number:to_string`, etc.
 *   **Arithmetic**: `fn:plus`, `fn:minus`, `fn:mult`, `fn:div`, `fn:sqrt`
+*   **Time & durations**: `fn:time:*` (`year`, `month`, `format`, `parse_rfc3339`, `trunc`, `add`, `sub`, ...) and `fn:duration:*` (`from_hours`, `from_seconds`, `hours`, `nanos`, ...) — interpreter only, see Parity TODO
 *   **Comparisons**: `=`, `!=`, `<`, `<=`, `>`, `>=` (including cross-type numeric ordering)
 
 ## Parity TODO
@@ -125,6 +132,25 @@ evaluates but WASM codegen rejects with a panic:
     (`:interval:before`, `:interval:after`, ...).
 *   Missing functions: `fn:mod` and several others present in mangle-go's
     `builtin` package.
+
+### Static analysis vs. mangle-go
+
+The bounds checker (`mangle-analysis`) now covers the core of mangle-go's
+`analysis` package: binding (safety) analysis, function arity and
+argument-type checking, declared-bounds checking with feasible-alternatives
+inference, filter-predicate typing, and empty-meet detection. Remaining
+known gaps:
+
+*   **Duplicate declarations** are not rejected (the last `Decl` wins);
+    mangle-go errors (its issue #25).
+*   **Undefined predicates** in rule bodies are not rejected — deliberate,
+    since this implementation supports loading EDB facts at runtime
+    without a declaration.
+*   **Mode declarations** (`descr [ mode('+', '-') ]`) are not implemented:
+    all non-builtin atom positions bind.
+*   **Option types**: mangle-go types `fn:list:get` as `.Option<T>`;
+    this implementation infers the bare element type `T` — a deliberate
+    divergence until option types exist here.
 
 ## Try it in a browser
 
