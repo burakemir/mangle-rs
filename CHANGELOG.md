@@ -4,7 +4,13 @@ All notable changes in mangle/rust will be documented in this file.
 
 ## Unreleased
 
-## [0.9.1] - 2026-10-06
+## [0.9.2] - 2026-10-03
+
+### 🐛 Bug Fixes
+
+- Add missing `fn:collect_distinct` to planner.
+
+## [0.9.1] - 2026-10-01
 
 ### 🚀 Features
 
