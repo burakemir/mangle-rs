@@ -544,9 +544,17 @@ impl<'a> BoundsChecker<'a> {
         let mut seen: FxHashSet<NameId> = head_vars.clone();
         // Variable-variable equalities whose binding is still pending.
         let mut pending_eqs: Vec<(NameId, NameId)> = Vec::new();
-        // Variables used inside apply-expressions of equalities; checked at
-        // the end so forward references via later atoms are still errors.
-        let mut eq_expr_vars: Vec<NameId> = Vec::new();
+        // `var = expr` bindings whose expression variables are not yet bound;
+        // the variable becomes bound once they are (resolved to a fixpoint
+        // after the scan, so forward references like `X = fn:plus(Y, 1),
+        // e(Y)` are accepted — the planner delays the equality until `Y` is
+        // bound).
+        let mut pending_binds: Vec<(NameId, FxHashSet<NameId>)> = Vec::new();
+        // Variables of negations and inequalities. These premises are
+        // filters that cannot bind, but (mirroring mangle-go) the planner
+        // delays them until their variables are bound, so they only need to
+        // be bound somewhere in the body — checked after the scan below.
+        let mut filter_vars: Vec<NameId> = Vec::new();
 
         // --- Premises: evaluate left-to-right, binding as we go. ---
         for &p in premises {
@@ -625,9 +633,17 @@ impl<'a> BoundsChecker<'a> {
                 }
                 Inst::NegAtom(inner) => {
                     // Negated atoms consume bindings; they never produce any.
+                    // The planner delays them until their variables are bound,
+                    // so the variables only need to be bound somewhere in the
+                    // body (checked after the scan below).
                     if let Inst::Atom { args, .. } = self.ir.get(*inner) {
                         for a in args {
                             self.term_vars(*a, &mut seen);
+                            if let Inst::Var(v) = self.ir.get(*a)
+                                && !self.is_wildcard(*v)
+                            {
+                                filter_vars.push(*v);
+                            }
                         }
                     }
                 }
@@ -655,41 +671,41 @@ impl<'a> BoundsChecker<'a> {
                             if rvars.iter().all(|v| bound.contains(v)) {
                                 bound.insert(*lv);
                             } else {
-                                eq_expr_vars.extend(rvars);
+                                pending_binds.push((*lv, rvars.clone()));
                             }
                         }
                         (_, Inst::Var(rv)) => {
                             if lvars.iter().all(|v| bound.contains(v)) {
                                 bound.insert(*rv);
                             } else {
-                                eq_expr_vars.extend(lvars);
+                                pending_binds.push((*rv, lvars.clone()));
                             }
                         }
                         _ => {}
                     }
                 }
                 Inst::Ineq(l, r) => {
-                    // Inequality is a filter: both sides must be bound here.
+                    // An inequality is a filter that cannot bind variables,
+                    // but the planner delays it until its variables are bound
+                    // (like negated premises), so premise order does not
+                    // matter. Variables that no premise binds are reported
+                    // after the scan below.
                     let mut vars = FxHashSet::default();
                     self.term_vars(*l, &mut vars);
                     self.term_vars(*r, &mut vars);
                     seen.extend(vars.iter().copied());
-                    for v in &vars {
-                        if !bound.contains(v) {
-                            return Err(anyhow!(
-                                "variable {} in inequality of rule for {} will not have a value yet; move the subgoal to the right",
-                                self.var_name(*v),
-                                pred_name
-                            ));
-                        }
-                    }
+                    filter_vars.extend(vars.iter().copied());
                 }
                 _ => {}
             }
         }
 
-        // Resolve pending variable-variable equalities to a fixpoint
-        // (e.g. `X = Y, Y = Z, p(Z)` binds all three).
+        // Resolve pending equalities to a fixpoint: variable-variable
+        // equalities bind whichever side becomes bound (e.g. `X = Y, Y = Z,
+        // p(Z)` binds all three), and `var = expr` binds `var` once the
+        // expression's variables are bound (mirroring the planner's premise
+        // delay). Variables that never become bound are reported by the
+        // seen/head checks below.
         let mut progressed = true;
         while progressed {
             progressed = false;
@@ -702,13 +718,36 @@ impl<'a> BoundsChecker<'a> {
                     progressed = true;
                 }
             }
+            for &(target, ref deps) in &pending_binds {
+                if !bound.contains(&target) && deps.iter().all(|v| bound.contains(v)) {
+                    bound.insert(target);
+                    progressed = true;
+                }
+            }
         }
 
-        // Variables used in apply-expressions of equalities must be bound.
-        for v in &eq_expr_vars {
-            if !bound.contains(v) {
+        // A `var = expr` equality that never resolved has an unbound
+        // variable on its expression side; report it directly (a clearer
+        // message than the generic head/seen checks below would give).
+        for &(target, ref deps) in &pending_binds {
+            if !bound.contains(&target)
+                && let Some(v) = deps.iter().find(|v| !bound.contains(v))
+            {
                 return Err(anyhow!(
                     "variable {} in equality expression of rule for {} is not bound",
+                    self.var_name(*v),
+                    pred_name
+                ));
+            }
+        }
+
+        // Negations and inequalities evaluate among the premises (the
+        // planner delays them until their variables are bound), so their
+        // variables must be bound by the body — a transform let is too late.
+        for v in &filter_vars {
+            if !bound.contains(v) {
+                return Err(anyhow!(
+                    "variable {} in negation or inequality of rule for {} is not bound by the rule body",
                     self.var_name(*v),
                     pred_name
                 ));
@@ -3074,6 +3113,17 @@ mod tests {
     fn binding_eq_chain_converges() {
         // X = Y, Y = Z, Z bound by p: all three are bound.
         assert!(check("p(1). q(X) :- p(Z), X = Y, Y = Z.").is_ok());
+    }
+
+    #[test]
+    fn binding_eq_forward_reference() {
+        // X = Y with Y bound later: accepted (lazy equality, the planner
+        // delays the equality until Y is bound).
+        assert!(check("e(1). p(X) :- X = Y, e(Y).").is_ok());
+        // X = fn:plus(Y, 1) with Y bound later: mangle-go requires the
+        // apply-expression variables to be bound at the premise; we accept
+        // the forward reference (the delayed equality becomes a let-binding).
+        assert!(check("e(1). p(X) :- X = fn:plus(Y, 1), e(Y).").is_ok());
     }
 
     #[test]

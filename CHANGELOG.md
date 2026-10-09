@@ -6,6 +6,36 @@ All notable changes in mangle/rust will be documented in this file.
 
 ### 🐛 Bug Fixes
 
+- **A premise atom with a repeated variable matches only equal arguments**
+  (mangle-go #98 parity): in `q(X) :- e(X, X)`, the second occurrence of
+  `X` previously reused the same scan variable, so the later binding
+  silently overwrote the earlier one and `e(1, 2)` matched `e(X, X)` with
+  `X = 2` (aggregation premises like `e(X, X) |> do fn:group_by()` were
+  affected too, corrupting group keys and counts). A repeated occurrence
+  now scans into a fresh variable with an equality constraint, so only
+  facts with equal arguments at those positions match.
+- **Delay negations, inequalities and equalities until their variables are
+  bound** (mangle-go PR #96 / #99 parity, plus its lazy unification of
+  variable-variable equalities): premises were planned in source order,
+  so `p(X) :- !e(X), q(X)` (or `X != 1` / `X = Y` before the premise that
+  binds the variable) passed the binding analysis but failed at evaluation
+  with "Variable not found" — and in the WASM path silently compared
+  against an uninitialized value. The planner now reorders such premises
+  to after the premise that binds their variables (mirroring mangle-go's
+  `RewriteClause` delay), so premise order no longer matters for `!e(X)`,
+  `X != 1` or `X = Y`. An equality is placed when it can be evaluated
+  (all variables bound) or turned into a let-binding (one side a fresh
+  variable, the other side bound); placing one equality can unblock
+  another (or a waiting negation), so the waiting list drains to a
+  fixpoint. Deliberate widening vs mangle-go, which requires an
+  equality's apply-expression variables to be bound at the premise's
+  position: `X = fn:plus(Y, 1), e(Y)` is accepted here (the delayed
+  equality becomes a let-binding once `Y` is bound). The binding analysis
+  resolves `var = expr` bindings with the same fixpoint, and still rejects
+  equalities whose variables nothing binds. Negation/inequality variables
+  that are not bound by the rule body (a transform `let` is too late)
+  are compile errors instead of runtime failures.
+
 - **Accept `fn:pair`/`fn:tuple` constructor values in fact positions**
   (mangle-go parity): `bar(fn:pair("a", 0)).` against a `.Pair</string,
   /number>` declaration (or `fn:tuple` against `.Tuple<...>`) now

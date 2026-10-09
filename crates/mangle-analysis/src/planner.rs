@@ -88,6 +88,13 @@ impl<'a> Planner<'a> {
             _ => return Err(anyhow!("Not a rule")),
         };
 
+        // Negations, inequalities and equalities whose variables are not yet
+        // bound wait until a premise binds them (mirroring mangle-go's
+        // `RewriteClause` delay and its lazy unification of variable-variable
+        // equalities), so premise order does not matter for `!e(X)`,
+        // `X != 1` or `X = Y`. See `delay_unbound_premises`.
+        let premises = self.delay_unbound_premises(&premises);
+
         // Split transforms into blocks by 'do' statements
         let blocks = self.split_transforms(transform);
         let num_blocks = blocks.len();
@@ -564,6 +571,13 @@ impl<'a> Planner<'a> {
 
                 let mut scan_vars = Vec::new();
                 let mut new_bindings = Vec::new();
+                // Variables this atom binds directly (first occurrence only:
+                // a variable that repeats within the same atom must not be
+                // bound twice — the second binding would silently overwrite
+                // the first, so `e(X, X)` would also match `e(1, 2)`. The
+                // repeated occurrence gets a fresh scan var plus an equality
+                // constraint below, mirroring mangle-go #98.)
+                let mut direct_vars: Vec<NameId> = Vec::new();
 
                 // Look for a potential index lookup
                 let mut index_lookup: Option<(usize, Operand)> = None;
@@ -617,9 +631,11 @@ impl<'a> Planner<'a> {
                 for arg in &args {
                     if let Inst::Var(v) = self.ir.get(*arg)
                         && !bound_vars.contains(v)
+                        && !direct_vars.contains(v)
                     {
                         scan_vars.push(*v);
                         new_bindings.push(*v);
+                        direct_vars.push(*v);
                         continue;
                     }
                     let tmp = self.fresh_var("scan");
@@ -1131,6 +1147,203 @@ impl<'a> Planner<'a> {
             return Ok(args.clone());
         }
         Err(anyhow!("Invalid transform structure"))
+    }
+
+    /// Collect the (non-wildcard) variables of an instruction tree.
+    fn collect_vars(&self, id: InstId, out: &mut FxHashSet<NameId>) {
+        match self.ir.get(id).clone() {
+            Inst::Var(v) => {
+                if self.ir.resolve_name(v) != "_" {
+                    out.insert(v);
+                }
+            }
+            Inst::List(args) => {
+                for a in args {
+                    self.collect_vars(a, out);
+                }
+            }
+            Inst::Map { keys, values } => {
+                for k in keys {
+                    self.collect_vars(k, out);
+                }
+                for v in values {
+                    self.collect_vars(v, out);
+                }
+            }
+            Inst::Struct { values, .. } => {
+                for v in values {
+                    self.collect_vars(v, out);
+                }
+            }
+            Inst::ApplyFn { args, .. } => {
+                for a in args {
+                    self.collect_vars(a, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Whether every (non-wildcard) variable of the term is bound.
+    fn term_fully_bound(&self, id: InstId, bound: &FxHashSet<NameId>) -> bool {
+        let mut vars = FxHashSet::default();
+        self.collect_vars(id, &mut vars);
+        vars.iter().all(|v| bound.contains(v))
+    }
+
+    /// Whether `lhs = rhs` can be planned as a let-binding: `lhs` a fresh
+    /// plain variable, `rhs` fully bound. Mirrors `eq_as_binding` (which
+    /// tries both directions).
+    fn eq_as_binding_ready(&self, lhs: InstId, rhs: InstId, bound: &FxHashSet<NameId>) -> bool {
+        matches!(self.ir.get(lhs), Inst::Var(v) if !bound.contains(v))
+            && self.term_fully_bound(rhs, bound)
+    }
+
+    /// Whether premise `p` can be planned given the variables bound so far.
+    /// Negations and inequalities need all their variables bound (they are
+    /// pure filters). Equalities are ready when they can be evaluated (all
+    /// variables bound) or turned into a let-binding (one side a fresh
+    /// variable, the other side fully bound) — mirroring `plan_join_sequence`'s
+    /// `Eq` handling. Every other premise binds variables and is always
+    /// ready.
+    fn premise_ready(&self, p: InstId, bound: &FxHashSet<NameId>) -> bool {
+        match self.ir.get(p).clone() {
+            Inst::Ineq(l, r) => self.term_fully_bound(l, bound) && self.term_fully_bound(r, bound),
+            Inst::Eq(l, r) => {
+                (self.term_fully_bound(l, bound) && self.term_fully_bound(r, bound))
+                    || self.eq_as_binding_ready(l, r, bound)
+                    || self.eq_as_binding_ready(r, l, bound)
+            }
+            Inst::NegAtom(inner) => match self.ir.get(inner).clone() {
+                Inst::Atom { args, .. } => args.iter().all(|&a| self.term_fully_bound(a, bound)),
+                _ => true,
+            },
+            _ => true,
+        }
+    }
+
+    /// Add the variables that premise `p` binds when planned at its position,
+    /// mirroring `plan_join_sequence`'s premise handling: filter built-ins
+    /// bind nothing, `:match_field` binds its output argument,
+    /// `:list:member` binds its element argument, and regular atoms bind all
+    /// their variables. An equality, once placed, has all its variables
+    /// bound: in binding mode the let-binding produces the fresh side, and
+    /// in check mode everything was bound already.
+    fn premise_bindings(&self, p: InstId, bound: &mut FxHashSet<NameId>) {
+        match self.ir.get(p).clone() {
+            Inst::Atom { predicate, args } => match self.ir.resolve_name(predicate) {
+                ":lt"
+                | ":le"
+                | ":gt"
+                | ":ge"
+                | ":time:lt"
+                | ":time:le"
+                | ":time:gt"
+                | ":time:ge"
+                | ":duration:lt"
+                | ":duration:le"
+                | ":duration:gt"
+                | ":duration:ge"
+                | ":string:starts_with"
+                | ":string:ends_with"
+                | ":string:contains"
+                | ":match_prefix" => {}
+                ":match_field" => {
+                    if let Some(&arg) = args.get(2)
+                        && let Inst::Var(v) = self.ir.get(arg)
+                    {
+                        bound.insert(*v);
+                    }
+                }
+                ":list:member" => {
+                    if let Some(arg) = args.first()
+                        && let Inst::Var(v) = self.ir.get(*arg)
+                    {
+                        bound.insert(*v);
+                    }
+                }
+                _ => {
+                    let mut vars = FxHashSet::default();
+                    for a in &args {
+                        self.collect_vars(*a, &mut vars);
+                    }
+                    bound.extend(vars);
+                }
+            },
+            Inst::Eq(l, r) => {
+                let mut vars = FxHashSet::default();
+                self.collect_vars(l, &mut vars);
+                self.collect_vars(r, &mut vars);
+                bound.extend(vars);
+            }
+            _ => {}
+        }
+    }
+
+    /// Reorder premises so that negations, inequalities and equalities that
+    /// cannot be planned yet wait until a premise binds their variables
+    /// (mirroring mangle-go's `RewriteClause` delay, PRs #96 and #99, plus
+    /// its lazy unification of variable-variable equalities): a negation or
+    /// inequality can only be evaluated once all its variables have values,
+    /// and an equality `X = expr` can only be planned once `expr`'s variables
+    /// have values — so premise order must not matter for `!e(X)`, `X != 1`
+    /// or `X = Y`. See `premise_ready` for the exact readiness rules.
+    ///
+    /// Premises still waiting at the end are appended, so that unbound
+    /// variables surface as errors (from analysis or at evaluation) instead
+    /// of the premise being silently dropped.
+    fn delay_unbound_premises(&self, premises: &[InstId]) -> Vec<InstId> {
+        let mut ordered: Vec<InstId> = Vec::with_capacity(premises.len());
+        let mut bound: FxHashSet<NameId> = FxHashSet::default();
+        let mut waiting: Vec<InstId> = Vec::new();
+
+        for &p in premises {
+            let delayable = matches!(
+                self.ir.get(p),
+                Inst::NegAtom(_) | Inst::Ineq(_, _) | Inst::Eq(_, _)
+            );
+            if delayable && !self.premise_ready(p, &bound) {
+                waiting.push(p);
+                continue;
+            }
+            self.place_premise(p, &mut ordered, &mut bound, &mut waiting);
+        }
+        ordered.extend(waiting);
+        ordered
+    }
+
+    /// Place premise `p` at the end of `ordered`, record the variables it
+    /// binds, and then move every waiting premise that has become ready.
+    /// This repeats until no more waiting premises can be placed: a placed
+    /// equality binds the variables another waiting premise may need (e.g.
+    /// `!q(X), X = Y, e(Y)`: the equality binds `X`, which unblocks the
+    /// negation).
+    fn place_premise(
+        &self,
+        p: InstId,
+        ordered: &mut Vec<InstId>,
+        bound: &mut FxHashSet<NameId>,
+        waiting: &mut Vec<InstId>,
+    ) {
+        ordered.push(p);
+        self.premise_bindings(p, bound);
+        loop {
+            let mut progressed = false;
+            let mut still_waiting: Vec<InstId> = Vec::new();
+            for &w in waiting.iter() {
+                if self.premise_ready(w, bound) {
+                    ordered.push(w);
+                    self.premise_bindings(w, bound);
+                    progressed = true;
+                } else {
+                    still_waiting.push(w);
+                }
+            }
+            *waiting = still_waiting;
+            if !progressed {
+                break;
+            }
+        }
     }
 
     fn try_parse_aggregate(&mut self, t_id: InstId) -> Result<Option<Aggregate>> {

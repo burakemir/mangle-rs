@@ -355,3 +355,161 @@ fn test_planner_no_hash_join_by_default() {
         "HashJoin must not be emitted when disabled"
     );
 }
+
+/// Helper: parse source, lower, plan the first rule.
+fn plan_first_rule(source: &str) -> (mangle_ir::Ir, mangle_ir::physical::Op) {
+    let arena = ast::Arena::new_with_global_interner();
+    let mut parser = mangle_parse::Parser::new(&arena, source.as_bytes(), "test");
+    parser.next_token().unwrap();
+    let unit = parser.parse_unit().unwrap();
+    let ctx = LoweringContext::new(&arena);
+    let mut ir = ctx.lower_unit(unit);
+    let rule_id = ir
+        .insts
+        .iter()
+        .position(|i| matches!(i, Inst::Rule { .. }))
+        .unwrap();
+    let rule_inst = mangle_ir::InstId::new(rule_id);
+    use crate::Planner;
+    let op = Planner::new(&mut ir)
+        .with_hash_join(false)
+        .plan_rule(rule_inst)
+        .unwrap();
+    (ir, op)
+}
+
+/// A variable that repeats within one premise atom must only match facts with
+/// equal arguments at those positions: the second occurrence is scanned into
+/// a fresh variable with an equality constraint (mangle-go #98).
+#[test]
+fn test_planner_repeated_variable_gets_equality_constraint() {
+    use mangle_ir::physical::{DataSource, Op};
+    let (ir, op) = plan_first_rule("q(X) :- e(X, X).");
+    let Op::Iterate {
+        source: DataSource::Scan { vars, .. },
+        body,
+    } = op
+    else {
+        panic!("expected Iterate over e, got: {op:?}");
+    };
+    // The two occurrences must not be the same scan variable.
+    assert_ne!(
+        vars[0], vars[1],
+        "repeated variable must get a fresh scan var"
+    );
+    // ... and the body must enforce their equality before inserting.
+    let Op::Filter { .. } = *body else {
+        panic!("expected equality filter under the scan, got: {body:?}");
+    };
+    assert_eq!(ir.resolve_name(vars[0]), "X");
+}
+
+/// Negations and inequalities whose variables are not yet bound are delayed
+/// until a premise binds them, so premise order does not matter (mangle-go
+/// PRs #96 and #99): `p(X) :- X != 1, e(X).` plans the scan of `e` first and
+/// the `!=` filter underneath it.
+#[test]
+fn test_planner_delays_inequality_until_bound() {
+    use mangle_ir::physical::{CmpOp, Condition, DataSource, Op};
+    let (ir, op) = plan_first_rule("p(X) :- X != 1, e(X).");
+    let Op::Iterate {
+        source: DataSource::Scan { relation, .. },
+        body,
+    } = op
+    else {
+        panic!("expected Iterate (scan must come first), got: {op:?}");
+    };
+    assert_eq!(ir.resolve_name(relation), "e");
+    let Op::Filter {
+        cond: Condition::Cmp { op: cmp, .. },
+        ..
+    } = *body
+    else {
+        panic!("expected != filter under the scan, got: {body:?}");
+    };
+    assert_eq!(cmp, CmpOp::Neq);
+}
+
+/// A negation whose variables a later premise binds is delayed past it, and
+/// still-waiting negations are appended rather than dropped (mangle-go
+/// PR #96).
+#[test]
+fn test_planner_delays_negation_until_bound() {
+    use mangle_ir::physical::{Condition, DataSource, Op};
+    let (_, op) = plan_first_rule("p(X) :- !e(X), q(X).");
+    // The scan of q must come first; the negation filter sits underneath it.
+    let Op::Iterate {
+        source: DataSource::Scan { .. },
+        body,
+    } = op
+    else {
+        panic!("expected Iterate (scan must come first), got: {op:?}");
+    };
+    let Op::Filter {
+        cond: Condition::Negation { .. },
+        ..
+    } = *body
+    else {
+        panic!("expected negation filter under the scan, got: {body:?}");
+    };
+}
+
+/// An equality whose other side is bound later is delayed and planned as a
+/// let-binding underneath the scan (mangle-go unifies variable-variable
+/// equalities lazily; the reorder achieves the same for plans).
+#[test]
+fn test_planner_delays_equality_until_bound() {
+    use mangle_ir::physical::{DataSource, Expr, Op};
+    let (ir, op) = plan_first_rule("p(X) :- X = Y, e(Y).");
+    let Op::Iterate {
+        source: DataSource::Scan { relation, vars },
+        body,
+    } = op
+    else {
+        panic!("expected Iterate (scan must come first), got: {op:?}");
+    };
+    assert_eq!(ir.resolve_name(relation), "e");
+    assert_eq!(vars.len(), 1, "only Y is a scan variable");
+    let Op::Let {
+        var,
+        expr: Expr::Value(operand),
+        body,
+    } = *body
+    else {
+        panic!("expected Let (X = Y) under the scan, got: {body:?}");
+    };
+    assert_eq!(ir.resolve_name(var), "X");
+    let _ = operand;
+    assert!(
+        matches!(*body, Op::Insert { .. }),
+        "expected Insert under the Let, got: {body:?}"
+    );
+}
+
+/// A negation whose variable is bound only by a delayed equality is placed
+/// after that equality (the waiting list drains to a fixpoint).
+#[test]
+fn test_planner_delays_negation_behind_equality() {
+    use mangle_ir::physical::{Condition, DataSource, Op};
+    let (_, op) = plan_first_rule("p(X) :- !q(X), X = Y, e(Y).");
+    // e(Y) scan first...
+    let Op::Iterate {
+        source: DataSource::Scan { .. },
+        body,
+    } = op
+    else {
+        panic!("expected Iterate (scan must come first), got: {op:?}");
+    };
+    // ... then Let X = Y...
+    let Op::Let { body, .. } = *body else {
+        panic!("expected Let (X = Y) under the scan, got: {body:?}");
+    };
+    // ... then the negation filter.
+    let Op::Filter {
+        cond: Condition::Negation { .. },
+        ..
+    } = *body
+    else {
+        panic!("expected negation filter after the Let, got: {body:?}");
+    };
+}
