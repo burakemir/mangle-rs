@@ -459,18 +459,25 @@ impl Store for MemStore {
             return Ok(false);
         }
 
-        // Debug: log arity registration / mismatch
+        // Debug: log arity registration / mismatch. Only when MANGLE_DEBUG
+        // is set — this must stay silent by default (mangle-py users see
+        // every insert otherwise).
+        let debug = std::env::var_os("MANGLE_DEBUG").is_some();
         let existing_arity = self.arity.get(relation).copied();
         match existing_arity {
             Some(reg) if reg != n_cols => {
-                eprintln!(
-                    "[mangle] ARITY MISMATCH in relation '{relation}': registered arity={reg}, inserting tuple with {n_cols} cols, cells.len()={}. Skipping.",
-                    cells.len()
-                );
+                if debug {
+                    eprintln!(
+                        "[mangle] ARITY MISMATCH in relation '{relation}': registered arity={reg}, inserting tuple with {n_cols} cols, cells.len()={}. Skipping.",
+                        cells.len()
+                    );
+                }
                 return Ok(false);
             }
             None => {
-                eprintln!("[mangle] Registering arity for relation '{relation}': {n_cols} cols");
+                if debug {
+                    eprintln!("[mangle] Registering arity for relation '{relation}': {n_cols} cols");
+                }
             }
             _ => {}
         }
