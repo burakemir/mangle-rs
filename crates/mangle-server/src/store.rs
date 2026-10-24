@@ -6,7 +6,8 @@ use mangle_db::{
     StoreBackend,
 };
 use mangle_interpreter::MemStore;
-use std::collections::HashMap;
+use mangle_proto::{Command, MutateCommand, MutationOpKind};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -16,11 +17,93 @@ use crate::query::{ParsedQuery, filter_tuples, parse_query};
 /// Shared handle to the [`ProgramStore`] used by the RPC service.
 pub type AppState = std::sync::Arc<std::sync::RwLock<ProgramStore>>;
 
+/// The replicated-fact ledger of one program (DISTRIBUTED_PLAN.md §3.6).
+///
+/// Tracks which facts came through the replicated write path, so that
+/// (a) `MutationSummary`'s `num_skipped` accounting is defined by the
+/// command sequence alone, and (b) snapshots can serialize exactly the
+/// replicated facts, separately from facts loaded from external EDB
+/// sources.
+///
+/// - `replicated`: facts inserted via commands and currently present.
+/// - `retracted`: facts from program source / external EDB sources that
+///   were retracted via a command. They must be re-retracted after a
+///   snapshot restore, when the external sources are re-read.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FactLedger {
+    replicated: BTreeMap<String, BTreeSet<Vec<Value>>>,
+    retracted: BTreeMap<String, BTreeSet<Vec<Value>>>,
+}
+
+impl FactLedger {
+    /// Whether the tuple is currently a replicated fact of the relation.
+    pub fn replicated_contains(&self, relation: &str, tuple: &[Value]) -> bool {
+        self.replicated
+            .get(relation)
+            .is_some_and(|set| set.contains(tuple))
+    }
+
+    /// Whether the tuple is an externally-sourced fact that was retracted
+    /// by a command (and must be re-retracted after a restore).
+    pub fn retracted_contains(&self, relation: &str, tuple: &[Value]) -> bool {
+        self.retracted
+            .get(relation)
+            .is_some_and(|set| set.contains(tuple))
+    }
+
+    /// Record an applied insert: the tuple becomes a replicated fact and
+    /// forgets any earlier retraction.
+    fn note_insert(&mut self, relation: &str, tuple: &[Value]) {
+        self.replicated
+            .entry(relation.to_string())
+            .or_default()
+            .insert(tuple.to_vec());
+        if let Some(set) = self.retracted.get_mut(relation) {
+            set.retain(|t| t != tuple);
+        }
+    }
+
+    /// Record an applied retract. A replicated fact simply stops being
+    /// one; a fact from an external source is remembered as retracted so a
+    /// restore can re-apply the retraction.
+    fn note_retract(&mut self, relation: &str, tuple: &[Value]) {
+        let replicated = self
+            .replicated
+            .get_mut(relation)
+            .is_some_and(|set| set.remove(tuple));
+        if !replicated {
+            self.retracted
+                .entry(relation.to_string())
+                .or_default()
+                .insert(tuple.to_vec());
+        }
+    }
+}
+
+/// The result of applying one [`Command`] to the store. Deterministic:
+/// applying the same command to two stores in the same state yields the
+/// same outcome.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ApplyOutcome {
+    /// Facts were inserted/retracted. Ops that changed nothing (duplicate
+    /// inserts, retracts of absent facts, duplicates within the command)
+    /// count as skipped.
+    Mutated { num_applied: u64, num_skipped: u64 },
+    /// A program was loaded (or re-loaded with new source).
+    Loaded(ProgramInfo),
+    /// A program was deleted.
+    Deleted,
+    /// A no-op (commit barrier for strong reads).
+    Noop,
+}
+
 /// Metadata about a loaded program.
 pub struct StoredProgram {
     pub source: String,
     pub predicates: Vec<String>,
     pub db: Database,
+    /// Facts inserted/retracted through the command path (§3.6).
+    pub ledger: FactLedger,
 }
 
 /// In-memory registry of named Mangle programs.
@@ -33,7 +116,7 @@ pub struct ProgramStore {
 }
 
 /// Info returned when listing programs.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ProgramInfo {
     pub name: String,
     pub predicates: Vec<String>,
@@ -144,7 +227,12 @@ impl ProgramStore {
         );
         let db = Database::open(config)?;
 
-        let predicates = db.relation_names()?;
+        // Sort the predicate list: relation names come from the store's
+        // HashMap and would otherwise be in iteration order, which differs
+        // between two otherwise-identical stores (caught by the
+        // determinism tests) and would leak into program-info responses.
+        let mut predicates = db.relation_names()?;
+        predicates.sort();
 
         let info = ProgramInfo {
             name: name.to_string(),
@@ -157,6 +245,11 @@ impl ProgramStore {
                 source: source.to_string(),
                 predicates,
                 db,
+                // A (re-)load resets replicated-fact tracking: the store is
+                // rebuilt from sources, so prior mutations are not reflected.
+                // (Reload is a local admin op; it is disabled on the
+                // replicated path, DISTRIBUTED_PLAN.md §3.1.)
+                ledger: FactLedger::default(),
             },
         );
 
@@ -262,31 +355,209 @@ impl ProgramStore {
             .collect())
     }
 
-    /// Insert a fact into a program's database.
-    pub fn insert_fact(&self, name: &str, relation: &str, tuple: Vec<Value>) -> Result<()> {
-        let prog = self
-            .programs
-            .get(name)
-            .ok_or_else(|| anyhow!("program '{}' not found", name))?;
-        prog.db.insert(relation, tuple.clone())?;
-        if let Some(ref log) = self.mutation_log {
-            log.append_insert(name, relation, &tuple)?;
+    /// Apply one replicated command (DISTRIBUTED_PLAN.md §3.1, §3.4).
+    ///
+    /// This is the state machine's single write path: every mutation of
+    /// the program registry or of a program's EDB facts goes through here,
+    /// and applying the same command sequence to two stores in the same
+    /// state produces identical state and identical [`ApplyOutcome`]s.
+    /// `Mutate` commands apply all their ops in one `Database::batch()` —
+    /// one IDB recompute per command, all-or-nothing semantics.
+    pub fn apply(&mut self, cmd: &Command) -> Result<ApplyOutcome> {
+        match cmd {
+            Command::Mutate(m) => self.apply_mutate(m),
+            Command::LoadProgram(l) => {
+                let info = self.load(&l.name, &l.source)?;
+                Ok(ApplyOutcome::Loaded(info))
+            }
+            Command::DeleteProgram(d) => {
+                if self.remove(&d.name) {
+                    Ok(ApplyOutcome::Deleted)
+                } else {
+                    Err(anyhow!("program '{}' not found", d.name))
+                }
+            }
+            Command::Noop => Ok(ApplyOutcome::Noop),
         }
-        Ok(())
     }
 
-    /// Retract a fact from a program's database.
-    pub fn retract_fact(&self, name: &str, relation: &str, tuple: &[Value]) -> Result<()> {
-        let prog = self
-            .programs
-            .get(name)
-            .ok_or_else(|| anyhow!("program '{}' not found", name))?;
-        prog.db.retract(relation, tuple)?;
-        if let Some(ref log) = self.mutation_log {
-            log.append_retract(name, relation, tuple)?;
+    /// Apply a `Mutate` command: validate ops (rejecting mutations of
+    /// source-defined, re-derived relations), classify the rest against
+    /// the current store state (skipping no-ops), apply the effective ops
+    /// as one batch, then update the ledger and the (interim, pre-WAL)
+    /// mutation log.
+    fn apply_mutate(&mut self, cmd: &MutateCommand) -> Result<ApplyOutcome> {
+        let ProgramStore {
+            programs,
+            mutation_log,
+            ..
+        } = self;
+
+        let prog = programs
+            .get_mut(&cmd.program)
+            .ok_or_else(|| anyhow!("program '{}' not found", cmd.program))?;
+
+        // Validate before touching anything (atomic semantics): relations
+        // defined by the program source are re-derived on every recompute,
+        // so mutations to them cannot persist — reject rather than lose
+        // the write silently.
+        for op in &cmd.ops {
+            if !prog.db.is_mutable_relation(&op.relation) {
+                return Err(anyhow!(
+                    "relation '{}' is defined by the program source; \
+                     only EDB relations can be mutated",
+                    op.relation
+                ));
+            }
         }
-        Ok(())
+
+        // Membership snapshot of every touched relation, from the current
+        // store state. Ops are evaluated against this set as they would be
+        // against the store, so duplicates within the command and
+        // insert/retract interleavings are classified exactly.
+        let mut membership: HashMap<String, HashSet<Vec<Value>>> = HashMap::new();
+        for op in &cmd.ops {
+            if !membership.contains_key(&op.relation) {
+                let tuples: HashSet<Vec<Value>> = prog.db.query(&op.relation)?.into_iter().collect();
+                membership.insert(op.relation.clone(), tuples);
+            }
+        }
+
+        let mut applied: Vec<&mangle_proto::MutationOp> = Vec::new();
+        let mut num_skipped: u64 = 0;
+        for op in &cmd.ops {
+            let set = membership.get_mut(&op.relation).expect("relation pre-seeded");
+            let present = set.contains(&op.tuple);
+            match op.kind {
+                MutationOpKind::Insert => {
+                    if present {
+                        num_skipped += 1; // already a fact
+                    } else {
+                        set.insert(op.tuple.clone());
+                        applied.push(op);
+                    }
+                }
+                MutationOpKind::Retract => {
+                    if present {
+                        set.remove(&op.tuple);
+                        applied.push(op); // retract-of-absent is a no-op (§7.4)
+                    } else {
+                        num_skipped += 1;
+                    }
+                }
+            }
+        }
+
+        if !applied.is_empty() {
+            let batch = prog.db.batch();
+            for op in &applied {
+                match op.kind {
+                    MutationOpKind::Insert => batch.insert(&op.relation, op.tuple.clone())?,
+                    MutationOpKind::Retract => batch.retract(&op.relation, &op.tuple)?,
+                }
+            }
+            batch.commit()?; // single IDB recompute for the whole command
+
+            for op in &applied {
+                match op.kind {
+                    MutationOpKind::Insert => prog.ledger.note_insert(&op.relation, &op.tuple),
+                    MutationOpKind::Retract => prog.ledger.note_retract(&op.relation, &op.tuple),
+                }
+                if let Some(log) = mutation_log {
+                    match op.kind {
+                        MutationOpKind::Insert => {
+                            log.append_insert(&cmd.program, &op.relation, &op.tuple)?
+                        }
+                        MutationOpKind::Retract => {
+                            log.append_retract(&cmd.program, &op.relation, &op.tuple)?
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(ApplyOutcome::Mutated {
+            num_applied: applied.len() as u64,
+            num_skipped,
+        })
     }
+
+    /// Insert a fact into a program's EDB and recompute IDB.
+    ///
+    /// Convenience wrapper: routes through [`ProgramStore::apply`] as a
+    /// single-op `Mutate` command, so all writes share one path.
+    pub fn insert_fact(&mut self, name: &str, relation: &str, tuple: Vec<Value>) -> Result<()> {
+        self.apply(&mutate_one(name, relation, tuple, MutationOpKind::Insert))
+            .map(|_| ())
+    }
+
+    /// Retract a fact from a program's EDB and recompute IDB.
+    ///
+    /// Convenience wrapper: routes through [`ProgramStore::apply`] as a
+    /// single-op `Mutate` command (retract-of-absent is a no-op, §7.4).
+    pub fn retract_fact(&mut self, name: &str, relation: &str, tuple: &[Value]) -> Result<()> {
+        self.apply(&mutate_one(
+            name,
+            relation,
+            tuple.to_vec(),
+            MutationOpKind::Retract,
+        ))
+        .map(|_| ())
+    }
+
+    /// Canonical, order-independent view of the whole FSM state: program
+    /// registry (name → source), every relation's facts, and the fact
+    /// ledgers. Used by the determinism tests; the snapshot serializer
+    /// (Phase 1) builds on the same view.
+    pub fn canonical_state(&self) -> BTreeMap<String, CanonicalProgramState> {
+        self.programs
+            .iter()
+            .map(|(name, prog)| {
+                let mut relations = BTreeMap::new();
+                // Relation-name or query errors here would mean a broken
+                // store; treat them as empty rather than failing the view.
+                for rel in prog.db.relation_names().unwrap_or_default() {
+                    let tuples: BTreeSet<Vec<Value>> =
+                        prog.db.query(&rel).unwrap_or_default().into_iter().collect();
+                    relations.insert(rel, tuples);
+                }
+                (
+                    name.clone(),
+                    CanonicalProgramState {
+                        source: prog.source.clone(),
+                        relations,
+                        ledger: prog.ledger.clone(),
+                    },
+                )
+            })
+            .collect()
+    }
+}
+
+/// One program's canonical state (see [`ProgramStore::canonical_state`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct CanonicalProgramState {
+    pub source: String,
+    pub relations: BTreeMap<String, BTreeSet<Vec<Value>>>,
+    pub ledger: FactLedger,
+}
+
+/// Build a single-op `Mutate` command (helper for the convenience
+/// wrappers and tests).
+fn mutate_one(
+    program: &str,
+    relation: &str,
+    tuple: Vec<Value>,
+    kind: MutationOpKind,
+) -> Command {
+    Command::Mutate(MutateCommand {
+        program: program.to_string(),
+        ops: vec![mangle_proto::MutationOp {
+            kind,
+            relation: relation.to_string(),
+            tuple,
+        }],
+    })
 }
 
 /// Compile and execute ephemeral source, returning results for the queried relation.
@@ -571,5 +842,329 @@ mod tests {
             assert_eq!(containers.len(), 1);
             assert_eq!(containers[0][0], Value::String("db".to_string()));
         }
+    }
+
+    // --- Command path (Phase 0: FSM extraction) ---------------------------
+
+    use mangle_proto::{Command, LoadProgramCommand, MutateCommand, MutationOp, MutationOpKind};
+
+    fn mutate_cmd(program: &str, ops: Vec<MutationOp>) -> Command {
+        Command::Mutate(MutateCommand {
+            program: program.to_string(),
+            ops,
+        })
+    }
+
+    fn op(kind: MutationOpKind, relation: &str, tuple: Vec<Value>) -> MutationOp {
+        MutationOp {
+            kind,
+            relation: relation.to_string(),
+            tuple,
+        }
+    }
+
+    #[test]
+    fn test_apply_mutate_batch_and_recompute() {
+        let mut store = ProgramStore::new();
+        store
+            .apply(&Command::LoadProgram(LoadProgramCommand {
+                name: "t".into(),
+                source: "q(X) :- p(X).".into(),
+            }))
+            .unwrap();
+
+        let outcome = store
+            .apply(&mutate_cmd(
+                "t",
+                vec![
+                    op(MutationOpKind::Insert, "p", vec![Value::Number(1)]),
+                    op(MutationOpKind::Insert, "p", vec![Value::Number(2)]),
+                ],
+            ))
+            .unwrap();
+        assert_eq!(
+            outcome,
+            ApplyOutcome::Mutated {
+                num_applied: 2,
+                num_skipped: 0
+            }
+        );
+
+        // One batch → one recompute: both facts visible in the derived q.
+        let qs = store.execute_query("t", "q(X)").unwrap();
+        assert_eq!(qs.len(), 2);
+    }
+
+    #[test]
+    fn test_apply_mutate_skips_duplicates() {
+        let mut store = ProgramStore::new();
+        store.load("t", "q(X) :- p(X).").unwrap();
+        // Seed one fact through the command path.
+        store
+            .apply(&mutate_cmd(
+                "t",
+                vec![op(MutationOpKind::Insert, "p", vec![Value::Number(1)])],
+            ))
+            .unwrap();
+
+        // Duplicate insert within one command: first applied, second skipped.
+        let outcome = store
+            .apply(&mutate_cmd(
+                "t",
+                vec![
+                    op(MutationOpKind::Insert, "p", vec![Value::Number(2)]),
+                    op(MutationOpKind::Insert, "p", vec![Value::Number(2)]),
+                ],
+            ))
+            .unwrap();
+        assert_eq!(
+            outcome,
+            ApplyOutcome::Mutated {
+                num_applied: 1,
+                num_skipped: 1
+            }
+        );
+
+        // Insert of an already-present fact: skipped.
+        let outcome = store
+            .apply(&mutate_cmd(
+                "t",
+                vec![op(MutationOpKind::Insert, "p", vec![Value::Number(1)])],
+            ))
+            .unwrap();
+        assert_eq!(
+            outcome,
+            ApplyOutcome::Mutated {
+                num_applied: 0,
+                num_skipped: 1
+            }
+        );
+    }
+
+    #[test]
+    fn test_apply_mutate_retract_semantics() {
+        let mut store = ProgramStore::new();
+        store.load("t", "q(X) :- p(X).").unwrap();
+
+        // Retract of an absent fact: non-error no-op (§7.4), counted skipped.
+        let outcome = store
+            .apply(&mutate_cmd(
+                "t",
+                vec![op(MutationOpKind::Retract, "p", vec![Value::Number(99)])],
+            ))
+            .unwrap();
+        assert_eq!(
+            outcome,
+            ApplyOutcome::Mutated {
+                num_applied: 0,
+                num_skipped: 1
+            }
+        );
+
+        // Insert, then retract: the fact was replicated, so the retract
+        // removes it from the replicated set (not retracted-external).
+        store
+            .apply(&mutate_cmd(
+                "t",
+                vec![op(MutationOpKind::Insert, "p", vec![Value::Number(1)])],
+            ))
+            .unwrap();
+        let outcome = store
+            .apply(&mutate_cmd(
+                "t",
+                vec![op(MutationOpKind::Retract, "p", vec![Value::Number(1)])],
+            ))
+            .unwrap();
+        assert_eq!(
+            outcome,
+            ApplyOutcome::Mutated {
+                num_applied: 1,
+                num_skipped: 0
+            }
+        );
+        let state = store.canonical_state();
+        let ledger = &state.get("t").unwrap().ledger;
+        assert!(!ledger.replicated_contains("p", &[Value::Number(1)]));
+        assert!(!ledger.retracted_contains("p", &[Value::Number(1)]));
+    }
+
+    #[test]
+    fn test_apply_mutate_retract_of_external_fact() {
+        // A fact loaded from an EDB *source file* (not the program source):
+        // retracting it is applied and recorded as retracted-external in
+        // the ledger, so a future snapshot restore re-applies it.
+        let programs_dir = tempfile::tempdir().unwrap();
+        let edb_dir = tempfile::tempdir().unwrap();
+
+        std::fs::write(
+            programs_dir.path().join("t.mg"),
+            "q(X) :- p(X).\n",
+        )
+        .unwrap();
+        let t_edb = edb_dir.path().join("t");
+        std::fs::create_dir(&t_edb).unwrap();
+        std::fs::write(t_edb.join("data.mg"), "p(1). p(2).\n").unwrap();
+
+        let mut store = ProgramStore::new()
+            .with_programs_dir(programs_dir.path().to_path_buf())
+            .with_edb_dir(edb_dir.path().to_path_buf());
+        store.reload("t").unwrap();
+
+        let outcome = store
+            .apply(&mutate_cmd(
+                "t",
+                vec![op(MutationOpKind::Retract, "p", vec![Value::Number(1)])],
+            ))
+            .unwrap();
+        assert_eq!(
+            outcome,
+            ApplyOutcome::Mutated {
+                num_applied: 1,
+                num_skipped: 0
+            }
+        );
+
+        let state = store.canonical_state();
+        let ledger = &state.get("t").unwrap().ledger;
+        assert!(ledger.retracted_contains("p", &[Value::Number(1)]));
+        assert!(!ledger.replicated_contains("p", &[Value::Number(1)]));
+
+        // The fact is really gone from the store.
+        let qs = store.execute_query("t", "q(X)").unwrap();
+        assert_eq!(qs, vec![vec![Value::Number(2)]]);
+    }
+
+    #[test]
+    fn test_apply_mutate_rejects_source_defined_relation() {
+        // `p` is defined by a fact in the program source: mutations cannot
+        // persist (the recompute re-derives p(1)), so they are rejected —
+        // previously they were silently accepted and lost.
+        let mut store = ProgramStore::new();
+        store.load("t", "p(1). q(X) :- p(X).").unwrap();
+
+        let err = store
+            .apply(&mutate_cmd(
+                "t",
+                vec![op(MutationOpKind::Insert, "p", vec![Value::Number(3)])],
+            ))
+            .unwrap_err();
+        assert!(err.to_string().contains("defined by the program source"));
+
+        // Same for retract, and the whole command fails atomically.
+        let err = store
+            .apply(&mutate_cmd(
+                "t",
+                vec![
+                    op(MutationOpKind::Insert, "r", vec![Value::Number(1)]),
+                    op(MutationOpKind::Retract, "p", vec![Value::Number(1)]),
+                ],
+            ))
+            .unwrap_err();
+        assert!(err.to_string().contains("defined by the program source"));
+
+        // State unchanged: nothing from the failed command was applied.
+        let state = store.canonical_state();
+        let t = state.get("t").unwrap();
+        assert!(!t.relations.contains_key("r"));
+        assert_eq!(t.relations["p"].len(), 1);
+    }
+
+    #[test]
+    fn test_apply_mutate_interleaving() {
+        // Insert then retract of the same tuple within one command: net
+        // effect nothing, both counted applied (each changed the store).
+        let mut store = ProgramStore::new();
+        store.load("t", "q(X) :- p(X).").unwrap();
+        store
+            .apply(&mutate_cmd(
+                "t",
+                vec![op(MutationOpKind::Insert, "p", vec![Value::Number(1)])],
+            ))
+            .unwrap();
+
+        let outcome = store
+            .apply(&mutate_cmd(
+                "t",
+                vec![
+                    op(MutationOpKind::Insert, "p", vec![Value::Number(5)]),
+                    op(MutationOpKind::Retract, "p", vec![Value::Number(5)]),
+                ],
+            ))
+            .unwrap();
+        assert_eq!(
+            outcome,
+            ApplyOutcome::Mutated {
+                num_applied: 2,
+                num_skipped: 0
+            }
+        );
+        let ps = store.execute_query("t", "p(X)").unwrap();
+        assert_eq!(ps.len(), 1); // only the seeded fact remains
+    }
+
+    #[test]
+    fn test_apply_mutate_unknown_program() {
+        let mut store = ProgramStore::new();
+        let err = store
+            .apply(&mutate_cmd(
+                "nope",
+                vec![op(MutationOpKind::Insert, "p", vec![Value::Number(1)])],
+            ))
+            .unwrap_err();
+        assert!(err.to_string().contains("not found"));
+    }
+
+    #[test]
+    fn test_apply_load_delete_noop() {
+        let mut store = ProgramStore::new();
+
+        let outcome = store
+            .apply(&Command::LoadProgram(LoadProgramCommand {
+                name: "t".into(),
+                source: "p(1).".into(),
+            }))
+            .unwrap();
+        assert!(matches!(outcome, ApplyOutcome::Loaded(ref info) if info.name == "t"));
+
+        assert_eq!(store.apply(&Command::Noop).unwrap(), ApplyOutcome::Noop);
+
+        let outcome = store
+            .apply(&Command::DeleteProgram(mangle_proto::DeleteProgramCommand {
+                name: "t".into(),
+            }))
+            .unwrap();
+        assert_eq!(outcome, ApplyOutcome::Deleted);
+        assert!(store.get("t").is_none());
+
+        // Deleting again is an error (same as the RPC's NotFound).
+        assert!(store
+            .apply(&Command::DeleteProgram(mangle_proto::DeleteProgramCommand {
+                name: "t".into()
+            }))
+            .is_err());
+    }
+
+    #[test]
+    fn test_apply_command_proto_roundtrip_through_store() {
+        // A command that survives the proto roundtrip applies identically.
+        let mut store = ProgramStore::new();
+        store.load("t", "q(X) :- p(X).").unwrap();
+
+        let cmd = mutate_cmd(
+            "t",
+            vec![op(
+                MutationOpKind::Insert,
+                "p",
+                vec![Value::String("web".into())],
+            )],
+        );
+        let wire = cmd.to_proto();
+        let decoded = Command::from_proto(&wire).unwrap();
+        assert_eq!(cmd, decoded);
+
+        store.apply(&decoded).unwrap();
+        let qs = store.execute_query("t", "q(X)").unwrap();
+        assert_eq!(qs.len(), 1);
+        assert_eq!(qs[0][0], Value::String("web".into()));
     }
 }

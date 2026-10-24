@@ -18,7 +18,10 @@ use pb::{
 use tokio_stream::StreamExt as _;
 
 use crate::query::QueryArg;
-use crate::store::{AppState, ProgramStore, eval_source_relations, parse_query_lenient};
+use crate::store::{
+    AppState, ApplyOutcome, ProgramStore, eval_source_relations, parse_query_lenient,
+};
+use mangle_proto::{Command, MutateCommand, MutationOpKind};
 
 use pb::__buffa::oneof::query_event::Event;
 use pb::__buffa::view::oneof::arg_pattern::Pattern;
@@ -27,6 +30,12 @@ use pb::__buffa::view::oneof::query_request::Query;
 
 /// Default number of facts per streamed FactBatch.
 const DEFAULT_BATCH_SIZE: usize = 4096;
+
+/// Cap on ops per MutateCommand (§7.2): a command is fully materialized
+/// before it is applied (and later, proposed to the log), so an unbounded
+/// client stream must not become an unbounded command. Bulk loads should
+/// batch per request.
+const MAX_MUTATIONS_PER_COMMAND: usize = 1_048_576;
 
 pub struct MangleServiceImpl {
     pub state: AppState,
@@ -46,6 +55,8 @@ fn classify(e: anyhow::Error) -> ConnectError {
         || msg.contains("parse")
         || msg.contains("column ")
         || msg.contains("unsupported")
+        || msg.contains("defined by the program source")
+        || msg.contains("mutation stream")
     {
         ConnectError::invalid_argument(msg)
     } else {
@@ -342,11 +353,20 @@ impl pb::MangleService for MangleServiceImpl {
         _ctx: RequestContext,
         request: ServiceRequest<'_, LoadProgramRequest>,
     ) -> ServiceResult<impl connectrpc::Encodable<ProgramInfo> + Send + use<>> {
-        let name = request.name.to_string();
-        let source = request.source.to_string();
+        // Writes go through the command path (one future log entry).
+        let cmd = Command::LoadProgram(mangle_proto::LoadProgramCommand {
+            name: request.name.to_string(),
+            source: request.source.to_string(),
+        });
         let mut store = self.state.write().unwrap();
-        let info = store.load(&name, &source).map_err(classify)?;
-        Response::ok(program_info(&info.name, info.predicates, None))
+        match store.apply(&cmd).map_err(classify)? {
+            ApplyOutcome::Loaded(info) => {
+                Response::ok(program_info(&info.name, info.predicates, None))
+            }
+            _ => Err(ConnectError::internal(
+                "unexpected apply outcome for load-program command",
+            )),
+        }
     }
 
     async fn get_program(
@@ -371,14 +391,16 @@ impl pb::MangleService for MangleServiceImpl {
         _ctx: RequestContext,
         request: ServiceRequest<'_, pb::DeleteProgramRequest>,
     ) -> ServiceResult<impl connectrpc::Encodable<Empty> + Send + use<>> {
-        let name = request.name.to_string();
+        // Writes go through the command path (one future log entry).
+        let cmd = Command::DeleteProgram(mangle_proto::DeleteProgramCommand {
+            name: request.name.to_string(),
+        });
         let mut store = self.state.write().unwrap();
-        if store.remove(&name) {
-            Response::ok(Empty::default())
-        } else {
-            Err(ConnectError::not_found(format!(
-                "program '{name}' not found"
-            )))
+        match store.apply(&cmd).map_err(classify)? {
+            ApplyOutcome::Deleted => Response::ok(Empty::default()),
+            _ => Err(ConnectError::internal(
+                "unexpected apply outcome for delete-program command",
+            )),
         }
     }
 
@@ -419,54 +441,92 @@ impl MangleServiceImpl {
         mut requests: connectrpc::InboundStream<pb::MutationRequest>,
         insert: bool,
     ) -> ServiceResult<MutationSummary> {
-        let mut num_applied = 0u64;
-        let mut num_skipped = 0u64;
+        // Aggregate the entire client stream into ONE MutateCommand, then
+        // apply it in a single batch: one command = one future log entry =
+        // one IDB recompute, with all-or-nothing semantics (§3.1, §7.2).
+        // An invalid fact anywhere in the stream therefore fails the whole
+        // command rather than partially applying.
+        let mut program: Option<String> = None;
+        let mut ops: Vec<mangle_proto::MutationOp> = Vec::new();
+        let kind = if insert {
+            MutationOpKind::Insert
+        } else {
+            MutationOpKind::Retract
+        };
 
         while let Some(item) = requests.next().await {
             let msg = item.map_err(|e| ConnectError::internal(e.to_string()))?;
-            let program = msg.program().to_string();
+            let msg_program = msg.program().to_string();
+            match &program {
+                None => program = Some(msg_program),
+                Some(p) if p == &msg_program => {}
+                Some(p) => {
+                    return Err(ConnectError::invalid_argument(format!(
+                        "a mutation stream must target a single program (saw '{}' and '{}'); \
+                         split the stream per program",
+                        p, msg_program
+                    )));
+                }
+            }
 
             // Decode (relation, rows) from the zero-copy view. Strings are
             // copied exactly once, into the internal Values.
-            let mut ops: Vec<(String, Vec<Vec<Value>>)> = Vec::new();
-            match msg.payload() {
+            let decoded: Vec<(String, Vec<Vec<Value>>)> = match msg.payload() {
                 Some(Payload::Fact(f)) => {
                     let (relation, tuple) = mangle_proto::fact_from_view(f).map_err(classify)?;
-                    ops.push((relation, vec![tuple]));
+                    vec![(relation, vec![tuple])]
                 }
                 Some(Payload::Batch(b)) => {
                     let relation = b.relation.to_string();
                     let rows = mangle_proto::rows_from_batch_view(b).map_err(classify)?;
-                    ops.push((relation, rows));
+                    vec![(relation, rows)]
                 }
                 None => {
                     return Err(ConnectError::invalid_argument(
                         "payload is required (fact or batch)",
                     ));
                 }
-            }
+            };
 
-            for (relation, rows) in ops {
+            for (relation, rows) in decoded {
                 for row in rows {
-                    let res = if insert {
-                        self.state
-                            .read()
-                            .unwrap()
-                            .insert_fact(&program, &relation, row)
-                    } else {
-                        self.state
-                            .read()
-                            .unwrap()
-                            .retract_fact(&program, &relation, &row)
-                    };
-                    match res {
-                        Ok(()) => num_applied += 1,
-                        Err(e) => return Err(classify(e)),
+                    ops.push(mangle_proto::MutationOp {
+                        kind,
+                        relation: relation.clone(),
+                        tuple: row,
+                    });
+                    if ops.len() > MAX_MUTATIONS_PER_COMMAND {
+                        return Err(ConnectError::resource_exhausted(format!(
+                            "mutation command exceeds the cap of {} ops; \
+                             split into multiple requests",
+                            MAX_MUTATIONS_PER_COMMAND
+                        )));
                     }
                 }
             }
-            num_skipped += 0; // duplicates are not currently reported by the store
         }
+
+        let program = program.ok_or_else(|| {
+            ConnectError::invalid_argument("mutation stream is empty: program is required")
+        })?;
+
+        let cmd = Command::Mutate(MutateCommand { program, ops });
+        let outcome = {
+            let mut store = self.state.write().unwrap();
+            store.apply(&cmd).map_err(classify)?
+        };
+
+        let (num_applied, num_skipped) = match outcome {
+            ApplyOutcome::Mutated {
+                num_applied,
+                num_skipped,
+            } => (num_applied, num_skipped),
+            _ => {
+                return Err(ConnectError::internal(
+                    "unexpected apply outcome for mutate command",
+                ));
+            }
+        };
 
         let summary = if insert {
             MutationSummary {

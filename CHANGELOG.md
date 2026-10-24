@@ -2,6 +2,46 @@
 
 All notable changes in mangle/rust will be documented in this file.
 
+## Unreleased
+
+### 🚀 Features
+
+- **Replicated command path for `mangle-server`** (first step of
+  `DISTRIBUTED_PLAN.md` Phase 0 — the path to a rqlite-style replicated
+  database): all writes now flow through a single serializable command
+  type. New `mangle/command.proto` defines the `Command` envelope
+  (`Mutate`, `LoadProgram`, `DeleteProgram`, `Noop`) with a Rust mirror and
+  proto round-trip conversions in `mangle-proto`; `ProgramStore::apply`
+  is the state machine's single write path. `InsertFacts`/`RetractFacts`
+  client streams aggregate into one command per stream — one atomic
+  all-or-nothing batch with a single IDB recompute — and streams spanning
+  multiple programs are rejected. `MutationSummary.num_skipped` is now
+  reported (duplicate inserts, retracts of absent facts, duplicates within
+  a command), backed by a per-program replicated-fact ledger that will
+  also drive snapshot serialization. Mutation streams are capped at
+  2^20 ops per command. A two-store replay equivalence test
+  (`tests/determinism.rs`) asserts that applying the same pseudo-random
+  command sequence to two independent stores yields identical apply
+  outcomes and identical canonical state — the precondition for Raft
+  replication.
+
+### ⚠️ Breaking Changes
+
+- **Mutations of program-source-defined relations are now rejected** with
+  `invalid_argument` instead of silently losing the write: relations
+  defined by the program source (by facts *or* rules) are re-derived by
+  every IDB recompute, so facts inserted into them vanished on the next
+  mutation and retracted source facts resurrected. Runtime-mutable data
+  must live in EDB relations — declared without facts in the source and
+  seeded via the mutation API or EDB source files.
+
+### 🐛 Bug Fixes
+
+- **`ProgramStore::load` returned predicate lists in HashMap iteration
+  order**, so two identical servers could answer `LoadProgram`/
+  `ListPrograms` with differently-ordered predicates. Predicate lists are
+  now sorted (found by the new determinism tests).
+
 ## [0.10.0] - 2026-10-24
 
 ### ⚠️ Breaking Changes

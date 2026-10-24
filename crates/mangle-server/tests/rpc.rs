@@ -309,6 +309,121 @@ async fn insert_and_retract_facts() {
 }
 
 #[tokio::test]
+async fn mutation_stream_reports_skipped_duplicates() {
+    let (url, _) = spawn_server().await;
+    let c = client(&url);
+
+    c.load_program(pb::LoadProgramRequest {
+        name: "test".into(),
+        source: "q(X) :- p(X).".into(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    // The same fact twice in one stream: one applied, one skipped.
+    let summary = c
+        .insert_facts(connectrpc::stream_iter(vec![
+            mutation_fact("test", "p", &[Value::Number(1)]),
+            mutation_fact("test", "p", &[Value::Number(1)]),
+        ]))
+        .await
+        .unwrap()
+        .into_owned();
+    assert_eq!(summary.num_inserted, 1);
+    assert_eq!(summary.num_skipped, 1);
+
+    // Retract of an absent fact is a non-error no-op, counted skipped.
+    let summary = c
+        .retract_facts(connectrpc::stream_iter(vec![mutation_fact(
+            "test",
+            "p",
+            &[Value::Number(42)],
+        )]))
+        .await
+        .unwrap()
+        .into_owned();
+    assert_eq!(summary.num_retracted, 0);
+    assert_eq!(summary.num_skipped, 1);
+}
+
+#[tokio::test]
+async fn mutation_stream_mixed_programs_is_rejected() {
+    let (url, _) = spawn_server().await;
+    let c = client(&url);
+
+    for name in ["a", "b"] {
+        c.load_program(pb::LoadProgramRequest {
+            name: name.into(),
+            source: "q(X) :- p(X).".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    }
+
+    // One command per stream (§7.2): a stream spanning two programs is a
+    // client error, and nothing is applied.
+    let err = c
+        .insert_facts(connectrpc::stream_iter(vec![
+            mutation_fact("a", "p", &[Value::Number(1)]),
+            mutation_fact("b", "p", &[Value::Number(2)]),
+        ]))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, connectrpc::ErrorCode::InvalidArgument);
+    assert!(err.message.as_deref().is_some_and(|m| m.contains("single program")));
+
+    for name in ["a", "b"] {
+        let stream = c
+            .query(query_request(name, "q(X)", true, 0, 0))
+            .await
+            .unwrap();
+        let (_, total) = collect_stream(stream).await;
+        assert_eq!(total, 0, "nothing must be applied for program {name}");
+    }
+}
+
+#[tokio::test]
+async fn mutation_of_source_defined_relation_is_rejected() {
+    let (url, _) = spawn_server().await;
+    let c = client(&url);
+
+    // `p` is defined by a fact in the program source: mutations cannot
+    // persist (recompute re-derives p(1)), so they are rejected instead
+    // of silently lost.
+    c.load_program(pb::LoadProgramRequest {
+        name: "test".into(),
+        source: "p(1). q(X) :- p(X).".into(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    let err = c
+        .insert_facts(connectrpc::stream_iter(vec![mutation_fact(
+            "test",
+            "p",
+            &[Value::Number(3)],
+        )]))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, connectrpc::ErrorCode::InvalidArgument);
+    assert!(err
+        .message
+        .as_deref()
+        .is_some_and(|m| m.contains("defined by the program source")));
+
+    // State unchanged.
+    let stream = c
+        .query(query_request("test", "p(X)", true, 0, 0))
+        .await
+        .unwrap();
+    let (_, total) = collect_stream(stream).await;
+    assert_eq!(total, 1);
+}
+
+#[tokio::test]
 async fn program_management() {
     let (url, _) = spawn_server().await;
     let c = client(&url);

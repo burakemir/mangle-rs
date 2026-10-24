@@ -12,7 +12,11 @@ fn main() {
     }
 
     connectrpc_build::Config::new()
-        .files(&["proto/mangle/value.proto", "proto/mangle/service.proto"])
+        .files(&[
+            "proto/mangle/value.proto",
+            "proto/mangle/service.proto",
+            "proto/mangle/command.proto",
+        ])
         .includes(&["proto/"])
         .include_file("_connectrpc.rs")
         .compile()

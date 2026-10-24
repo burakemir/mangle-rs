@@ -1,0 +1,62 @@
+// Replicated command envelope: the unit of change proposed to the
+// replicated log (see DISTRIBUTED_PLAN.md §3.1). Every write to the
+// program registry or to a program's EDB facts flows through a Command;
+// applying the same command sequence to two nodes must produce identical
+// state.
+syntax = "proto3";
+
+package mangle;
+
+import "mangle/value.proto";
+
+message Command {
+  enum Type {
+    COMMAND_TYPE_UNKNOWN = 0;
+    COMMAND_TYPE_MUTATE = 1;
+    COMMAND_TYPE_LOAD_PROGRAM = 2;
+    COMMAND_TYPE_DELETE_PROGRAM = 3;
+    COMMAND_TYPE_NOOP = 4;
+  }
+  Type type = 1;
+  oneof payload {
+    MutateCommand mutate = 2;
+    LoadProgramCommand load_program = 3;
+    DeleteProgramCommand delete_program = 4;
+    NoopCommand noop = 5;
+  }
+}
+
+// Inserts and/or retracts of facts in one program, applied atomically:
+// one command = one log entry = one IDB recompute. A client's entire
+// mutation stream collapses into a single MutateCommand. Servers enforce
+// a cap on ops per command; bulk loads should use batch payloads.
+message MutateCommand {
+  string program = 1;
+  repeated MutationOp ops = 2;
+}
+
+enum MutationOpKind {
+  MUTATION_OP_UNKNOWN = 0;
+  MUTATION_OP_INSERT = 1;
+  MUTATION_OP_RETRACT = 2;
+}
+
+message MutationOp {
+  MutationOpKind op = 1;
+  string relation = 2;
+  // One value per column; length == arity.
+  repeated Value tuple = 3;
+}
+
+message LoadProgramCommand {
+  string name = 1;
+  string source = 2;
+}
+
+message DeleteProgramCommand {
+  string name = 1;
+}
+
+// No-op entry: used as a commit barrier for STRONG reads (a read that
+// must observe everything committed before it).
+message NoopCommand {}

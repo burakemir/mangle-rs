@@ -430,29 +430,45 @@ low-latency LAN traffic separate from the client-facing TLS port.
 
 ### Phase 0 — FSM extraction (no consensus, ~no behavior change)
 
+**Status: implemented** (JSON HTTP API removal pre-step: 0.10.0).
+
 **Goal: make `ProgramStore` a deterministic command processor and fix the
 durability-ordering bug conceptually (the bug itself is fixed by Phase 1).**
 
-1. Define `Command` in `mangle-proto` (`command.proto` in the mangle package,
-   reusing `Value`/`FactBatch`) and a Rust mirror enum.
-2. Implement `ProgramStore::apply(&mut self, cmd) -> ApplyResult`;
-   route `MangleServiceImpl` writes through it (still direct, no Raft yet).
-   Aggregate `InsertFacts`/`RetractFacts` streams into one `MutateCommand`
-   and apply via `Database::batch()`. The replicated-fact ledger (§3.6)
-   becomes the source for `MutationSummary`'s `num_skipped` accounting
-   (retract-of-absent is a non-error no-op, §7.4).
-4. Make `LoadProgram`/`DeleteProgram` go through `apply` too. Mark
-   `ReloadProgram`/`ReloadAll` for deprecation on the replicated path (they
-   become errors in Phase 1; keep them working until then).
-5. Determinism audit + two-store replay equivalence test (§4.1).
+1. ✅ Define `Command` in `mangle-proto` (`command.proto` in the mangle
+   package, reusing `Value`) and a Rust mirror enum with proto
+   round-trip conversions.
+2. ✅ Implement `ProgramStore::apply(&mut self, cmd) -> ApplyOutcome`;
+   `MangleServiceImpl` writes route through it. `InsertFacts`/
+   `RetractFacts` streams aggregate into one `MutateCommand` (single-program
+   streams only) applied via `Database::batch()`. The replicated-fact
+   ledger (§3.6) is in place and backs `MutationSummary`'s `num_skipped`
+   accounting (retract-of-absent is a non-error no-op, §7.4); streams are
+   capped at `MAX_MUTATIONS_PER_COMMAND` ops (§7.2).
+3. ✅ `LoadProgram`/`DeleteProgram` go through `apply`. `ReloadProgram`/
+   `ReloadAll` still work in 0.10.x (local admin ops); they error on the
+   replicated path from Phase 1.
+4. ✅ Determinism audit + two-store replay equivalence test (§4.1):
+   `tests/determinism.rs` replays 400+200 pseudo-random commands against
+   two independent stores, asserting per-command outcome equality and
+   canonical-state equality. **Two findings, both fixed:**
+   - `ProgramStore::load` returned predicate lists in HashMap iteration
+     order — two identical stores produced different `LoadProgram`
+     responses. Predicate lists are now sorted.
+   - **Mutations of source-defined relations silently lost data**: relations
+     defined by the program source (facts *or* rules) are re-derived by
+     every IDB recompute, so inserts into them vanished on the next
+     mutation and retracts resurrected. The command path now rejects such
+     mutations up front (`invalid_argument`, whole command fails
+     atomically) instead of losing the write — a deliberate behavior
+     change: runtime-mutable data must live in EDB relations (declared
+     without facts in source, seeded via commands or EDB source files).
 
-**Pre-step (done)**: the deprecated JSON HTTP API was removed ahead of this
-work — `handlers.rs` deleted, `AppState` moved to `store.rs`, the app now
-mounts only the Connect RPC service, and `serde`/`serde_json` dropped from
-the crate's dependencies. The Connect RPC API is the sole client API.
-
-**Deliverable**: all mutations flow through one serializable command type;
-existing single-node behavior unchanged; determinism test in CI.
+**Deliverable** (met): all mutations flow through one serializable command
+type, applied atomically with deterministic outcomes; the two-store replay
+equivalence test is in CI. The one intended behavior change is the
+rejection of mutations to source-defined relations (previously silently
+lost, see finding above).
 
 ### Phase 1 — WAL + single-node Raft (openraft, cluster of one)
 

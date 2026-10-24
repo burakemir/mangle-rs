@@ -276,6 +276,21 @@ impl Database {
         Ok(state.store.relation_names())
     }
 
+    /// Whether facts of this relation can be mutated through the API.
+    ///
+    /// Relations defined by the program source — by rules *or* by facts,
+    /// i.e. IDB relations — are re-derived from the source on every
+    /// recompute, so mutations to them cannot persist. (They were
+    /// previously accepted and silently lost on the next recompute.)
+    /// EDB relations and relations unknown to the program are mutable.
+    pub fn is_mutable_relation(&self, name: &str) -> bool {
+        let state = self.state.read().map_err(|_| anyhow!("lock poisoned"));
+        match state {
+            Ok(state) => !state.idb_relations.contains(name),
+            Err(_) => false,
+        }
+    }
+
     /// Extract pushdown predicates from the compiled program for all EDB sources.
     ///
     /// This compiles the program source, analyzes the physical plan, and returns
