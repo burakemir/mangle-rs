@@ -13,6 +13,9 @@ use std::sync::Arc;
 use crate::mutations::MutationLog;
 use crate::query::{ParsedQuery, filter_tuples, parse_query};
 
+/// Shared handle to the [`ProgramStore`] used by the RPC service.
+pub type AppState = std::sync::Arc<std::sync::RwLock<ProgramStore>>;
+
 /// Metadata about a loaded program.
 pub struct StoredProgram {
     pub source: String,

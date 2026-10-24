@@ -1,8 +1,7 @@
 //! Connect RPC implementation of `MangleService`, backed by `ProgramStore`.
 //!
 //! See `RPC_DESIGN.md` in this crate for the design. The JSON HTTP handlers
-//! in `handlers.rs` are the deprecated predecessor of this API and will be
-//! removed one release after the RPC API ships.
+//! that preceded this API have been removed.
 
 use anyhow::Result;
 use buffa::Enumeration as _;
@@ -18,9 +17,8 @@ use pb::{
 };
 use tokio_stream::StreamExt as _;
 
-use crate::handlers::AppState;
 use crate::query::QueryArg;
-use crate::store::{ProgramStore, eval_source_relations, parse_query_lenient};
+use crate::store::{AppState, ProgramStore, eval_source_relations, parse_query_lenient};
 
 use pb::__buffa::oneof::query_event::Event;
 use pb::__buffa::view::oneof::arg_pattern::Pattern;

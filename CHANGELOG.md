@@ -2,7 +2,20 @@
 
 All notable changes in mangle/rust will be documented in this file.
 
-## Unreleased
+## [0.10.0] - 2026-10-24
+
+### ⚠️ Breaking Changes
+
+- **The deprecated JSON HTTP API of `mangle-server` has been removed**,
+  as announced in the 0.9.0 release notes: the `/query`, `/eval`,
+  `/programs`, `/programs/{name}` (GET/DELETE), `/programs/{name}/reload`,
+  `/programs/{name}/insert`, `/programs/{name}/retract` and
+  `/admin/reload-all` endpoints are gone. The Connect RPC API
+  (`mangle.MangleService`, serving Connect, gRPC and gRPC-Web on one port)
+  is the sole client API; the Connect JSON codec works with `curl` and
+  standard tooling for simple needs. `AppState` moved from `handlers.rs`
+  (deleted) to `store.rs` for library users. `serde`/`serde_json` are no
+  longer dependencies of `mangle-server`.
 
 ### 🐛 Bug Fixes
 
@@ -135,6 +148,13 @@ All notable changes in mangle/rust will be documented in this file.
   mangle-go's builtin function-type table. `fn:tuple` is documented as
   acting like identity (one argument), a pair (two) or nested pairs
   (more), matching mangle-go.
+
+### 📖 Documentation
+
+- Add `DISTRIBUTED_PLAN.md`: gap analysis and phased plan for turning
+  `mangle-server` into a rqlite-style replicated database (Raft consensus
+  via openraft, WAL on redb, command envelope, snapshots, consistency
+  levels), modeled on rqlite's architecture.
 
 ## [0.9.2] - 2026-10-03
 

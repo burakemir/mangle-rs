@@ -1,8 +1,7 @@
 use mangle_server::app::build_app;
 use mangle_server::config::ServerConfig;
-use mangle_server::handlers::AppState;
 use mangle_server::mutations::MutationLog;
-use mangle_server::store::ProgramStore;
+use mangle_server::store::{AppState, ProgramStore};
 use std::fs;
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -72,7 +71,6 @@ async fn main() {
     let addr = format!("0.0.0.0:{}", config.port);
     eprintln!("mangle-server listening on {addr}");
     eprintln!("  Connect RPC API: /mangle.MangleService/ (Connect, gRPC, gRPC-Web)");
-    eprintln!("  deprecated JSON HTTP API: /query, /programs, /eval");
     eprintln!("  config: {}", config.config_path.display());
     if let Some(ref dir) = config.programs_dir {
         eprintln!("  programs-dir: {}", dir.display());

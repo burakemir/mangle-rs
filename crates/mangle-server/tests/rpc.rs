@@ -1,5 +1,4 @@
-//! End-to-end tests for the Connect RPC API and the deprecated JSON API
-//! coexisting on one server (see RPC_DESIGN.md).
+//! End-to-end tests for the Connect RPC API (see RPC_DESIGN.md).
 
 use std::sync::{Arc, RwLock};
 
@@ -9,8 +8,7 @@ use mangle_proto::pb::mangle as pb;
 use mangle_proto::pb::mangle::MangleServiceClient;
 use mangle_proto::{rows_from_batch_view, value_to_proto};
 use mangle_server::app::build_app;
-use mangle_server::handlers::AppState;
-use mangle_server::store::ProgramStore;
+use mangle_server::store::{AppState, ProgramStore};
 
 use pb::__buffa::view::oneof::query_event::Event;
 
@@ -366,41 +364,44 @@ async fn program_management() {
 }
 
 #[tokio::test]
-async fn json_api_coexists_and_is_deprecated() {
+async fn json_api_routes_are_gone() {
     use tower::ServiceExt;
 
     let state: AppState = Arc::new(RwLock::new(ProgramStore::new()));
     state.write().unwrap().load("routes", SOURCE).unwrap();
     let app = build_app(state);
 
-    let response = app
-        .oneshot(
-            axum::http::Request::builder()
-                .method("POST")
-                .uri("/query")
-                .header("content-type", "application/json")
-                .body(axum::body::Body::from(
-                    serde_json::json!({"program": "routes", "query": "route(M, P, H)"}).to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), 200);
-    assert_eq!(
-        response.headers().get("deprecation").unwrap(),
-        "true",
-        "deprecated JSON API must send Deprecation header (RFC 8594)"
-    );
-    assert!(
-        response.headers().get("sunset").is_some(),
-        "deprecated JSON API must send Sunset header"
-    );
-
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["results"].as_array().unwrap().len(), 3);
+    for (method, uri) in [
+        ("POST", "/query"),
+        ("POST", "/eval"),
+        ("GET", "/programs"),
+        ("POST", "/programs"),
+        ("GET", "/programs/routes"),
+        ("DELETE", "/programs/routes"),
+        ("POST", "/programs/routes/reload"),
+        ("POST", "/programs/routes/insert"),
+        ("POST", "/programs/routes/retract"),
+        ("POST", "/admin/reload-all"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // The Connect fallback answers bare requests with 415 or 404;
+        // either way, the old JSON handlers are gone (no 200s, no Deprecation
+        // headers).
+        assert!(
+            !response.status().is_success(),
+            "removed JSON route {method} {uri} must not succeed, got {}",
+            response.status()
+        );
+        assert!(response.headers().get("deprecation").is_none());
+    }
 }

@@ -1,6 +1,7 @@
 # mangle-server RPC Protocol Design (Connect RPC / Protobuf)
 
-Status: proposal
+Status: implemented; the JSON HTTP API was removed after its announced
+  deprecation window (see §9 item 6)
 Author: design discussion, 2025
 Scope: replace the JSON-over-HTTP interface of `mangle-server` with Connect RPC
 ([connect-rust](https://github.com/connectrpc/connect-rust)), with explicit
@@ -648,6 +649,10 @@ Steps, in dependency order:
    and `Sunset` response header and log a deprecation warning, but require
    no flag or config change, so existing clients keep working unchanged
    during the migration window.
+
+   **Update:** the removal has been carried out — `handlers.rs` is deleted,
+   `AppState` lives in `store.rs`, and the app mounts only the Connect RPC
+   service. The Connect RPC API is the sole client API.
 
 Non-goals for v1: compound columns in packed columnar form (use `ANY`),
 dictionary encoding for string columns, server-side descriptor verification,
