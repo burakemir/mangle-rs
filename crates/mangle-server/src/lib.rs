@@ -10,5 +10,6 @@ pub mod config;
 pub mod fsm;
 pub mod mutations;
 pub mod query;
+pub mod raft_service;
 pub mod rpc;
 pub mod store;

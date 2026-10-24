@@ -16,6 +16,7 @@ fn main() {
             "proto/mangle/value.proto",
             "proto/mangle/service.proto",
             "proto/mangle/command.proto",
+            "proto/mangle/raft.proto",
         ])
         .includes(&["proto/"])
         .include_file("_connectrpc.rs")

@@ -24,6 +24,37 @@ cargo run -p mangle-server -- [OPTIONS]
 | `--port <PORT>` | `8090` | Port to listen on |
 | `--programs-dir <DIR>` | none | Directory of `.mg` files to load on startup (program name = file stem) |
 
+### Replicated (Raft) mode
+
+Setting `raft_dir` enables replicated mode: every write goes through Raft
+consensus (WAL fsync before the RPC responds), and any node serves reads
+(local state, eventually consistent). Cluster configuration keys:
+
+| Key | Description |
+|-----|-------------|
+| `raft_dir(Path)` | Raft data directory (WAL + snapshots); enables replicated mode |
+| `node_id(Id)` | Stable node identity; must not change across restarts (default 1) |
+| `raft_bootstrap(1)` | Bootstrap a new cluster, exactly once, on a fresh `raft_dir` |
+| `raft_addr(Addr)` | Address other nodes use to reach this node (default `127.0.0.1:{port}`) |
+| `raft_bootstrap_node(Id, Addr)` | Additional members of the cluster being bootstrapped |
+| `raft_join(Addr)` | Address of an existing node to join through (fresh `raft_dir`) |
+
+A 3-node cluster, statically bootstrapped:
+
+```text
+# node 1's config:
+config_schema.raft_dir("/data/raft").
+config_schema.raft_bootstrap(1).
+config_schema.raft_bootstrap_node(2, "10.0.0.2:8090").
+config_schema.raft_bootstrap_node(3, "10.0.0.3:8090").
+
+# nodes 2 and 3: set raft_dir and node_id, start them; they join when
+# node 1 bootstraps. (Or skip static bootstrap and use raft_join instead.)
+```
+
+Writes must target the leader; followers answer with `failed_precondition`
+and the leader's address. `NodeStatus` reports the current leader.
+
 ### Example
 
 ```bash

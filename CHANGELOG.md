@@ -6,6 +6,22 @@ All notable changes in mangle/rust will be documented in this file.
 
 ### 🚀 Features
 
+- **Multi-node Raft consensus for `mangle-server`, Phase 2 of the
+  distributed plan**: a 3-node cluster with replicated, linearizable
+  writes. New `mangle.RaftService` (internal, same port as the client
+  API) carries Vote/AppendEntries/InstallSnapshot between nodes over the
+  existing ConnectRPC stack; node addresses live in the Raft membership
+  (no separate peer table). Cluster formation: static multi-node
+  bootstrap (`config_schema.raft_bootstrap_node(Id, Addr)` on the
+  bootstrapping node) or dynamic join via the new `Join` admin RPC
+  (version-checked; mixed-version clusters rejected) with
+  `config_schema.raft_join(Addr)`. Follower writes fail with
+  `failed_precondition` and an explicit leader hint; `NodeStatus`
+  reports id, leadership, term, applied/log indexes and membership;
+  `RemoveNode` removes a node from the cluster. Leader failover,
+  restart catch-up and join-time state transfer are covered by the new
+  cluster tests (real TCP) and verified against real binaries.
+
 - **Replicated (Raft) mode for `mangle-server`, Phase 1 of the distributed
   plan: single-node WAL durability** (opt-in). New crates `mangle-wal`
   (openraft log + vote store on redb, fsync per commit — the write-ahead

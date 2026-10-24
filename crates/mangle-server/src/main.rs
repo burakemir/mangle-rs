@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::RwLock;
 
 use mangle_proto::{Command, LoadProgramCommand, MutateCommand};
-use mangle_raft::Engine;
+use mangle_raft::{ConnectNetworkFactory, Engine};
 use mangle_server::app::build_app;
 use mangle_server::config::ServerConfig;
 use mangle_server::fsm::{FsmStore, mutations_to_ops};
@@ -48,13 +48,17 @@ async fn main() {
     //
     // Startup: restore the FSM from the snapshot on disk (if any), open
     // the WAL, start the Raft engine (which replays committed-but-
-    // unapplied log entries), then either bootstrap a fresh cluster
-    // (importing programs_dir and migrating any legacy mutation logs as
-    // commands) or wait for the node to become leader.
+    // unapplied log entries), then bootstrap a fresh cluster (importing
+    // programs_dir and migrating any legacy mutation logs as commands),
+    // join an existing one, or resume as part of one.
+    let mut join_target: Option<String> = None;
     let engine = match config.raft_dir {
         Some(ref raft_dir) => {
             match open_engine(state.clone(), &config, raft_dir).await {
-                Ok(engine) => Some(Arc::new(engine)),
+                Ok((engine, join)) => {
+                    join_target = join;
+                    Some(Arc::new(engine))
+                }
                 Err(e) => {
                     eprintln!("Error opening raft node: {}", e);
                     std::process::exit(1);
@@ -94,18 +98,31 @@ async fn main() {
         eprintln!("  persist-edb: {:?}", config.persist_edb);
     }
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+
+    // Joining must happen after the listener is up: the leader starts
+    // replicating to us as soon as we ask to join.
+    if let (Some(engine), Some(target)) = (&engine, &join_target) {
+        if let Err(e) = join_cluster(engine, target, &config).await {
+            eprintln!("Error joining cluster: {}", e);
+            std::process::exit(1);
+        }
+    }
+
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal(engine))
         .await
         .unwrap();
 }
 
-/// Open the raft node: FSM restore → WAL → engine → bootstrap or replay.
+/// Open the raft node: FSM restore → WAL → engine → bootstrap / join /
+/// resume. Returns the engine and, for the join path, the target address
+/// (the join RPC runs after the listener is bound).
+#[allow(clippy::type_complexity)]
 async fn open_engine(
     state: AppState,
     config: &ServerConfig,
     raft_dir: &std::path::Path,
-) -> anyhow::Result<Engine> {
+) -> anyhow::Result<(Engine, Option<String>)> {
     let fsm = FsmStore::new(state.clone(), raft_dir);
     let restored = fsm.restore()?;
     if restored {
@@ -119,48 +136,115 @@ async fn open_engine(
     let (first, last) = log.log_range()?;
     let fresh = first.is_none() && !restored;
 
-    let engine = Engine::new(
+    let engine = Engine::with_network(
         config.node_id,
         Engine::raft_config(8192),
+        ConnectNetworkFactory::new(),
         log,
         fsm,
     )
     .await?;
 
     if fresh {
-        if !config.raft_bootstrap {
-            anyhow::bail!(
-                "raft dir {} has no cluster state; set config_schema.raft_bootstrap(1) once \
-                 to bootstrap a new cluster",
-                raft_dir.display()
-            );
+        if let Some(target) = &config.raft_join {
+            // Join an existing cluster (after the listener is bound).
+            eprintln!("[raft] fresh node; joining cluster via {target}");
+            return Ok((engine, Some(target.clone())));
         }
-        let addr = format!("127.0.0.1:{}", config.port);
-        engine.bootstrap_single(&addr).await?;
-        wait_for_leader(&engine).await?;
-        eprintln!("[raft] bootstrapped single-node cluster (node {})", config.node_id);
+        if !config.raft_bootstrap {
+            // A fresh node with neither bootstrap nor join instructions
+            // waits to be contacted by a bootstrap node's cluster
+            // (multi-node bootstrap: every non-initializing node starts
+            // like this). This also silently hangs for a misconfigured
+            // node — hence the warning.
+            eprintln!(
+                "[raft] fresh raft dir and no bootstrap/join config; starting uninitialized \
+                 and waiting to be contacted by a cluster"
+            );
+            return Ok((engine, None));
+        }
+
+        // Bootstrap: this node plus any declared bootstrap nodes.
+        let raft_addr = config
+            .raft_addr
+            .clone()
+            .unwrap_or_else(|| format!("127.0.0.1:{}", config.port));
+        let mut members = std::collections::BTreeMap::new();
+        members.insert(config.node_id, openraft::BasicNode { addr: raft_addr });
+        for (id, addr) in &config.raft_bootstrap_nodes {
+            members.insert(*id, openraft::BasicNode { addr: addr.clone() });
+        }
+        let n_members = members.len();
+        engine.bootstrap(members).await?;
+
+        if n_members == 1 {
+            wait_for_leader(&engine).await?;
+        }
+        eprintln!("[raft] bootstrapped cluster with {n_members} node(s)");
 
         // Import programs_dir as LoadProgram commands: in replicated mode
         // the registry lives in the log, and programs_dir is consulted
         // exactly once, here (DISTRIBUTED_PLAN.md §3.1).
-        import_programs_dir(&engine, config).await?;
-        // Migrate any legacy MutationLog data as Mutate commands.
-        migrate_mutation_logs(&engine, config).await?;
-    } else {
-        if config.raft_bootstrap {
-            anyhow::bail!(
-                "raft dir {} already holds cluster state; remove raft_bootstrap(1) from \
-                 the config",
-                raft_dir.display()
-            );
+        if n_members == 1 {
+            import_programs_dir(&engine, config).await?;
+            // Migrate any legacy MutationLog data as Mutate commands.
+            migrate_mutation_logs(&engine, config).await?;
         }
-        eprintln!(
-            "[raft] log entries: first={:?} last={:?}; waiting for leader",
-            first, last
-        );
-        wait_for_leader(&engine).await?;
+        return Ok((engine, None));
     }
-    Ok(engine)
+
+    if config.raft_bootstrap {
+        anyhow::bail!(
+            "raft dir {} already holds cluster state; remove raft_bootstrap(1) from \
+             the config",
+            raft_dir.display()
+        );
+    }
+    eprintln!(
+        "[raft] log entries: first={:?} last={:?}; resuming",
+        first, last
+    );
+    Ok((engine, None))
+}
+
+/// Ask the node at `target` to add us to its cluster, then wait until we
+/// have caught up (applied at least one entry and are part of the
+/// membership as a voter).
+async fn join_cluster(engine: &Engine, target: &str, config: &ServerConfig) -> anyhow::Result<()> {
+    use mangle_proto::pb::mangle::MangleServiceClient;
+
+    let client = MangleServiceClient::new(
+        connectrpc::client::HttpClient::plaintext(),
+        connectrpc::client::ClientConfig::new(format!("http://{target}").parse()?),
+    );
+    let resp = client
+        .join(mangle_proto::pb::mangle::JoinRequest {
+            node_id: config.node_id,
+            addr: config
+                .raft_addr
+                .clone()
+                .unwrap_or_else(|| format!("127.0.0.1:{}", config.port)),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            ..Default::default()
+        })
+        .await?
+        .into_owned();
+    eprintln!("[raft] joined cluster; leader is node {}", resp.leader_id);
+
+    // Wait for the snapshot/log replication to bring us up to date.
+    wait_for_applied_ge(engine, 1).await?;
+    Ok(())
+}
+
+async fn wait_for_applied_ge(engine: &Engine, index: u64) -> anyhow::Result<()> {
+    for _ in 0..600 {
+        let (_, applied, _) = engine.progress();
+        if applied >= index {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    anyhow::bail!("node did not catch up within 30s")
 }
 
 async fn wait_for_leader(engine: &Engine) -> anyhow::Result<()> {
@@ -198,7 +282,7 @@ async fn import_programs_dir(engine: &Engine, config: &ServerConfig) -> anyhow::
         match engine.write(cmd).await {
             Ok((_, Ok(_))) => eprintln!("[raft] imported program {}", path.display()),
             Ok((_, Err(e))) => eprintln!("[raft] failed to import {}: {}", path.display(), e),
-            Err(e) => return Err(e),
+            Err(e) => return Err(anyhow::anyhow!("{e}")),
         }
     }
     Ok(())
@@ -236,7 +320,7 @@ async fn migrate_mutation_logs(engine: &Engine, config: &ServerConfig) -> anyhow
                     e
                 ));
             }
-            Err(e) => return Err(e),
+            Err(e) => return Err(anyhow::anyhow!("{e}")),
         }
         fs::rename(&path, path.with_extension("mg.migrated"))?;
         eprintln!(

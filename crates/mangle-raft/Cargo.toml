@@ -13,8 +13,10 @@ readme = "README.md"
 mangle-proto.workspace = true
 mangle-wal.workspace = true
 openraft.workspace = true
+connectrpc = { version = "0.9", features = ["client"] }
 tokio = { version = "1", features = ["full"] }
 anyhow.workspace = true
+buffa = "0.9"
 
 [dev-dependencies]
 tempfile.workspace = true

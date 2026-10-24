@@ -516,25 +516,43 @@ default (see Phase 2 wrap-up).
 
 ### Phase 2 — Multi-node consensus
 
+**Status: implemented.**
+
 **Goal: a 3-node replicated cluster.**
 
-1. `RaftService` proto + ConnectRPC implementation; openraft `Network`
-   over the Connect client; chunked `InstallSnapshot`.
-2. Leader forwarding: non-leader writes fail with leader hint; opt-in
-   transparent forward.
-3. Membership: `--join`, `RemoveNode`/`Join` admin RPCs via
-   `change_membership`; node IDs in `NodeStatus`. Joining nodes must run the
-   same minor release (§7.5) — the join handshake checks version
-   compatibility and rejects mismatches.
-3. Tests (rqlite's `store_multi_test.go` is the checklist): leader election
-   during write traffic, partitioned follower catch-up, snapshot transfer to a
-   rejoining node, remove-leader, restart-of-everything, simultaneous
-   two-node failure (quorum loss → cluster unavailable, no corruption),
-   membership change while writing. Plus: calling `ReloadProgram` on any
-   node returns an error and does not mutate state.
+1. ✅ `raft.proto` (`mangle.RaftService`: Vote / AppendEntries /
+   InstallSnapshot) + ConnectRPC implementation on the main port
+   (`RaftServiceImpl`); openraft `RaftNetwork` over a ConnectRPC client
+   (`mangle-raft` `ConnectNetwork`). Node addresses come from the Raft
+   membership (`BasicNode.addr`) — no separate peer table. Entry and
+   membership payloads ride as mangle-wal-coded bytes: one canonical
+   serialization. RPC-level failures travel in-band (response `error`
+   field) and map to retryable `Unreachable` on the sender.
+2. ✅ Leader forwarding: follower writes fail with `failed_precondition`
+   and a leader hint ("leader is node 3 at 127.0.0.1:18103"). Transparent
+   server-side forwarding is deferred (clients redirect on the hint).
+3. ✅ Membership: static multi-node bootstrap
+   (`raft_bootstrap_node(Id, Addr)` on the bootstrapping node; other
+   nodes start fresh and wait to be contacted) and dynamic join — the
+   `Join` admin RPC (version-checked per §7.5) adds the caller as learner
+   then voter; `RemoveNode` via `change_membership`; `NodeStatus`
+   reports membership. New config keys: `raft_addr`, `raft_bootstrap_node`,
+   `raft_join`.
+4. ✅ Tests (`tests/cluster.rs`, real TCP): 3-node bootstrap, leader
+   election, replicated writes visible on all nodes; follower writes
+   rejected with hint; leader failover (new leader elected, writes
+   continue, old leader restarted and catches up); join flow (a new node
+   joins via RPC, receives state, becomes voter). `ReloadProgram` errors
+   on any node (Phase 1 tests). Verified against real binaries:
+   bootstrap → replicate → kill -9 leader → failover → restart → WAL
+   replay catch-up.
 
-**Deliverable**: 3-node mangle cluster, writes linearizable via consensus,
-reads default to NONE.
+**Deliverable** (met): 3-node mangle cluster, writes linearizable via
+consensus, reads default to NONE (any node). Deferred from this phase:
+transparent write forwarding, membership-change-under-load tests,
+partitioned-follower catch-up via snapshot transfer (the chunked snapshot
+path is exercised only via join), remove-leader tests, quorum-loss manual
+recovery docs.
 
 ### Phase 3 — Consistency levels & client ergonomics
 

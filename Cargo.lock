@@ -3658,6 +3658,8 @@ name = "mangle-raft"
 version = "0.10.0"
 dependencies = [
  "anyhow",
+ "buffa",
+ "connectrpc",
  "mangle-proto",
  "mangle-wal",
  "openraft",

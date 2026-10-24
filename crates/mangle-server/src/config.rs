@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
 use anyhow::{Result, anyhow};
@@ -18,8 +18,15 @@ pub struct ServerConfig {
     pub raft_dir: Option<PathBuf>,
     /// Stable Raft node identity (must not change across restarts).
     pub node_id: u64,
-    /// Bootstrap a new single-node cluster on a fresh raft dir.
+    /// Bootstrap a new cluster on a fresh raft dir.
     pub raft_bootstrap: bool,
+    /// Advertised address other nodes use to reach this node.
+    pub raft_addr: Option<String>,
+    /// Additional members when bootstrapping a multi-node cluster
+    /// (id → advertised address); all bootstrap nodes declare the same set.
+    pub raft_bootstrap_nodes: BTreeMap<u64, String>,
+    /// Address of an existing node to join through (fresh raft dir).
+    pub raft_join: Option<String>,
     pub config_path: PathBuf,
 }
 
@@ -72,6 +79,21 @@ impl ServerConfig {
         let raft_bootstrap =
             query_single_number(config_source, "config_schema.raft_bootstrap(X)")?.unwrap_or(0)
                 != 0;
+        let raft_addr =
+            query_single_string(config_source, "config_schema.raft_addr(X)")?;
+        let raft_join = query_single_string(config_source, "config_schema.raft_join(X)")?;
+
+        // raft_bootstrap_node(Id, Addr): pairs of (node id, address).
+        let mut raft_bootstrap_nodes = BTreeMap::new();
+        let rows = eval_source_multi(
+            &[CONFIG_SCHEMA, config_source],
+            Some("config_schema.raft_bootstrap_node(Id, Addr)"),
+        )?;
+        for row in rows {
+            if let [Value::Number(id), Value::String(addr) | Value::Name(addr)] = row.as_slice() {
+                raft_bootstrap_nodes.insert(*id as u64, addr.clone());
+            }
+        }
 
         Ok(ServerConfig {
             port,
@@ -82,6 +104,9 @@ impl ServerConfig {
             raft_dir,
             node_id,
             raft_bootstrap,
+            raft_addr,
+            raft_bootstrap_nodes,
+            raft_join,
             config_path: PathBuf::new(),
         })
     }

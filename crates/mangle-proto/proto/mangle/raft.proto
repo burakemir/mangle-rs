@@ -1,0 +1,87 @@
+// Inter-node Raft transport (DISTRIBUTED_PLAN.md §3.5). Internal
+// node-to-node protocol, mounted alongside MangleService on the same
+// port. The envelope fields (votes, log ids, offsets) are structured;
+// entries and memberships ride as bytes encoded by mangle-wal's codec,
+// keeping one canonical serialization.
+syntax = "proto3";
+
+package mangle;
+
+import "mangle/service.proto";
+
+// A Raft vote: (term, node_id[, committed]).
+message RaftVote {
+  uint64 term = 1;
+  uint64 node_id = 2;
+  bool committed = 3;
+}
+
+message RaftLogId {
+  uint64 leader_term = 1;
+  uint64 leader_node_id = 2;
+  uint64 index = 3;
+}
+
+// One log entry; payload mirrors openraft's EntryPayload. `normal` and
+// `membership` are mangle-wal-codec-encoded bytes.
+message RaftEntry {
+  RaftLogId log_id = 1;
+  oneof payload {
+    Empty blank = 2;
+    bytes normal = 3;
+    bytes membership = 4;
+  }
+}
+
+message VoteRequest {
+  RaftVote vote = 1;
+  // Absent when the candidate has no log.
+  RaftLogId last_log_id = 2;
+}
+
+message VoteResponse {
+  RaftVote vote = 1;
+  bool vote_granted = 2;
+  string error = 3;
+  // The responder's last log id (used by the candidate to retry).
+  RaftLogId last_log_id = 4;
+}
+
+message AppendEntriesRequest {
+  RaftVote vote = 1;
+  RaftLogId prev_log_id = 2;
+  repeated RaftEntry entries = 3;
+  RaftLogId leader_commit = 4;
+}
+
+message AppendEntriesResponse {
+  oneof result {
+    Empty success = 1;
+    RaftLogId partial_success = 2;
+    Empty conflict = 3;
+    RaftVote higher_vote = 4;
+  }
+  string error = 5;
+}
+
+message InstallSnapshotRequest {
+  RaftVote vote = 1;
+  string snapshot_id = 2;
+  RaftLogId last_log_id = 3;
+  // mangle-wal-codec-encoded StoredMembership.
+  bytes membership = 4;
+  uint64 offset = 5;
+  bytes data = 6;
+  bool done = 7;
+}
+
+message InstallSnapshotResponse {
+  RaftVote vote = 1;
+  string error = 2;
+}
+
+service RaftService {
+  rpc Vote(VoteRequest) returns (VoteResponse);
+  rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
+  rpc InstallSnapshot(InstallSnapshotRequest) returns (InstallSnapshotResponse);
+}

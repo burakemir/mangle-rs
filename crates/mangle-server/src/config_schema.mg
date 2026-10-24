@@ -29,5 +29,17 @@ Decl node_id(Id)
   bound [/number].
 
 Decl raft_bootstrap(Flag)
-  descr [doc("1 = bootstrap a new single-node cluster (exactly once, on a fresh raft_dir)")]
+  descr [doc("1 = bootstrap a new cluster (exactly once, on a fresh raft_dir)")]
   bound [/number].
+
+Decl raft_addr(Addr)
+  descr [doc("Address other nodes use to reach this node. Default 127.0.0.1:{server_port}")]
+  bound [/string].
+
+Decl raft_bootstrap_node(Id, Addr)
+  descr [doc("Additional member of the cluster being bootstrapped (with raft_bootstrap(1)); all bootstrap nodes declare the same set")]
+  bound [/number, /string].
+
+Decl raft_join(Addr)
+  descr [doc("Address of an existing cluster node to join through (fresh raft_dir, no raft_bootstrap)")]
+  bound [/string].

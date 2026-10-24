@@ -454,20 +454,142 @@ impl pb::MangleService for MangleServiceImpl {
             ..Default::default()
         })
     }
+
+    // --- Cluster administration ----------------------------------------
+
+    async fn join(
+        &self,
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, pb::JoinRequest>,
+    ) -> ServiceResult<impl connectrpc::Encodable<pb::JoinResponse> + Send + use<>> {
+        let Some(engine) = &self.engine else {
+            return Err(ConnectError::failed_precondition(
+                "Join is only available in replicated (raft) mode",
+            ));
+        };
+        if !engine.is_leader().await {
+            let (leader_id, leader_addr) = engine.leader_hint();
+            return Err(ConnectError::failed_precondition(format!(
+                "not leader; {}",
+                match (leader_id, leader_addr) {
+                    (Some(id), Some(addr)) => format!("leader is node {id} at {addr}"),
+                    (Some(id), None) => format!("leader is node {id}"),
+                    _ => "leader unknown".to_string(),
+                }
+            )));
+        }
+
+        // Mixed-version clusters are unsupported (plan §7.5).
+        let caller_version = request.version.to_string();
+        if caller_version != env!("CARGO_PKG_VERSION") {
+            return Err(ConnectError::failed_precondition(format!(
+                "version mismatch: joining node is {}, this node is {}",
+                caller_version,
+                env!("CARGO_PKG_VERSION")
+            )));
+        }
+
+        let node_id = request.node_id;
+        let addr = request.addr.to_string();
+        mangle_raft::join_member(engine.raft(), node_id, addr)
+            .await
+            .map_err(|e| ConnectError::internal(format!("join failed: {e}")))?;
+
+        Response::ok(pb::JoinResponse {
+            leader_id: engine.id(),
+            ..Default::default()
+        })
+    }
+
+    async fn remove_node(
+        &self,
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, pb::RemoveNodeRequest>,
+    ) -> ServiceResult<impl connectrpc::Encodable<Empty> + Send + use<>> {
+        let Some(engine) = &self.engine else {
+            return Err(ConnectError::failed_precondition(
+                "RemoveNode is only available in replicated (raft) mode",
+            ));
+        };
+        if !engine.is_leader().await {
+            let (leader_id, leader_addr) = engine.leader_hint();
+            return Err(ConnectError::failed_precondition(format!(
+                "not leader; {}",
+                match (leader_id, leader_addr) {
+                    (Some(id), Some(addr)) => format!("leader is node {id} at {addr}"),
+                    (Some(id), None) => format!("leader is node {id}"),
+                    _ => "leader unknown".to_string(),
+                }
+            )));
+        }
+        mangle_raft::remove_member(engine.raft(), request.node_id)
+            .await
+            .map_err(|e| ConnectError::internal(format!("remove-node failed: {e}")))?;
+        Response::ok(Empty::default())
+    }
+
+    async fn node_status(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, pb::NodeStatusRequest>,
+    ) -> ServiceResult<impl connectrpc::Encodable<pb::NodeStatusResponse> + Send + use<>> {
+        let Some(engine) = &self.engine else {
+            return Response::ok(pb::NodeStatusResponse {
+                raft_enabled: false,
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                ..Default::default()
+            });
+        };
+        let (term, last_applied, last_log) = engine.progress();
+        let (leader_id, _) = engine.leader_hint();
+        let members = engine
+            .membership_summary()
+            .into_iter()
+            .map(|(node_id, addr, is_voter)| pb::MemberInfo {
+                node_id,
+                addr,
+                is_voter,
+                is_leader: Some(node_id) == leader_id,
+                ..Default::default()
+            })
+            .collect();
+        Response::ok(pb::NodeStatusResponse {
+            node_id: engine.id(),
+            raft_enabled: true,
+            term,
+            leader_id: leader_id.unwrap_or(0),
+            last_applied_index: last_applied,
+            last_log_index: last_log,
+            members,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            ..Default::default()
+        })
+    }
 }
 
 impl MangleServiceImpl {
     /// Execute one command: through Raft when the engine is present
     /// (append to the WAL, fsync, commit, apply — then respond), else
     /// directly against the store. The apply result is deterministic in
-    /// both modes.
+    /// both modes. Follower writes fail with `failed_precondition` and a
+    /// leader hint.
     async fn execute_command(&self, cmd: Command) -> Result<ApplyOutcome, ConnectError> {
         match &self.engine {
             Some(engine) => {
-                let (_index, result) = engine
-                    .write(cmd)
-                    .await
-                    .map_err(|e| ConnectError::unavailable(e.to_string()))?;
+                let (_index, result) = engine.write(cmd).await.map_err(|e| match e {
+                    mangle_raft::WriteError::NotLeader {
+                        leader_id,
+                        leader_addr,
+                    } => ConnectError::failed_precondition(format!(
+                        "not leader; {}",
+                        match (leader_id, leader_addr) {
+                            (Some(id), Some(addr)) => format!("leader is node {id} at {addr}"),
+                            (Some(id), None) => format!("leader is node {id}"),
+                            _ => "leader unknown".to_string(),
+                        }
+                    )),
+                    mangle_raft::WriteError::Other(msg) => ConnectError::unavailable(msg),
+                })?;
                 result.map_err(|e| classify(anyhow::anyhow!(e)))
             }
             None => {

@@ -24,6 +24,16 @@ service MangleService {
   rpc DeleteProgram(DeleteProgramRequest) returns (Empty);
   rpc ReloadProgram(ReloadProgramRequest) returns (ProgramInfo);
   rpc ReloadAll(ReloadAllRequest) returns (ListProgramsResponse);
+
+  // --- Cluster administration (replicated mode) -------------------------
+
+  // Ask a cluster member to add the caller as a learner and promote it
+  // to voter. Leader-only.
+  rpc Join(JoinRequest) returns (JoinResponse);
+  // Remove a node from the cluster. Leader-only.
+  rpc RemoveNode(RemoveNodeRequest) returns (Empty);
+  // Node/cluster status: id, leadership, term, indexes, membership.
+  rpc NodeStatus(NodeStatusRequest) returns (NodeStatusResponse);
 }
 
 message Empty {}
@@ -139,4 +149,47 @@ message ReloadAllRequest {}
 
 message ListProgramsResponse {
   repeated ProgramInfo programs = 1;
+}
+
+// --- Cluster administration -------------------------------------------
+
+message JoinRequest {
+  // The caller's stable node id.
+  uint64 node_id = 1;
+  // The address other nodes use to reach the caller (advertise address).
+  string addr = 2;
+  // The caller's mangle-server version; the leader rejects mismatches
+  // (mixed-version clusters are unsupported, plan §7.5).
+  string version = 3;
+}
+
+message JoinResponse {
+  // The leader's node id (useful as a client hint).
+  uint64 leader_id = 1;
+}
+
+message RemoveNodeRequest {
+  uint64 node_id = 1;
+}
+
+message NodeStatusRequest {}
+
+message MemberInfo {
+  uint64 node_id = 1;
+  string addr = 2;
+  bool is_voter = 3;
+  bool is_leader = 4;
+}
+
+message NodeStatusResponse {
+  uint64 node_id = 1;
+  // Present iff this node is in replicated mode.
+  bool raft_enabled = 2;
+  uint64 term = 3;
+  // The node this node believes is the leader; 0 = unknown.
+  uint64 leader_id = 4;
+  uint64 last_applied_index = 5;
+  uint64 last_log_index = 6;
+  repeated MemberInfo members = 7;
+  string version = 8;
 }
