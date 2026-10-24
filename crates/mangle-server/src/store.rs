@@ -36,6 +36,21 @@ pub struct FactLedger {
 }
 
 impl FactLedger {
+    /// Whether the ledger tracks nothing.
+    pub fn is_empty(&self) -> bool {
+        self.replicated.is_empty() && self.retracted.is_empty()
+    }
+
+    /// Iterate the replicated fact sets: (relation, tuples).
+    pub fn replicated_sets(&self) -> impl Iterator<Item = (&String, &BTreeSet<Vec<Value>>)> {
+        self.replicated.iter()
+    }
+
+    /// Iterate the retracted-external fact sets: (relation, tuples).
+    pub fn retracted_sets(&self) -> impl Iterator<Item = (&String, &BTreeSet<Vec<Value>>)> {
+        self.retracted.iter()
+    }
+
     /// Whether the tuple is currently a replicated fact of the relation.
     pub fn replicated_contains(&self, relation: &str, tuple: &[Value]) -> bool {
         self.replicated
@@ -80,22 +95,10 @@ impl FactLedger {
     }
 }
 
-/// The result of applying one [`Command`] to the store. Deterministic:
-/// applying the same command to two stores in the same state yields the
-/// same outcome.
-#[derive(Clone, Debug, PartialEq)]
-pub enum ApplyOutcome {
-    /// Facts were inserted/retracted. Ops that changed nothing (duplicate
-    /// inserts, retracts of absent facts, duplicates within the command)
-    /// count as skipped.
-    Mutated { num_applied: u64, num_skipped: u64 },
-    /// A program was loaded (or re-loaded with new source).
-    Loaded(ProgramInfo),
-    /// A program was deleted.
-    Deleted,
-    /// A no-op (commit barrier for strong reads).
-    Noop,
-}
+/// The result of applying one [`Command`] to the store (see
+/// `mangle_proto::ApplyOutcome`). Deterministic: applying the same
+/// command to two stores in the same state yields the same outcome.
+pub use mangle_proto::ApplyOutcome;
 
 /// Metadata about a loaded program.
 pub struct StoredProgram {
@@ -368,7 +371,10 @@ impl ProgramStore {
             Command::Mutate(m) => self.apply_mutate(m),
             Command::LoadProgram(l) => {
                 let info = self.load(&l.name, &l.source)?;
-                Ok(ApplyOutcome::Loaded(info))
+                Ok(ApplyOutcome::Loaded {
+                    name: info.name,
+                    predicates: info.predicates,
+                })
             }
             Command::DeleteProgram(d) => {
                 if self.remove(&d.name) {
@@ -505,6 +511,57 @@ impl ProgramStore {
         .map(|_| ())
     }
 
+    /// The FSM state in snapshot form (DISTRIBUTED_PLAN.md §3.6): program
+    /// registry (name → source) plus the replicated-fact ledgers. IDB is
+    /// derived and excluded; external-EDB facts are per-node inputs and
+    /// excluded (re-read from local config on restore, with retracted-
+    /// external entries re-applied afterwards).
+    pub fn snapshot_state(&self) -> mangle_proto::Snapshot {
+        mangle_proto::Snapshot {
+            programs: self
+                .programs
+                .iter()
+                .map(|(name, prog)| mangle_proto::SnapshotProgram {
+                    name: name.clone(),
+                    source: prog.source.clone(),
+                    ledger: ledger_to_snapshot(&prog.ledger),
+                })
+                .collect(),
+        }
+    }
+
+    /// Replace the entire store state from a snapshot: clear everything,
+    /// then rebuild each program from its source and replay its ledger
+    /// (replicated facts inserted, retracted-external facts re-retracted)
+    /// in one batch per program — one IDB recompute each.
+    pub fn install_snapshot_state(&mut self, snap: &mangle_proto::Snapshot) -> Result<()> {
+        self.programs.clear();
+        for prog in &snap.programs {
+            let info = self.load(&prog.name, &prog.source)?;
+            let ledger = ledger_from_snapshot(&prog.ledger);
+            let stored = self
+                .programs
+                .get_mut(&info.name)
+                .expect("just loaded");
+            if !ledger.is_empty() {
+                let batch = stored.db.batch();
+                for (relation, tuples) in ledger.replicated_sets() {
+                    for tuple in tuples {
+                        batch.insert(relation, tuple.to_vec())?;
+                    }
+                }
+                for (relation, tuples) in ledger.retracted_sets() {
+                    for tuple in tuples {
+                        batch.retract(relation, tuple)?;
+                    }
+                }
+                batch.commit()?;
+            }
+            stored.ledger = ledger;
+        }
+        Ok(())
+    }
+
     /// Canonical, order-independent view of the whole FSM state: program
     /// registry (name → source), every relation's facts, and the fact
     /// ledgers. Used by the determinism tests; the snapshot serializer
@@ -540,6 +597,45 @@ pub struct CanonicalProgramState {
     pub source: String,
     pub relations: BTreeMap<String, BTreeSet<Vec<Value>>>,
     pub ledger: FactLedger,
+}
+
+/// Convert a [`FactLedger`] to its snapshot (proto-mirror) form.
+fn ledger_to_snapshot(ledger: &FactLedger) -> mangle_proto::SnapshotLedger {
+    use mangle_proto::{SnapshotLedgerEntry, SnapshotLedger as SL};
+    fn entries(map: &BTreeMap<String, BTreeSet<Vec<Value>>>) -> Vec<SnapshotLedgerEntry> {
+        map.iter()
+            .flat_map(|(relation, tuples)| {
+                tuples.iter().map(move |tuple| SnapshotLedgerEntry {
+                    relation: relation.clone(),
+                    tuple: tuple.clone(),
+                })
+            })
+            .collect()
+    }
+    SL {
+        replicated: entries(&ledger.replicated),
+        retracted: entries(&ledger.retracted),
+    }
+}
+
+/// Convert a snapshot (proto-mirror) ledger back into a [`FactLedger`].
+fn ledger_from_snapshot(sl: &mangle_proto::SnapshotLedger) -> FactLedger {
+    let mut ledger = FactLedger::default();
+    for e in &sl.replicated {
+        ledger
+            .replicated
+            .entry(e.relation.clone())
+            .or_default()
+            .insert(e.tuple.clone());
+    }
+    for e in &sl.retracted {
+        ledger
+            .retracted
+            .entry(e.relation.clone())
+            .or_default()
+            .insert(e.tuple.clone());
+    }
+    ledger
 }
 
 /// Build a single-op `Mutate` command (helper for the convenience
@@ -1124,7 +1220,9 @@ mod tests {
                 source: "p(1).".into(),
             }))
             .unwrap();
-        assert!(matches!(outcome, ApplyOutcome::Loaded(ref info) if info.name == "t"));
+        assert!(
+            matches!(outcome, ApplyOutcome::Loaded { ref name, .. } if name == "t")
+        );
 
         assert_eq!(store.apply(&Command::Noop).unwrap(), ApplyOutcome::Noop);
 

@@ -55,6 +55,138 @@ pub struct DeleteProgramCommand {
     pub name: String,
 }
 
+/// The outcome of applying one [`Command`] to the state machine — the
+/// `R` (AppDataResponse) of the replicated protocol. Deterministic: the
+/// same command against the same state yields the same outcome on every
+/// node.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ApplyOutcome {
+    /// Facts were inserted/retracted. Ops that changed nothing (duplicate
+    /// inserts, retracts of absent facts, duplicates within the command)
+    /// count as skipped.
+    Mutated { num_applied: u64, num_skipped: u64 },
+    /// A program was loaded (or re-loaded with new source).
+    Loaded { name: String, predicates: Vec<String> },
+    /// A program was deleted.
+    Deleted,
+    /// A no-op (commit barrier for strong reads).
+    Noop,
+}
+
+/// The response of applying one command: either the deterministic
+/// outcome, or a deterministic error message (a command that fails on
+/// the leader fails identically on every follower).
+pub type ApplyResult = Result<ApplyOutcome, String>;
+
+// --- Snapshot mirrors (§3.6) ---------------------------------------------
+
+/// Mirror of `SnapshotLedgerEntry`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SnapshotLedgerEntry {
+    pub relation: String,
+    pub tuple: Vec<MValue>,
+}
+
+/// Mirror of `SnapshotLedger`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SnapshotLedger {
+    pub replicated: Vec<SnapshotLedgerEntry>,
+    pub retracted: Vec<SnapshotLedgerEntry>,
+}
+
+/// Mirror of `SnapshotProgram`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SnapshotProgram {
+    pub name: String,
+    pub source: String,
+    pub ledger: SnapshotLedger,
+}
+
+/// Mirror of `Snapshot`: the whole FSM state in canonical form.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Snapshot {
+    pub programs: Vec<SnapshotProgram>,
+}
+
+impl Snapshot {
+    pub fn to_proto(&self) -> pb::Snapshot {
+        pb::Snapshot {
+            programs: self
+                .programs
+                .iter()
+                .map(|p| pb::SnapshotProgram {
+                    name: p.name.clone(),
+                    source: p.source.clone(),
+                    ledger: ::buffa::MessageField::some(ledger_to_proto(&p.ledger)),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    pub fn from_proto(s: &pb::Snapshot) -> Result<Self> {
+        Ok(Self {
+            programs: s
+                .programs
+                .iter()
+                .map(|p| {
+                    Ok(SnapshotProgram {
+                        name: p.name.to_string(),
+                        source: p.source.to_string(),
+                        ledger: p
+                            .ledger
+                            .as_option()
+                            .map(ledger_from_proto)
+                            .transpose()?
+                            .unwrap_or_default(),
+                    })
+                })
+                .collect::<Result<_>>()?,
+        })
+    }
+}
+
+fn ledger_to_proto(l: &SnapshotLedger) -> pb::SnapshotLedger {
+    fn entries(entries: &[SnapshotLedgerEntry]) -> Vec<pb::SnapshotLedgerEntry> {
+        entries
+            .iter()
+            .map(|e| pb::SnapshotLedgerEntry {
+                relation: e.relation.clone(),
+                tuple: e.tuple.iter().map(crate::convert::value_to_proto).collect(),
+                ..Default::default()
+            })
+            .collect()
+    }
+    pb::SnapshotLedger {
+        replicated: entries(&l.replicated),
+        retracted: entries(&l.retracted),
+        ..Default::default()
+    }
+}
+
+fn ledger_from_proto(l: &pb::SnapshotLedger) -> Result<SnapshotLedger> {
+    fn entries(entries: &[pb::SnapshotLedgerEntry]) -> Result<Vec<SnapshotLedgerEntry>> {
+        entries
+            .iter()
+            .map(|e| {
+                Ok(SnapshotLedgerEntry {
+                    relation: e.relation.to_string(),
+                    tuple: e
+                        .tuple
+                        .iter()
+                        .map(crate::convert::value_from_proto)
+                        .collect::<Result<_>>()?,
+                })
+            })
+            .collect()
+    }
+    Ok(SnapshotLedger {
+        replicated: entries(&l.replicated)?,
+        retracted: entries(&l.retracted)?,
+    })
+}
+
 impl Command {
     /// Serialize to the protobuf wire form.
     pub fn to_proto(&self) -> pb::Command {
@@ -252,5 +384,41 @@ mod tests {
             ..Default::default()
         };
         assert!(MutationOp::from_proto(&proto).is_err());
+    }
+
+    #[test]
+    fn snapshot_roundtrip() {
+        let snap = Snapshot {
+            programs: vec![SnapshotProgram {
+                name: "graph".into(),
+                source: "path(X,Y) :- edge(X,Y).".into(),
+                ledger: SnapshotLedger {
+                    replicated: vec![SnapshotLedgerEntry {
+                        relation: "edge".into(),
+                        tuple: vec![MValue::Number(1), MValue::String("a".into())],
+                    }],
+                    retracted: vec![SnapshotLedgerEntry {
+                        relation: "edge".into(),
+                        tuple: vec![MValue::Number(2), MValue::Name("/n".into())],
+                    }],
+                },
+            }],
+        };
+        let back = Snapshot::from_proto(&snap.to_proto()).unwrap();
+        assert_eq!(snap, back);
+    }
+
+    #[test]
+    fn snapshot_program_without_ledger_decodes_empty() {
+        let proto = pb::SnapshotProgram {
+            name: "p".into(),
+            source: "".into(),
+            ledger: ::buffa::MessageField::none(),
+            ..Default::default()
+        };
+        let snap =
+            Snapshot::from_proto(&pb::Snapshot { programs: vec![proto], ..Default::default() })
+                .unwrap();
+        assert_eq!(snap.programs[0].ledger, SnapshotLedger::default());
     }
 }

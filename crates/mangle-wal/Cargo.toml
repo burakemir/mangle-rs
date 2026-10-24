@@ -1,0 +1,22 @@
+[package]
+name = "mangle-wal"
+version.workspace = true
+edition.workspace = true
+description = "Raft log store and vote store for mangle-server, backed by redb (the WAL)"
+documentation.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme = "README.md"
+
+[dependencies]
+mangle-proto.workspace = true
+openraft.workspace = true
+redb = "4"
+tokio = { version = "1", features = ["fs", "io-util"] }
+anyhow.workspace = true
+buffa = "0.9"
+
+[dev-dependencies]
+mangle-common.workspace = true
+tempfile.workspace = true

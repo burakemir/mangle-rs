@@ -472,26 +472,47 @@ lost, see finding above).
 
 ### Phase 1 — WAL + single-node Raft (openraft, cluster of one)
 
+**Status: implemented** (opt-in via `config_schema.raft_dir(...)`; the
+  pre-replication write path remains the default for this release).
+
 **Goal: crash-safe single node. The Raft log replaces `MutationLog`.**
 
-1. New crate `mangle-wal`: `RaftLogStore` over redb (vote store, log store,
-   fsync policy, open/replay).
-2. New crate `mangle-raft`: openraft `Raft<T>` wiring with
-   `NodeId = u64`, `AppData = Command`; a no-op `Network` (single node);
-   FSM adapter `RaftStateMachine for ProgramStore` (apply, snapshot builder,
-   snapshot install).
-3. Snapshot support (§3.6) even in single-node mode — it's what bounds the
-   WAL and makes restart fast (IDB recompute avoidance via existing
-   `IdbBackend` fingerprints is a bonus, not a correctness need).
-4. Server startup: open existing data dir, restore from snapshot if present,
-   replay log, then serve; `--bootstrap` for a fresh dir. Old
-   `MutationLog`-based data: one-time migration import (read mutations.mg,
-   propose as one command) — cheap to implement, keeps users' data.
-5. Tests: kill -9 during write bursts → zero acknowledged writes lost; log
-   truncation after snapshot; restart-time bounds.
+1. ✅ New crate `mangle-wal`: `RaftLogStorage` + `RaftLogReader` over redb
+   (`raft.redb`), every write committed with `Durability::Immediate`
+   (fsync). Entries serialize as canonical protobuf `Command` bytes plus
+   hand-encoded Raft metadata (vote/log-id/membership) — openraft's serde
+   feature is deliberately not enabled, so `Command`/`Value` stay
+   serde-free. Hosts the shared `TypeConfig` (`D = Command`,
+   `R = ApplyResult`, `SnapshotData = tokio::fs::File`).
+2. ✅ New crate `mangle-raft`: `Engine` facade (bootstrap, `write` →
+   fsync→commit→apply→respond, snapshot trigger, metrics, graceful
+   shutdown) + `NoNetwork` stub (single node has no peers).
+3. ✅ Snapshot support (§3.6): `mangle-proto` defines the `Snapshot`
+   message (registry + fact ledgers); `FsmStore` (in `mangle-server`, it
+   owns `ProgramStore`) implements `RaftStateMachine` — apply, build,
+   receive/install, get-current — with snapshot data + meta written
+   atomically (tmp+rename+fsync) in the raft dir.
+4. ✅ Server startup: `config_schema.raft_dir/...` enables replicated
+   mode: restore snapshot → open WAL → engine start (log replay) →
+   bootstrap if fresh (`raft_bootstrap(1)`, exactly once) → import
+   `programs_dir` as `LoadProgram` commands → one-time `mutations.mg`
+   migration as `MutateCommand`s (file renamed `.migrated` so the file EDB
+   source stops reading it). `ReloadProgram`/`ReloadAll` return
+   `failed_precondition` in replicated mode (§3.1). Failed commands are
+   deterministic: committed, applied as `Err(msg)` responses, replay
+   identically.
+5. ✅ Tests (`tests/raft.rs`): acknowledged writes survive restart (WAL
+   replay); snapshot + post-snapshot writes restore correctly; failed
+   commands replay identically without partial application; RPC writes go
+   through Raft and Reload* is disabled; snapshot round-trip with
+   retracted-external ledger entries; legacy `mutations.mg` parsing. Plus
+   WAL/codec unit tests and a manual binary smoke test (bootstrap → RPC
+   writes → kill → restart → derived facts intact).
 
-**Deliverable**: single-node mangle-server with real WAL durability;
-`MutationLog` deleted.
+**Deliverable** (met): single-node mangle-server with real WAL durability,
+opt-in via config. The legacy `MutationLog` path still exists for
+non-replicated mode; it is deleted when replicated mode becomes the
+default (see Phase 2 wrap-up).
 
 ### Phase 2 — Multi-node consensus
 

@@ -13,9 +13,10 @@ use crate::rpc::MangleServiceImpl;
 use crate::store::AppState;
 
 /// Build the application: the Connect RPC service.
-pub fn build_app(state: AppState) -> Router {
+pub fn build_app(state: AppState, engine: Option<Arc<mangle_raft::Engine>>) -> Router {
     let connect = ConnectRouter::new().add_service(Arc::new(MangleServiceImpl {
-        state: state.clone(),
+        state,
+        engine,
     }));
 
     Router::new().fallback_service(connect.into_axum_service())

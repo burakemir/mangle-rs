@@ -7,6 +7,7 @@
 
 pub mod app;
 pub mod config;
+pub mod fsm;
 pub mod mutations;
 pub mod query;
 pub mod rpc;

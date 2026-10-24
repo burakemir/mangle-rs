@@ -1,0 +1,20 @@
+[package]
+name = "mangle-raft"
+version.workspace = true
+edition.workspace = true
+description = "openraft glue for mangle-server: engine facade, config, network (Phase 2: ConnectRPC transport)"
+documentation.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme = "README.md"
+
+[dependencies]
+mangle-proto.workspace = true
+mangle-wal.workspace = true
+openraft.workspace = true
+tokio = { version = "1", features = ["full"] }
+anyhow.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

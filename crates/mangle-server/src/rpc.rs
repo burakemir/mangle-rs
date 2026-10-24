@@ -22,6 +22,7 @@ use crate::store::{
     AppState, ApplyOutcome, ProgramStore, eval_source_relations, parse_query_lenient,
 };
 use mangle_proto::{Command, MutateCommand, MutationOpKind};
+use mangle_raft::Engine;
 
 use pb::__buffa::oneof::query_event::Event;
 use pb::__buffa::view::oneof::arg_pattern::Pattern;
@@ -32,13 +33,18 @@ use pb::__buffa::view::oneof::query_request::Query;
 const DEFAULT_BATCH_SIZE: usize = 4096;
 
 /// Cap on ops per MutateCommand (§7.2): a command is fully materialized
-/// before it is applied (and later, proposed to the log), so an unbounded
-/// client stream must not become an unbounded command. Bulk loads should
-/// batch per request.
+/// before it is applied (and proposed to the Raft log in replicated
+/// mode), so an unbounded client stream must not become an unbounded
+/// command. Bulk loads should batch per request.
 const MAX_MUTATIONS_PER_COMMAND: usize = 1_048_576;
 
 pub struct MangleServiceImpl {
     pub state: AppState,
+    /// The Raft engine handle. `Some` in replicated mode: writes are
+    /// proposed through Raft (WAL fsync → commit → apply) before the RPC
+    /// responds. `None` (no `raft_dir` configured): writes apply directly,
+    /// pre-replication behavior.
+    pub engine: Option<std::sync::Arc<Engine>>,
 }
 
 // --- Error classification -------------------------------------------------
@@ -353,15 +359,15 @@ impl pb::MangleService for MangleServiceImpl {
         _ctx: RequestContext,
         request: ServiceRequest<'_, LoadProgramRequest>,
     ) -> ServiceResult<impl connectrpc::Encodable<ProgramInfo> + Send + use<>> {
-        // Writes go through the command path (one future log entry).
+        // Writes go through the command path (one log entry in
+        // replicated mode).
         let cmd = Command::LoadProgram(mangle_proto::LoadProgramCommand {
             name: request.name.to_string(),
             source: request.source.to_string(),
         });
-        let mut store = self.state.write().unwrap();
-        match store.apply(&cmd).map_err(classify)? {
-            ApplyOutcome::Loaded(info) => {
-                Response::ok(program_info(&info.name, info.predicates, None))
+        match self.execute_command(cmd).await? {
+            ApplyOutcome::Loaded { name, predicates } => {
+                Response::ok(program_info(&name, predicates, None))
             }
             _ => Err(ConnectError::internal(
                 "unexpected apply outcome for load-program command",
@@ -391,12 +397,12 @@ impl pb::MangleService for MangleServiceImpl {
         _ctx: RequestContext,
         request: ServiceRequest<'_, pb::DeleteProgramRequest>,
     ) -> ServiceResult<impl connectrpc::Encodable<Empty> + Send + use<>> {
-        // Writes go through the command path (one future log entry).
+        // Writes go through the command path (one log entry in
+        // replicated mode).
         let cmd = Command::DeleteProgram(mangle_proto::DeleteProgramCommand {
             name: request.name.to_string(),
         });
-        let mut store = self.state.write().unwrap();
-        match store.apply(&cmd).map_err(classify)? {
+        match self.execute_command(cmd).await? {
             ApplyOutcome::Deleted => Response::ok(Empty::default()),
             _ => Err(ConnectError::internal(
                 "unexpected apply outcome for delete-program command",
@@ -409,6 +415,16 @@ impl pb::MangleService for MangleServiceImpl {
         _ctx: RequestContext,
         request: ServiceRequest<'_, pb::ReloadProgramRequest>,
     ) -> ServiceResult<impl connectrpc::Encodable<ProgramInfo> + Send + use<>> {
+        // Reload reads the node's local programs_dir; in replicated mode
+        // that would mutate one node's state outside the log and diverge
+        // the cluster (DISTRIBUTED_PLAN.md §3.1). Use LoadProgram with the
+        // new source instead.
+        if self.engine.is_some() {
+            return Err(ConnectError::failed_precondition(
+                "ReloadProgram is disabled in replicated (raft) mode: it reads the local \
+                 programs_dir. Use LoadProgram with the new source.",
+            ));
+        }
         let name = request.name.to_string();
         let mut store = self.state.write().unwrap();
         let info = store.reload(&name).map_err(classify)?;
@@ -420,6 +436,13 @@ impl pb::MangleService for MangleServiceImpl {
         _ctx: RequestContext,
         _request: ServiceRequest<'_, pb::ReloadAllRequest>,
     ) -> ServiceResult<impl connectrpc::Encodable<ListProgramsResponse> + Send + use<>> {
+        // See reload_program: local-disk reads cannot be replicated.
+        if self.engine.is_some() {
+            return Err(ConnectError::failed_precondition(
+                "ReloadAll is disabled in replicated (raft) mode: it reads the local \
+                 programs_dir. Use LoadProgram for each program instead.",
+            ));
+        }
         let mut store = self.state.write().unwrap();
         let loaded = store.reload_all().map_err(classify)?;
         let programs = loaded
@@ -434,6 +457,26 @@ impl pb::MangleService for MangleServiceImpl {
 }
 
 impl MangleServiceImpl {
+    /// Execute one command: through Raft when the engine is present
+    /// (append to the WAL, fsync, commit, apply — then respond), else
+    /// directly against the store. The apply result is deterministic in
+    /// both modes.
+    async fn execute_command(&self, cmd: Command) -> Result<ApplyOutcome, ConnectError> {
+        match &self.engine {
+            Some(engine) => {
+                let (_index, result) = engine
+                    .write(cmd)
+                    .await
+                    .map_err(|e| ConnectError::unavailable(e.to_string()))?;
+                result.map_err(|e| classify(anyhow::anyhow!(e)))
+            }
+            None => {
+                let mut store = self.state.write().unwrap();
+                store.apply(&cmd).map_err(classify)
+            }
+        }
+    }
+
     /// Shared body of InsertFacts / RetractFacts: decode each streamed
     /// mutation (row or batch) from its zero-copy view and apply it.
     async fn apply_mutations(
@@ -511,10 +554,7 @@ impl MangleServiceImpl {
         })?;
 
         let cmd = Command::Mutate(MutateCommand { program, ops });
-        let outcome = {
-            let mut store = self.state.write().unwrap();
-            store.apply(&cmd).map_err(classify)?
-        };
+        let outcome = self.execute_command(cmd).await?;
 
         let (num_applied, num_skipped) = match outcome {
             ApplyOutcome::Mutated {

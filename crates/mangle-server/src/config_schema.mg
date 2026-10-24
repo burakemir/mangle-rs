@@ -19,3 +19,15 @@ Decl idb_cache_dir(Path)
 Decl persist_edb(ProgramName)
   descr [doc("Programs whose API-inserted EDB facts are persisted to disk")]
   bound [/string].
+
+Decl raft_dir(Path)
+  descr [doc("Raft data directory (WAL + snapshots). Setting this enables replicated (Raft) mode")]
+  bound [/string].
+
+Decl node_id(Id)
+  descr [doc("Stable Raft node id. Must not change across restarts. Default 1")]
+  bound [/number].
+
+Decl raft_bootstrap(Flag)
+  descr [doc("1 = bootstrap a new single-node cluster (exactly once, on a fresh raft_dir)")]
+  bound [/number].

@@ -14,6 +14,12 @@ pub struct ServerConfig {
     pub edb_dir: Option<PathBuf>,
     pub idb_cache_dir: Option<PathBuf>,
     pub persist_edb: HashSet<String>,
+    /// Raft data directory; `Some` enables replicated (Raft) mode.
+    pub raft_dir: Option<PathBuf>,
+    /// Stable Raft node identity (must not change across restarts).
+    pub node_id: u64,
+    /// Bootstrap a new single-node cluster on a fresh raft dir.
+    pub raft_bootstrap: bool,
     pub config_path: PathBuf,
 }
 
@@ -58,12 +64,24 @@ impl ServerConfig {
 
         let persist_edb = query_all_strings(config_source, "config_schema.persist_edb(X)")?;
 
+        let raft_dir =
+            query_single_string(config_source, "config_schema.raft_dir(X)")?.map(PathBuf::from);
+        let node_id = query_single_number(config_source, "config_schema.node_id(X)")?.unwrap_or(1)
+            .try_into()
+            .map_err(|_| anyhow!("node_id must be a non-negative integer"))?;
+        let raft_bootstrap =
+            query_single_number(config_source, "config_schema.raft_bootstrap(X)")?.unwrap_or(0)
+                != 0;
+
         Ok(ServerConfig {
             port,
             programs_dir,
             edb_dir,
             idb_cache_dir,
             persist_edb,
+            raft_dir,
+            node_id,
+            raft_bootstrap,
             config_path: PathBuf::new(),
         })
     }
@@ -143,6 +161,27 @@ mod tests {
         assert_eq!(config.edb_dir, None);
         assert_eq!(config.idb_cache_dir, None);
         assert!(config.persist_edb.is_empty());
+    }
+
+    #[test]
+    fn test_config_raft() {
+        let source = r#"
+            Use config_schema !
+            config_schema.raft_dir("/var/lib/mangle/raft").
+            config_schema.node_id(2).
+            config_schema.raft_bootstrap(1).
+        "#;
+
+        let config = ServerConfig::from_source(source).unwrap();
+        assert_eq!(config.raft_dir, Some(PathBuf::from("/var/lib/mangle/raft")));
+        assert_eq!(config.node_id, 2);
+        assert!(config.raft_bootstrap);
+
+        // Defaults: raft off, node 1, no bootstrap.
+        let config = ServerConfig::from_source("Use config_schema !").unwrap();
+        assert_eq!(config.raft_dir, None);
+        assert_eq!(config.node_id, 1);
+        assert!(!config.raft_bootstrap);
     }
 
     #[test]

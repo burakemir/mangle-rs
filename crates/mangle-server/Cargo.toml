@@ -15,10 +15,13 @@ mangle-common = { workspace = true, features = ["edge"] }
 mangle-ast.workspace = true
 mangle-parse.workspace = true
 mangle-db.workspace = true
+mangle-wal.workspace = true
+mangle-raft.workspace = true
+openraft.workspace = true
+buffa = "0.9"
 mangle-proto.workspace = true
 axum = "0.8"
 connectrpc = { version = "0.9", features = ["axum"] }
-buffa = "0.9"
 tokio-stream = "0.1"
 tokio = { version = "1", features = ["full"] }
 anyhow.workspace = true

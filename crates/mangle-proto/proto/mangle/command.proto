@@ -60,3 +60,35 @@ message DeleteProgramCommand {
 // No-op entry: used as a commit barrier for STRONG reads (a read that
 // must observe everything committed before it).
 message NoopCommand {}
+
+// --- Snapshot format (DISTRIBUTED_PLAN.md §3.6) --------------------
+//
+// A snapshot carries the program registry and the replicated-fact
+// ledgers. IDB is derived and excluded: every node recomputes. Facts
+// from external EDB sources are per-node inputs and excluded too:
+// external sources are re-attached from local config on restore, and
+// the ledger's retracted-external entries are re-applied afterwards.
+
+message SnapshotLedgerEntry {
+  string relation = 1;
+  // One value per column; length == arity.
+  repeated Value tuple = 2;
+}
+
+message SnapshotLedger {
+  // Facts inserted via commands and currently present.
+  repeated SnapshotLedgerEntry replicated = 1;
+  // Facts from external EDB sources that commands retracted; must be
+  // re-retracted after a restore re-reads the external sources.
+  repeated SnapshotLedgerEntry retracted = 2;
+}
+
+message SnapshotProgram {
+  string name = 1;
+  string source = 2;
+  SnapshotLedger ledger = 3;
+}
+
+message Snapshot {
+  repeated SnapshotProgram programs = 1;
+}

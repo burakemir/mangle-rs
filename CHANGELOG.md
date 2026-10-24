@@ -6,6 +6,22 @@ All notable changes in mangle/rust will be documented in this file.
 
 ### 🚀 Features
 
+- **Replicated (Raft) mode for `mangle-server`, Phase 1 of the distributed
+  plan: single-node WAL durability** (opt-in). New crates `mangle-wal`
+  (openraft log + vote store on redb, fsync per commit — the write-ahead
+  log) and `mangle-raft` (openraft engine facade); `mangle-server` gains
+  `FsmStore`, the Raft state machine over `ProgramStore`. Setting
+  `config_schema.raft_dir(...)` enables it: writes append to the WAL and
+  fsync before the RPC responds; snapshots (registry + fact ledgers,
+  canonical protobuf form) bound the log and make restores fast;
+  `config_schema.raft_bootstrap(1)` bootstraps a fresh cluster exactly
+  once, importing `programs_dir` programs and migrating legacy
+  `mutations.mg` logs into the Raft log as commands. Acknowledged writes
+  survive restart via log replay (covered by tests and verified against
+  the binary). `ReloadProgram`/`ReloadAll` return `failed_precondition` in
+  replicated mode (they read local disk and would diverge the cluster).
+  New config: `raft_dir`, `node_id`, `raft_bootstrap`.
+
 - **Replicated command path for `mangle-server`** (first step of
   `DISTRIBUTED_PLAN.md` Phase 0 — the path to a rqlite-style replicated
   database): all writes now flow through a single serializable command

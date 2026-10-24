@@ -25,7 +25,8 @@ mod convert;
 mod convert_view;
 
 pub use command::{
-    Command, DeleteProgramCommand, LoadProgramCommand, MutateCommand, MutationOp, MutationOpKind,
+    ApplyOutcome, ApplyResult, Command, DeleteProgramCommand, LoadProgramCommand, MutateCommand,
+    MutationOp, MutationOpKind, Snapshot, SnapshotLedger, SnapshotLedgerEntry, SnapshotProgram,
 };
 pub use convert::{
     batch_from_rows, fact_from_row, fact_to_proto, rows_from_batch, value_from_proto,

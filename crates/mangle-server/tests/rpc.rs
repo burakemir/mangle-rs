@@ -23,7 +23,7 @@ async fn spawn_server() -> (String, AppState) {
     let mut store = ProgramStore::new();
     store.load("routes", SOURCE).unwrap();
     let state: AppState = Arc::new(RwLock::new(store));
-    let app = build_app(state.clone());
+    let app = build_app(state.clone(), None);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -484,7 +484,7 @@ async fn json_api_routes_are_gone() {
 
     let state: AppState = Arc::new(RwLock::new(ProgramStore::new()));
     state.write().unwrap().load("routes", SOURCE).unwrap();
-    let app = build_app(state);
+    let app = build_app(state, None);
 
     for (method, uri) in [
         ("POST", "/query"),
