@@ -55,6 +55,15 @@ config_schema.raft_bootstrap_node(3, "10.0.0.3:8090").
 Writes must target the leader; followers answer with `failed_precondition`
 and the leader's address. `NodeStatus` reports the current leader.
 
+Reads (`Query`) accept a `consistency` level:
+
+- `NONE` (default) — any node answers from local state (eventually
+  consistent).
+- `WEAK` — leader-only; followers reject with the leader hint.
+- `STRONG` — the leader proposes a no-op through Raft, waits for it to
+  apply, then answers: the result reflects everything committed before
+  the read.
+
 ### Example
 
 ```bash

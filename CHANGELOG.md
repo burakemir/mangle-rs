@@ -22,6 +22,16 @@ All notable changes in mangle/rust will be documented in this file.
   restart catch-up and join-time state transfer are covered by the new
   cluster tests (real TCP) and verified against real binaries.
 
+- **Read consistency levels** (`ConsistencyLevel` on `QueryRequest`,
+  Phase 3 of the distributed plan): `NONE` (default; any node answers
+  from local state), `WEAK` (leader-only; followers reject with a leader
+  hint), `STRONG` (the leader proposes a no-op through Raft and waits
+  for it to apply — the result reflects everything committed before the
+  read). Outside replicated mode all levels behave the same (local state
+  is the only state). `NodeStatus` additionally reports per-program
+  fingerprints (program source hash + external-EDB fingerprint, hex)
+  so operators can compare nodes for external-EDB divergence.
+
 - **Replicated (Raft) mode for `mangle-server`, Phase 1 of the distributed
   plan: single-node WAL durability** (opt-in). New crates `mangle-wal`
   (openraft log + vote store on redb, fsync per commit — the write-ahead

@@ -380,3 +380,168 @@ async fn wait_until<F: Fn() -> bool>(ticks: usize, cond: F) {
     panic!("condition not met within timeout");
 }
 
+
+#[tokio::test]
+async fn consistency_levels_none_weak_strong() {
+    let dirs: Vec<_> = (0..3)
+        .map(|i| tempfile::tempdir().unwrap().into_path().join(format!("n{i}")))
+        .collect();
+    let mut nodes = Vec::new();
+    for (i, dir) in dirs.iter().enumerate() {
+        std::fs::create_dir_all(dir).unwrap();
+        nodes.push(start_node(i as u64 + 1, dir.clone()).await);
+    }
+    let node_refs: Vec<&Node> = nodes.iter().collect();
+    bootstrap_cluster(&node_refs).await;
+    let leader = wait_for_leader(&node_refs).await;
+    let follower = (leader + 1) % 3;
+
+    write_via_rpc(
+        &nodes[leader],
+        Command::LoadProgram(LoadProgramCommand {
+            name: "graph".into(),
+            source: GRAPH_SOURCE.into(),
+        }),
+    )
+    .await
+    .unwrap();
+    write_via_rpc(
+        &nodes[leader],
+        Command::Mutate(MutateCommand {
+            program: "graph".into(),
+            ops: vec![insert_op("edge", vec![Value::Number(1), Value::Number(2)])],
+        }),
+    )
+    .await
+    .unwrap();
+    wait_until(60, || node_refs.iter().all(|n| facts(&n.state).len() == 1)).await;
+
+    let q = |consistency: i32| {
+        pb::QueryRequest {
+            program: "graph".into(),
+            query: Some(pb::__buffa::oneof::query_request::Query::Text("path(X, Y)".into())),
+            consistency: consistency.into(),
+            ..Default::default()
+        }
+    };
+
+    // NONE: any node answers.
+    for (i, n) in node_refs.iter().enumerate() {
+        let stream = client(&n.url).query(q(0)).await.unwrap();
+        let rows = collect(stream).await;
+        assert_eq!(rows.len(), 1, "NONE on node {i}");
+    }
+
+    // WEAK: leader answers, follower rejects with a hint.
+    let stream = client(&nodes[leader].url).query(q(1)).await.unwrap();
+    assert_eq!(collect(stream).await.len(), 1);
+    expect_stream_error(
+        client(&nodes[follower].url).query(q(1)).await.unwrap(),
+        connectrpc::ErrorCode::FailedPrecondition,
+        "not leader",
+    )
+    .await;
+
+    // STRONG: the leader proposes a no-op barrier and answers; the
+    // follower rejects (barriers are writes). The applied index advances.
+    let applied_before = nodes[leader].engine.last_applied();
+    let stream = client(&nodes[leader].url).query(q(2)).await.unwrap();
+    assert_eq!(collect(stream).await.len(), 1);
+    let applied_after = nodes[leader].engine.last_applied();
+    assert!(
+        applied_after > applied_before,
+        "STRONG read must advance the applied index (barrier entry): {applied_before} -> {applied_after}"
+    );
+    expect_stream_error(
+        client(&nodes[follower].url).query(q(2)).await.unwrap(),
+        connectrpc::ErrorCode::FailedPrecondition,
+        "not leader",
+    )
+    .await;
+
+    // Strong reads are fresh: write, then STRONG-read on the leader must
+    // observe it (trivially true on the leader, but pins the contract).
+    write_via_rpc(
+        &nodes[leader],
+        Command::Mutate(MutateCommand {
+            program: "graph".into(),
+            ops: vec![insert_op("edge", vec![Value::Number(2), Value::Number(3)])],
+        }),
+    )
+    .await
+    .unwrap();
+    let stream = client(&nodes[leader].url).query(q(2)).await.unwrap();
+    assert_eq!(collect(stream).await.len(), 3);
+
+    // NodeStatus reports matching fingerprints on all nodes (same
+    // programs, same sources).
+    let mut first_fp: Option<String> = None;
+    for (i, n) in node_refs.iter().enumerate() {
+        let status = client(&n.url)
+            .node_status(pb::NodeStatusRequest::default())
+            .await
+            .unwrap()
+            .into_owned();
+        let fp = status.fingerprints.get("graph").expect("graph fingerprint");
+        assert_eq!(fp.program_hash.len(), 64, "sha-256 hex");
+        // No external EDB sources here: the fingerprint is the constant
+        // hash of nothing, but critically it is IDENTICAL across nodes.
+        if i == 0 {
+            first_fp = Some(fp.edb_fingerprint.clone());
+        } else {
+            assert_eq!(
+                fp.edb_fingerprint,
+                first_fp.clone().unwrap(),
+                "all nodes must agree on the EDB fingerprint"
+            );
+        }
+    }
+
+    for n in nodes {
+        n.stop().await;
+    }
+}
+
+/// Expect the stream to fail with the given Connect code (streaming RPCs
+/// deliver errors on the first message, not at call time).
+async fn expect_stream_error(
+    stream: connectrpc::client::ServerStream<
+        <HttpClient as connectrpc::client::ClientTransport>::ResponseBody,
+        pb::QueryEventView<'static>,
+    >,
+    code: connectrpc::ErrorCode,
+    needle: &str,
+) {
+    let mut stream = stream;
+    let result = stream.message::<pb::QueryEvent>().await;
+    let err = result.unwrap_err();
+    assert_eq!(err.code, code, "unexpected error: {}", err.message.display_or_empty());
+    assert!(err.message.as_deref().unwrap_or_default().contains(needle), "error message: {err:?}");
+}
+
+trait MsgDisplay {
+    fn display_or_empty(&self) -> String;
+}
+impl MsgDisplay for Option<String> {
+    fn display_or_empty(&self) -> String {
+        self.clone().unwrap_or_default()
+    }
+}
+
+/// Collect a Query stream's rows.
+async fn collect(
+    mut stream: connectrpc::client::ServerStream<
+        <HttpClient as connectrpc::client::ClientTransport>::ResponseBody,
+        pb::QueryEventView<'static>,
+    >,
+) -> Vec<Vec<Value>> {
+    use mangle_proto::pb::mangle as pb0;
+    use pb0::__buffa::view::oneof::query_event::Event;
+    let mut rows = Vec::new();
+    while let Some(msg) = stream.message::<pb::QueryEvent>().await.unwrap() {
+        if let Event::Batch(b) = msg.event().unwrap() {
+            rows.extend(mangle_proto::rows_from_batch_view(b).unwrap());
+        }
+    }
+    rows
+}

@@ -54,11 +54,24 @@ message QueryRequest {
   uint32 batch_size = 5;
   // Hard limit on number of result facts; 0 = unlimited.
   uint64 limit = 6;
+  // Read consistency (replicated mode only; NONE outside it).
+  ConsistencyLevel consistency = 7;
 }
 
 enum ResultEncoding {
   ROWS = 0;
   COLUMNAR = 1;
+}
+
+// Read consistency levels (DISTRIBUTED_PLAN.md §3.7). NONE is the default.
+enum ConsistencyLevel {
+  // Any node answers from its local applied state (eventually consistent).
+  NONE = 0;
+  // The leader answers from its local applied state; followers reject.
+  WEAK = 1;
+  // The read observes everything committed before it: the server proposes
+  // a no-op through Raft and serves locally once it is applied.
+  STRONG = 2;
 }
 
 message StructuredQuery {
@@ -192,4 +205,17 @@ message NodeStatusResponse {
   uint64 last_log_index = 6;
   repeated MemberInfo members = 7;
   string version = 8;
+  // Per-program (program source hash, external-EDB fingerprint), both
+  // hex-encoded; an empty EDB fingerprint means "no external sources / no
+  // fingerprint". Compare across nodes to detect external-EDB divergence
+  // (plan §4.4).
+  map<string, ProgramFingerprint> fingerprints = 9;
+}
+
+message ProgramFingerprint {
+  // SHA-256 of the program source, hex.
+  string program_hash = 1;
+  // Combined fingerprint of the program's external EDB sources, hex;
+  // empty when there are none or a source cannot be fingerprinted.
+  string edb_fingerprint = 2;
 }

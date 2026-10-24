@@ -72,6 +72,23 @@ fn classify(e: anyhow::Error) -> ConnectError {
 
 // --- Helpers ---------------------------------------------------------------
 
+/// A `failed_precondition` error carrying the leader hint.
+fn not_leader(leader_id: Option<u64>, leader_addr: Option<String>) -> ConnectError {
+    ConnectError::failed_precondition(format!(
+        "not leader; {}",
+        match (leader_id, leader_addr) {
+            (Some(id), Some(addr)) => format!("leader is node {id} at {addr}"),
+            (Some(id), None) => format!("leader is node {id}"),
+            _ => "leader unknown".to_string(),
+        }
+    ))
+}
+
+/// Lowercase hex of a byte slice (fingerprints on the wire).
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// Build the stream of QueryEvents for one relation's result rows.
 ///
 /// `columnar` selects the batch encoding: typed packed columns vs. all-ANY
@@ -200,6 +217,38 @@ impl pb::MangleService for MangleServiceImpl {
             request.batch_size as usize
         };
         let limit = request.limit as usize;
+
+        // Read consistency (plan §3.7). NONE (default): any node answers
+        // from local state. WEAK: leader-only. STRONG: propose a no-op and
+        // wait for it to apply — the local state then reflects everything
+        // committed before this read. Outside replicated mode all levels
+        // are equivalent (local state is the only state).
+        let consistency = request
+            .consistency
+            .as_known()
+            .unwrap_or(pb::ConsistencyLevel::NONE);
+        if let Some(engine) = &self.engine {
+            match consistency {
+                pb::ConsistencyLevel::WEAK => {
+                    if !engine.is_leader().await {
+                        let (leader_id, leader_addr) = engine.leader_hint();
+                        return Err(not_leader(leader_id, leader_addr));
+                    }
+                }
+                pb::ConsistencyLevel::STRONG => {
+                    engine.read_barrier().await.map_err(|e| match e {
+                        mangle_raft::WriteError::NotLeader {
+                            leader_id,
+                            leader_addr,
+                        } => not_leader(leader_id, leader_addr),
+                        mangle_raft::WriteError::Other(msg) => {
+                            ConnectError::unavailable(msg)
+                        }
+                    })?;
+                }
+                _ => {}
+            }
+        }
 
         let resolved = match request.query.as_ref() {
             Some(Query::Text(t)) => resolve_text_query(t).map_err(classify)?,
@@ -537,6 +586,23 @@ impl pb::MangleService for MangleServiceImpl {
             return Response::ok(pb::NodeStatusResponse {
                 raft_enabled: false,
                 version: env!("CARGO_PKG_VERSION").to_string(),
+                fingerprints: {
+                    let store = self.state.read().unwrap();
+                    store
+                        .edb_fingerprints()
+                        .into_iter()
+                        .map(|(name, (program_hash, edb_fp))| {
+                            (
+                                name,
+                                pb::ProgramFingerprint {
+                                    program_hash: hex(&program_hash),
+                                    edb_fingerprint: edb_fp.as_deref().map(hex).unwrap_or_default(),
+                                    ..Default::default()
+                                },
+                            )
+                        })
+                        .collect()
+                },
                 ..Default::default()
             });
         };
@@ -553,6 +619,26 @@ impl pb::MangleService for MangleServiceImpl {
                 ..Default::default()
             })
             .collect();
+
+        // Per-program fingerprints for cross-node comparison (plan §4.4).
+        let fingerprints = {
+            let store = self.state.read().unwrap();
+            store
+                .edb_fingerprints()
+                .into_iter()
+                .map(|(name, (program_hash, edb_fp))| {
+                    (
+                        name,
+                        pb::ProgramFingerprint {
+                            program_hash: hex(&program_hash),
+                            edb_fingerprint: edb_fp.as_deref().map(hex).unwrap_or_default(),
+                            ..Default::default()
+                        },
+                    )
+                })
+                .collect()
+        };
+
         Response::ok(pb::NodeStatusResponse {
             node_id: engine.id(),
             raft_enabled: true,
@@ -562,6 +648,7 @@ impl pb::MangleService for MangleServiceImpl {
             last_log_index: last_log,
             members,
             version: env!("CARGO_PKG_VERSION").to_string(),
+            fingerprints,
             ..Default::default()
         })
     }

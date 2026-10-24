@@ -562,6 +562,25 @@ impl ProgramStore {
         Ok(())
     }
 
+    /// (program name → (program hash, EDB fingerprint)) for all loaded
+    /// programs, order-independent. `NodeStatus` reports these so
+    /// operators can compare nodes for external-EDB divergence (plan
+    /// §4.4); the values are hex-encoded on the wire.
+    pub fn edb_fingerprints(&self) -> BTreeMap<String, ([u8; 32], Option<Vec<u8>>)> {
+        self.programs
+            .iter()
+            .map(|(name, prog)| {
+                (
+                    name.clone(),
+                    (
+                        prog.db.program_hash(),
+                        prog.db.edb_fingerprint().map(|fp| fp.0),
+                    ),
+                )
+            })
+            .collect()
+    }
+
     /// Canonical, order-independent view of the whole FSM state: program
     /// registry (name → source), every relation's facts, and the fact
     /// ledgers. Used by the determinism tests; the snapshot serializer

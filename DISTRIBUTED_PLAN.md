@@ -556,12 +556,33 @@ recovery docs.
 
 ### Phase 3 — Consistency levels & client ergonomics
 
-1. `ConsistencyLevel` on `QueryRequest`: NONE / WEAK / STRONG (NOOP barrier).
-2. `NodeStatus`/`Leader` admin RPCs; leader-change events surfaced.
-3. EDB fingerprint reporting in `NodeStatus` (§4.4).
-4. Optional: LINEARIZABLE via read-index.
+**Status: implemented** (LINEARIZABLE deferred — optional per plan).
 
-**Deliverable**: rqlite-parity read semantics.
+**Goal: rqlite-parity read semantics.**
+
+1. ✅ `ConsistencyLevel` on `QueryRequest` (`NONE` default / `WEAK` /
+   `STRONG`):
+   - **NONE** — any node answers from its local applied state (cheap,
+     eventually consistent; outside replicated mode it is trivially
+     exact, so all levels behave the same there).
+   - **WEAK** — the leader answers locally; followers fail with
+     `failed_precondition` + leader hint.
+   - **STRONG** — the leader proposes a `Noop` command through Raft and
+     waits for it to apply (`Engine::read_barrier`); the response then
+     reflects everything committed before the read. Followers reject
+     (a barrier is a write).
+2. ✅ `NodeStatus` reports per-program fingerprints (program source
+   hash + external-EDB fingerprint, hex-encoded) so operators can
+   compare nodes for external-EDB divergence (§4.4). Node status/leader
+   identification is via `NodeStatus` and error hints; separate
+   leader-change event subscription is deferred (the client redirect
+   workflow is covered).
+3. ~~Optional: LINEARIZABLE via read-index.~~ Deferred to Phase 4+.
+
+**Deliverable** (met): rqlite-parity read semantics. Cluster tests
+cover all three levels (leader/follower acceptance and rejection,
+barrier advancing the applied index, fingerprint agreement across
+nodes); verified against real binaries.
 
 ### Phase 4 — Production hardening
 

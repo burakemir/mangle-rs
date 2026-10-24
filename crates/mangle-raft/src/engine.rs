@@ -208,8 +208,9 @@ impl Engine {
         self.raft.metrics()
     }
 
-    /// Wait until the node has applied at least `index` (used at startup
-    /// to confirm replay finished before serving traffic).
+    /// Wait until the local FSM has applied at least `index` (used at
+    /// startup to confirm replay finished, and by STRONG reads to wait
+    /// for their barrier entry).
     pub async fn wait_applied(&self, index: u64) {
         let mut rx = self.metrics();
         loop {
@@ -223,6 +224,26 @@ impl Engine {
                 return;
             }
         }
+    }
+
+    /// The index of the last locally applied log entry (0 if none).
+    pub fn last_applied(&self) -> u64 {
+        self.raft
+            .metrics()
+            .borrow()
+            .last_applied
+            .map(|id| id.index)
+            .unwrap_or(0)
+    }
+
+    /// STRONG-read barrier (plan §3.7): propose a no-op through Raft and
+    /// wait until it is applied locally. Once it returns, the local state
+    /// reflects everything committed before this read. Fails with
+    /// [`WriteError::NotLeader`] on followers, like any write.
+    pub async fn read_barrier(&self) -> Result<u64, WriteError> {
+        let (index, _) = self.write(mangle_proto::Command::Noop).await?;
+        self.wait_applied(index).await;
+        Ok(index)
     }
 
     /// Shut down the Raft core task.

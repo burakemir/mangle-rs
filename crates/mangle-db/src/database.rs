@@ -276,6 +276,23 @@ impl Database {
         Ok(state.store.relation_names())
     }
 
+    /// The program's source hash (deterministic across nodes).
+    pub fn program_hash(&self) -> [u8; 32] {
+        let state = self.state.read().map_err(|_| anyhow!("lock poisoned"));
+        match state {
+            Ok(state) => state.program_hash,
+            Err(_) => [0u8; 32],
+        }
+    }
+
+    /// The combined fingerprint of the external EDB sources, if all of
+    /// them provide one (`None` = "always recompute"). Used by
+    /// `NodeStatus` to surface cluster-wide EDB divergence (plan §4.4).
+    pub fn edb_fingerprint(&self) -> Option<Fingerprint> {
+        let state = self.state.read().ok()?;
+        state.edb_fingerprint.clone()
+    }
+
     /// Whether facts of this relation can be mutated through the API.
     ///
     /// Relations defined by the program source — by rules *or* by facts,
