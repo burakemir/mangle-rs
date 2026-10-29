@@ -99,6 +99,11 @@ impl<'a> Planner<'a> {
         let blocks = self.split_transforms(transform);
         let num_blocks = blocks.len();
 
+        // Temp relations live in the shared store, so their names must be
+        // unique across the whole program, not just within this planner.
+        // Each rule gets a fresh Planner, so the rule id goes in the name.
+        let temp_prefix = format!("temp_grp_r{}", rule_id.index());
+
         let mut ops = Vec::new();
         let mut current_source: Option<(NameId, Vec<NameId>)> = None;
         let mut bound_vars = FxHashSet::default();
@@ -122,7 +127,7 @@ impl<'a> Planner<'a> {
                     ops.push(op);
                 } else {
                     // Materialize to temp
-                    let temp_rel = self.fresh_var("temp_grp");
+                    let temp_rel = self.fresh_var(&temp_prefix);
                     let mut capture_vars: Vec<NameId> = Vec::new(); // Will be populated by continuation
 
                     let op = self.plan_join_sequence(
@@ -155,7 +160,7 @@ impl<'a> Planner<'a> {
                     })?;
                     ops.push(op);
                 } else {
-                    let next_temp = self.fresh_var("temp_grp");
+                    let next_temp = self.fresh_var(&temp_prefix);
                     let mut next_vars: Vec<NameId> = Vec::new();
 
                     let op = self.plan_block_k(src_rel, src_vars, &block, |_, v| {
